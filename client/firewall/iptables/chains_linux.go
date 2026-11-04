@@ -18,12 +18,12 @@ func (r *family) createContainers() error {
 		chain string
 		table string
 	}{
-		{chainRTFwdIn, tableFilter},
-		{chainRTFwdOut, tableFilter},
-		{chainRTPre, tableMangle},
-		{chainRTNAT, tableNat},
-		{chainRTRdr, tableNat},
-		{chainRTMSSClamp, tableMangle},
+		{r.names.rtFwdIn, tableFilter},
+		{r.names.rtFwdOut, tableFilter},
+		{r.names.rtPre, tableMangle},
+		{r.names.rtNAT, tableNat},
+		{r.names.rtRdr, tableNat},
+		{r.names.rtMSSClamp, tableMangle},
 	} {
 		// Fallback: clear chains that survived an unclean shutdown.
 		if ok, _ := r.iptablesClient.ChainExists(chainInfo.table, chainInfo.chain); ok {
@@ -36,11 +36,11 @@ func (r *family) createContainers() error {
 		}
 	}
 
-	if err := r.insertEstablishedRule(chainRTFwdIn); err != nil {
+	if err := r.insertEstablishedRule(r.names.rtFwdIn); err != nil {
 		return fmt.Errorf("insert established rule: %w", err)
 	}
 
-	if err := r.insertEstablishedRule(chainRTFwdOut); err != nil {
+	if err := r.insertEstablishedRule(r.names.rtFwdOut); err != nil {
 		return fmt.Errorf("insert established rule: %w", err)
 	}
 
@@ -61,21 +61,21 @@ func (r *family) createContainers() error {
 
 func (r *family) addJumpRules() error {
 	// Jump to nat chain
-	natRule := jumpRuleSpec(chainRTNAT)
+	natRule := jumpRuleSpec(r.names.rtNAT)
 	if err := r.iptablesClient.Insert(tableNat, chainPostrouting, 1, natRule...); err != nil {
 		return fmt.Errorf("add nat postrouting jump rule: %w", err)
 	}
 	r.rules[jumpNATPost] = natRule
 
 	// Jump to mangle prerouting chain
-	preRule := jumpRuleSpec(chainRTPre)
+	preRule := jumpRuleSpec(r.names.rtPre)
 	if err := r.iptablesClient.Insert(tableMangle, chainPrerouting, 1, preRule...); err != nil {
 		return fmt.Errorf("add mangle prerouting jump rule: %w", err)
 	}
 	r.rules[jumpManglePre] = preRule
 
 	// Jump to nat prerouting chain
-	rdrRule := jumpRuleSpec(chainRTRdr)
+	rdrRule := jumpRuleSpec(r.names.rtRdr)
 	if err := r.iptablesClient.Insert(tableNat, chainPrerouting, 1, rdrRule...); err != nil {
 		return fmt.Errorf("add nat prerouting jump rule: %w", err)
 	}
@@ -123,12 +123,12 @@ func (r *family) seedInitialEntries() {
 	established := getConntrackEstablished()
 
 	r.appendToEntries(chainInput, []string{"-i", r.wgIface.Name(), "-j", "DROP"})
-	r.appendToEntries(chainInput, []string{"-i", r.wgIface.Name(), "-j", chainACLInput})
+	r.appendToEntries(chainInput, []string{"-i", r.wgIface.Name(), "-j", r.names.aclInput})
 	r.appendToEntries(chainInput, append([]string{"-i", r.wgIface.Name()}, established...))
 
 	r.appendToEntries(chainForward, []string{"-i", r.wgIface.Name(), "-j", "DROP"})
-	r.appendToEntries(chainForward, []string{"-o", r.wgIface.Name(), "-j", chainRTFwdOut})
-	r.appendToEntries(chainForward, []string{"-i", r.wgIface.Name(), "-j", chainRTFwdIn})
+	r.appendToEntries(chainForward, []string{"-o", r.wgIface.Name(), "-j", r.names.rtFwdOut})
+	r.appendToEntries(chainForward, []string{"-i", r.wgIface.Name(), "-j", r.names.rtFwdIn})
 
 	// Mangle FORWARD guard: when external DNAT redirects traffic from
 	// the wg interface, it traverses FORWARD instead of INPUT,
@@ -164,10 +164,28 @@ func (r *family) seedInitialEntries() {
 func (r *family) seedInitialOptionalEntries() {
 	r.optionalEntries[chainForward] = []entry{
 		{
-			spec:     []string{"-m", "mark", "--mark", fmt.Sprintf("%#x", nbnet.PreroutingFwmarkRedirected), "-j", "ACCEPT"},
+			spec:     r.redirectedAcceptSpec(),
 			position: 2,
 		},
 	}
+}
+
+// redirectedAcceptSpec is the FORWARD accept for redirected traffic. Slot 0
+// keeps the interface agnostic rule. A slot above 0 sits above the jumps of the
+// slots below it, so an interface agnostic copy would accept their marked
+// traffic before their route ACL and DROP rules; it matches its own interface
+// and carries a tag so that the stop of one slot deletes only its own copy.
+func (r *family) redirectedAcceptSpec() ruleSpec {
+	tag := r.names.acceptTag()
+	var spec []string
+	if tag != "" {
+		spec = append(spec, "-i", r.wgIface.Name())
+	}
+	spec = append(spec, "-m", "mark", "--mark", fmt.Sprintf("%#x", nbnet.PreroutingFwmarkRedirected))
+	if tag != "" {
+		spec = append(spec, "-m", "comment", "--comment", tag)
+	}
+	return append(spec, "-j", "ACCEPT")
 }
 
 func (r *family) appendToEntries(chain chainKey, spec ruleSpec) {
@@ -175,8 +193,8 @@ func (r *family) appendToEntries(chain chainKey, spec ruleSpec) {
 }
 
 func (r *family) createDefaultChains() error {
-	if err := r.iptablesClient.NewChain(tableFilter, chainACLInput); err != nil {
-		return fmt.Errorf("create %s chain: %w", chainACLInput, err)
+	if err := r.iptablesClient.NewChain(tableFilter, r.names.aclInput); err != nil {
+		return fmt.Errorf("create %s chain: %w", r.names.aclInput, err)
 	}
 
 	for chain, rules := range r.entries {
@@ -228,13 +246,13 @@ func (r *family) cleanUpDefaultForwardRules() error {
 		chain string
 		table string
 	}{
-		{chainRTFwdIn, tableFilter},
-		{chainRTFwdOut, tableFilter},
-		{chainRTPre, tableMangle},
-		{chainRTNAT, tableNat},
-		{chainRTRdr, tableNat},
-		{chainNATOutput, tableNat},
-		{chainRTMSSClamp, tableMangle},
+		{r.names.rtFwdIn, tableFilter},
+		{r.names.rtFwdOut, tableFilter},
+		{r.names.rtPre, tableMangle},
+		{r.names.rtNAT, tableNat},
+		{r.names.rtRdr, tableNat},
+		{r.names.natOutput, tableNat},
+		{r.names.rtMSSClamp, tableMangle},
 	} {
 		ok, err := r.iptablesClient.ChainExists(chainInfo.table, chainInfo.chain)
 		if err != nil {
@@ -255,11 +273,11 @@ func (r *family) cleanJumpRules() error {
 	// locations maps each jump rule to the built-in table and chain it
 	// was inserted into, plus the netbird chain it targets.
 	locations := map[firewall.RuleID]struct{ table, chain, target string }{
-		jumpNATPost:   {tableNat, chainPostrouting, chainRTNAT},
-		jumpManglePre: {tableMangle, chainPrerouting, chainRTPre},
-		jumpNATPre:    {tableNat, chainPrerouting, chainRTRdr},
-		jumpMSSClamp:  {tableMangle, chainForward, chainRTMSSClamp},
-		jumpNATOutput: {tableNat, chainOutput, chainNATOutput},
+		jumpNATPost:   {tableNat, chainPostrouting, r.names.rtNAT},
+		jumpManglePre: {tableMangle, chainPrerouting, r.names.rtPre},
+		jumpNATPre:    {tableNat, chainPrerouting, r.names.rtRdr},
+		jumpMSSClamp:  {tableMangle, chainForward, r.names.rtMSSClamp},
+		jumpNATOutput: {tableNat, chainOutput, r.names.natOutput},
 	}
 
 	var merr *multierror.Error
@@ -311,9 +329,9 @@ func (r *family) cleanAclChains() error {
 }
 
 func (r *family) cleanInputAclChain() error {
-	ok, err := r.iptablesClient.ChainExists(tableFilter, chainACLInput)
+	ok, err := r.iptablesClient.ChainExists(tableFilter, r.names.aclInput)
 	if err != nil {
-		return fmt.Errorf("check chain %s: %w", chainACLInput, err)
+		return fmt.Errorf("check chain %s: %w", r.names.aclInput, err)
 	}
 	if !ok {
 		return nil
@@ -332,8 +350,8 @@ func (r *family) cleanInputAclChain() error {
 		}
 	}
 
-	if err := r.iptablesClient.ClearAndDeleteChain(tableFilter, chainACLInput); err != nil {
-		merr = multierror.Append(merr, fmt.Errorf("clear and delete %s chain: %w", chainACLInput, err))
+	if err := r.iptablesClient.ClearAndDeleteChain(tableFilter, r.names.aclInput); err != nil {
+		merr = multierror.Append(merr, fmt.Errorf("clear and delete %s chain: %w", r.names.aclInput, err))
 	}
 
 	return nberrors.FormatErrorOrNil(merr)

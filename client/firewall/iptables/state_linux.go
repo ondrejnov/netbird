@@ -14,6 +14,8 @@ type InterfaceState struct {
 	NameStr   string         `json:"name"`
 	WGAddress wgaddr.Address `json:"wg_address"`
 	MTU       uint16         `json:"mtu"`
+	// Slot is omitted for slot 0 so its persisted state keeps today's format.
+	Slot uint `json:"slot,omitempty"`
 }
 
 func (i *InterfaceState) Name() string {
@@ -47,7 +49,7 @@ func (s *ShutdownState) Cleanup() error {
 	if mtu == 0 {
 		mtu = iface.DefaultMTU
 	}
-	ipt, err := Create(s.InterfaceState, mtu)
+	ipt, err := Create(s.InterfaceState, mtu, WithSlot(s.InterfaceState.Slot))
 	if err != nil {
 		return fmt.Errorf("create iptables manager: %w", err)
 	}
@@ -66,7 +68,7 @@ func (s *ShutdownState) Cleanup() error {
 	// Clean up v6 state even if the current run has no IPv6.
 	// The previous run may have left ip6tables rules behind.
 	if !ipt.hasIPv6() {
-		if err := ipt.createIPv6Components(s.InterfaceState, mtu); err != nil {
+		if err := ipt.createIPv6Components(s.InterfaceState, mtu, WithSlot(s.InterfaceState.Slot)); err != nil {
 			log.Warnf("failed to create v6 components for cleanup: %v", err)
 		}
 	}
