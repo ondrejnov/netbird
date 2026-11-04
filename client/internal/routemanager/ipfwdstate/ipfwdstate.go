@@ -1,44 +1,66 @@
 package ipfwdstate
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/hashicorp/go-multierror"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/netbirdio/netbird/client/internal/routemanager/systemops"
+	nberrors "github.com/netbirdio/netbird/client/errors"
 )
 
 // IPForwardingState tracks v4 and v6 IP-forwarding sysctl enables with
 // independent refcounts so a v4-only routing setup doesn't flip v6 sysctls.
+// Without WithHostState the refcounts are private to the instance.
 type IPForwardingState struct {
 	mu sync.Mutex
 
-	v4Count int
-	v6Count int
+	host *HostState
 
 	// routingV4/routingV6 track whether the routing path currently holds a
 	// reference, so repeated EnableRouting calls (one per network-map update)
 	// hold at most one reference per family.
 	routingV4 bool
 	routingV6 bool
+	closed    bool
 
 	wgIfaceName string
-	v6Saved     map[string]int
+}
+
+// Option configures an IPForwardingState.
+type Option func(*IPForwardingState)
+
+// WithHostState makes the instance share the refcounts and the stored
+// originals with every other instance given the same HostState.
+func WithHostState(host *HostState) Option {
+	return func(f *IPForwardingState) {
+		if host != nil {
+			f.host = host
+		}
+	}
 }
 
 // NewIPForwardingState returns a state tracker for the IP-forwarding sysctls.
-// wgIfaceName is excluded from the per-interface accept_ra handling.
-func NewIPForwardingState(wgIfaceName string) *IPForwardingState {
-	return &IPForwardingState{wgIfaceName: wgIfaceName}
+// wgIfaceName is excluded from the per-interface accept_ra handling, as is the
+// interface of every other instance sharing the same HostState.
+func NewIPForwardingState(wgIfaceName string, opts ...Option) *IPForwardingState {
+	f := &IPForwardingState{wgIfaceName: wgIfaceName}
+	for _, opt := range opts {
+		opt(f)
+	}
+	if f.host == nil {
+		f.host = newHostState(false)
+	}
+	f.host.attach(wgIfaceName)
+	return f
 }
 
 // Counts returns the current v4 and v6 refcounts. Intended for diagnostics
 // and tests.
 func (f *IPForwardingState) Counts() (v4, v6 int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.v4Count, f.v6Count
+	return f.host.counts()
 }
 
 // RequestRouting takes the forwarding references for the routing path. It is
@@ -51,8 +73,12 @@ func (f *IPForwardingState) RequestRouting(v6 bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.closed {
+		return errors.New("IP forwarding state is closed")
+	}
+
 	if !f.routingV4 {
-		if err := f.requestV4(); err != nil {
+		if err := f.host.requestV4(); err != nil {
 			return err
 		}
 		f.routingV4 = true
@@ -63,13 +89,13 @@ func (f *IPForwardingState) RequestRouting(v6 bool) error {
 			return nil
 		}
 		f.routingV6 = false
-		return f.releaseV6()
+		return f.host.releaseV6()
 	}
 
 	if f.routingV6 {
 		return nil
 	}
-	if err := f.requestV6(); err != nil {
+	if err := f.host.requestV6(f.wgIfaceName); err != nil {
 		log.Warnf("enable IPv6 forwarding for routing: %v", err)
 		return nil
 	}
@@ -83,76 +109,39 @@ func (f *IPForwardingState) ReleaseRouting() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	return f.releaseRoutingLocked()
+}
+
+func (f *IPForwardingState) releaseRoutingLocked() error {
+	var result *multierror.Error
 	if f.routingV4 {
 		f.routingV4 = false
-		f.releaseV4()
+		if err := f.host.releaseV4(); err != nil {
+			result = multierror.Append(result, err)
+		}
 	}
 	if f.routingV6 {
 		f.routingV6 = false
-		return f.releaseV6()
-	}
-	return nil
-}
-
-func (f *IPForwardingState) requestV4() error {
-	if f.v4Count == 0 {
-		if err := systemops.EnableV4IPForwarding(); err != nil {
-			return fmt.Errorf("enable IPv4 forwarding: %w", err)
+		if err := f.host.releaseV6(); err != nil {
+			result = multierror.Append(result, err)
 		}
-		log.Info("IPv4 forwarding enabled")
 	}
-	f.v4Count++
-	return nil
+	return nberrors.FormatErrorOrNil(result)
 }
 
-func (f *IPForwardingState) releaseV4() {
-	if f.v4Count > 0 {
-		f.v4Count--
-	}
-}
+// Close releases the held references and detaches the instance's interface
+// from the shared state. Further requests are rejected. It is idempotent.
+func (f *IPForwardingState) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
-func (f *IPForwardingState) requestV6() error {
-	if f.v6Count == 0 {
-		saved, err := systemops.EnableV6IPForwarding(f.wgIfaceName)
-		if err != nil {
-			if rerr := systemops.DisableV6IPForwarding(saved); rerr != nil {
-				log.Warnf("rollback partial v6 sysctls: %v", rerr)
-			}
-			return fmt.Errorf("enable IPv6 forwarding: %w", err)
-		}
-		// A failed restore on a previous release keeps its saved values; those
-		// are the true originals, so keep them over what this enable captured.
-		if f.v6Saved == nil {
-			f.v6Saved = saved
-		} else {
-			for k, v := range saved {
-				if _, ok := f.v6Saved[k]; !ok {
-					f.v6Saved[k] = v
-				}
-			}
-		}
-		log.Info("IPv6 forwarding enabled")
-	}
-	f.v6Count++
-	return nil
-}
-
-func (f *IPForwardingState) releaseV6() error {
-	if f.v6Count == 0 {
+	if f.closed {
 		return nil
 	}
-	f.v6Count--
-	if f.v6Count > 0 {
-		return nil
+	f.closed = true
+	f.host.detach(f.wgIfaceName)
+	if err := f.releaseRoutingLocked(); err != nil {
+		return fmt.Errorf("release routing: %w", err)
 	}
-
-	// Keep the saved values on failure so a later release or enable/release
-	// cycle can still restore them; re-restoring an already-restored key is a
-	// no-op since the sysctl already holds the desired value.
-	if err := systemops.DisableV6IPForwarding(f.v6Saved); err != nil {
-		return fmt.Errorf("disable IPv6 forwarding: %w", err)
-	}
-	f.v6Saved = nil
-	log.Info("IPv6 forwarding disabled")
 	return nil
 }
