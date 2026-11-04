@@ -650,8 +650,68 @@ func TestIsolationIPv6IsSoft(t *testing.T) {
 
 		withV6 := isoFakeAddress(2)
 		withV6.IPv6, withV6.IPv6Net = netip.MustParseAddr("fd00::1"), netip.MustParsePrefix("fd00::/64")
-		assert.Error(t, addToIsolation(isolation, "wt2", withV6), "a session with v6 cannot be isolated without ip6tables")
+		disabled, err := addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err, "a host that cannot isolate v6 must not stop the session")
+		assert.True(t, disabled, "the session must be told to leave v6 alone")
 		assert.NoError(t, isolation.Verify(), "the running session must stay isolated")
+		assert.Equal(t, 2, isoEntryCount(t, isoSetOwn), "v4 of the session must be isolated")
+		assert.Equal(t, withV6.Network, isolation.members["wt2"].overlay)
+		assert.False(t, isolation.members["wt2"].overlay6.IsValid(), "v6 must not be in the isolation")
+
+		disabled, err = addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err)
+		assert.True(t, disabled, "a repeated Add must give the same answer")
+	})
+
+	t.Run("host gets ip6tables later", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		require.NoError(t, isolation.plane6.teardown())
+		plane6 := isolation.plane6
+		isolation.plane6 = nil
+
+		withV6 := isoFakeAddress(2)
+		withV6.IPv6, withV6.IPv6Net = netip.MustParseAddr("fd00::1"), netip.MustParsePrefix("fd00::/64")
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+		disabled, err := addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err)
+		require.True(t, disabled)
+
+		isolation.plane6 = plane6
+		disabled, err = addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err)
+		assert.False(t, disabled, "the session gets its v6 once the host can isolate it")
+		assert.NoError(t, isolation.Verify())
+		assert.Equal(t, 1, isoEntryCount(t, isoSetOwn+isoSetV6Suffix), "the session owns its v6 overlay now")
+		assert.Equal(t, 4, isoEntryCount(t, isoSetIfaces+isoSetV6Suffix+"-0"), "both interfaces must be in the v6 set")
+	})
+
+	t.Run("v6 half refuses a new session", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		withV6 := func(index int) wgaddr.Address {
+			addr := isoFakeAddress(index)
+			addr.IPv6 = netip.AddrFrom16([16]byte{0xfd, 0, 0, byte(index), 15: 1})
+			addr.IPv6Net = netip.PrefixFrom(netip.AddrFrom16([16]byte{0xfd, 0, 0, byte(index)}), 64)
+			return addr
+		}
+		first, second := withV6(1), withV6(2)
+		require.NoError(t, addToIsolation(isolation, "wt1", first))
+		require.NoError(t, addToIsolation(isolation, "wt2", second))
+
+		removeIsolationSet(t, isolation.plane6, isoSetOwn)
+		disabled, err := addReportingIPv6(isolation, "wt3", withV6(3))
+		require.NoError(t, err, "the v6 set to change is gone, v4 is fine")
+		assert.True(t, disabled)
+		assert.NoError(t, verifySetEntries(isoSetOwn, append(prefixEntries("wt1", first.Network),
+			append(prefixEntries("wt2", second.Network), prefixEntries("wt3", withV6(3).Network)...)...)),
+			"v4 of the session must be isolated")
+		assert.NoError(t, verifySetEntries(isoSetIfaces+isoSetV6Suffix+"-0", ifaceHalves6("wt1", "wt2")),
+			"the session must not be left in the v6 interface set")
+
+		restoreIsolationSet(t, isolation.plane6, isoSetOwn, ipset.TypeHashNetIface,
+			prefixEntry(first.IPv6Net, "wt1"), prefixEntry(second.IPv6Net, "wt2"))
+		assert.NoError(t, isolation.Verify(), "kernel and members must agree once the host is repaired")
+		require.NoError(t, isolation.Remove("wt3"))
+		assert.NoError(t, isolation.Verify())
 	})
 
 	t.Run("v6 installed late covers running sessions", func(t *testing.T) {
@@ -709,6 +769,15 @@ func prefixEntries(name IfaceName, prefixes ...netip.Prefix) []string {
 	return entries
 }
 
+// ifaceHalves6 are the entries the v6 interface set holds for the sessions.
+func ifaceHalves6(names ...IfaceName) []string {
+	var entries []string
+	for _, name := range names {
+		entries = append(entries, prefixEntries(name, halfSpaces(true)...)...)
+	}
+	return entries
+}
+
 // removeIsolationSet makes the kernel refuse every change of a set. The input rule is the only one
 // holding on to the overlay sets.
 func removeIsolationSet(t *testing.T, plane *isolationPlane, base string) {
@@ -741,8 +810,11 @@ func TestIsolationFailedUpdateKeepsState(t *testing.T) {
 
 		next := isoFakeAddress(3)
 		next.IPv6, next.IPv6Net = netip.MustParseAddr("fd00:3::1"), netip.MustParsePrefix("fd00:3::/64")
-		assert.Error(t, addToIsolation(isolation, "wt1", next), "a session with v6 cannot be isolated without ip6tables")
-		assert.NoError(t, isolation.Verify(), "the running session must keep its overlay")
+		disabled, err := addReportingIPv6(isolation, "wt1", next)
+		require.NoError(t, err, "a host that cannot isolate v6 must not stop the update")
+		assert.True(t, disabled)
+		assert.NoError(t, isolation.Verify(), "the running session must be isolated on its new overlay")
+		assert.Equal(t, next.Network, isolation.members["wt1"].overlay)
 
 		require.NoError(t, isolation.Remove("wt1"))
 		assert.NoError(t, isolation.Verify(), "the other session must not pay for the failed update")
@@ -761,13 +833,16 @@ func TestIsolationFailedUpdateKeepsState(t *testing.T) {
 		require.NoError(t, addToIsolation(isolation, "wt2", second))
 
 		removeIsolationSet(t, isolation.plane6, isoSetOwn)
-		assert.Error(t, addToIsolation(isolation, "wt1", withV6(3)), "the v6 set to change is gone")
+		disabled, err := addReportingIPv6(isolation, "wt1", withV6(3))
+		require.NoError(t, err, "the v6 set to change is gone, v4 is fine")
+		assert.True(t, disabled, "the session must be told its new v6 is not isolated")
 
-		wantOwn := append(prefixEntries("wt1", first.Network), prefixEntries("wt2", second.Network)...)
-		assert.NoError(t, verifySetEntries(isoSetOwn, wantOwn), "v4 must be back on the old overlay")
-		assert.NoError(t, verifySetEntries(isoSetOverlays, prefixEntries("", first.Network, second.Network)),
-			"v4 must be back on the old overlay")
-		assert.Equal(t, first.Network, isolation.members["wt1"].overlay, "the session keeps its old overlay")
+		wantOwn := append(prefixEntries("wt1", withV6(3).Network), prefixEntries("wt2", second.Network)...)
+		assert.NoError(t, verifySetEntries(isoSetOwn, wantOwn), "v4 must be on the new overlay")
+		assert.NoError(t, verifySetEntries(isoSetOverlays, prefixEntries("", withV6(3).Network, second.Network)),
+			"v4 must be on the new overlay")
+		assert.Equal(t, withV6(3).Network, isolation.members["wt1"].overlay, "the session moved its v4 overlay")
+		assert.Equal(t, first.IPv6Net, isolation.members["wt1"].overlay6, "v6 stays on what the kernel still holds")
 
 		restoreIsolationSet(t, isolation.plane6, isoSetOwn, ipset.TypeHashNetIface,
 			prefixEntry(first.IPv6Net, "wt1"), prefixEntry(second.IPv6Net, "wt2"))

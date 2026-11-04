@@ -606,6 +606,52 @@ func TestIsolationIPv6IsSoft(t *testing.T) {
 		assert.NoError(t, isolation.Verify())
 	})
 
+	t.Run("kernel refuses the v6 elements of a new session", func(t *testing.T) {
+		isolation := NewIsolation()
+		t.Cleanup(func() { assert.NoError(t, isolation.RemoveAll()) })
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+
+		withV6 := isoFakeAddress(2)
+		withV6.IPv6, withV6.IPv6Net = netip.MustParseAddr("fd00:bb::1"), netip.MustParsePrefix("fd00:bb::/64")
+		blocker := blockIsolationOwn6(t, "wt2", netip.MustParsePrefix("fd00:bb::/65"))
+
+		disabled, err := addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err, "a v6 failure must not stop the session")
+		assert.True(t, disabled, "the session must be told to leave v6 alone")
+		assert.Equal(t, 2, isoElementCount(t, isoSetOwn), "v4 of the session must be isolated")
+		assert.Equal(t, 1, isoElementCount(t, isoSetOwn6), "only the foreign element may be in the v6 set")
+		assert.False(t, isolation.members["wt2"].overlay6.IsValid(), "v6 must not be in the isolation")
+
+		blocker()
+		assert.NoError(t, isolation.Verify(), "kernel and members must agree once the host is repaired")
+		disabled, err = addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err)
+		assert.False(t, disabled, "the session gets its v6 once the kernel takes it")
+		assert.Equal(t, 1, isoElementCount(t, isoSetOwn6))
+		assert.NoError(t, isolation.Verify())
+	})
+
+	t.Run("kernel refuses the new v6 elements of a running session", func(t *testing.T) {
+		isolation := NewIsolation()
+		t.Cleanup(func() { assert.NoError(t, isolation.RemoveAll()) })
+		first := isoFakeAddress(1)
+		first.IPv6, first.IPv6Net = netip.MustParseAddr("fd00:aa::1"), netip.MustParsePrefix("fd00:aa::/64")
+		require.NoError(t, addToIsolation(isolation, "wt1", first))
+
+		next := isoFakeAddress(3)
+		next.IPv6, next.IPv6Net = netip.MustParseAddr("fd00:bb::1"), netip.MustParsePrefix("fd00:bb::/64")
+		blocker := blockIsolationOwn6(t, "wt1", netip.MustParsePrefix("fd00:bb::/65"))
+
+		disabled, err := addReportingIPv6(isolation, "wt1", next)
+		require.NoError(t, err, "a v6 failure must not stop the update")
+		assert.True(t, disabled)
+		assert.Equal(t, next.Network, isolation.members["wt1"].overlay, "v4 must move")
+		assert.False(t, isolation.members["wt1"].overlay6.IsValid(), "the old v6 overlay must leave")
+
+		blocker()
+		assert.NoError(t, isolation.Verify(), "the old v6 overlay must not stay in the sets")
+	})
+
 	t.Run("overlapping v6 overlay is skipped", func(t *testing.T) {
 		isolation := NewIsolation()
 		t.Cleanup(func() { assert.NoError(t, isolation.RemoveAll()) })
@@ -712,6 +758,28 @@ func TestIsolationOverlappingIPv6WithRealPackets(t *testing.T) {
 			assert.False(t, reaches(t, a.ns, a.peer4, nil, b.addr.IP), "v4 must stay isolated")
 			assert.True(t, reaches(t, b.ns, b.peer4, nil, b.addr.IP), "B keeps its v4")
 		})
+	}
+}
+
+// blockIsolationOwn6 puts an element of a session in front of the v6 set that overlaps the overlay
+// a test is going to add, which the kernel refuses. The result removes it.
+func blockIsolationOwn6(t *testing.T, name IfaceName, overlay netip.Prefix) (remove func()) {
+	t.Helper()
+	sets := newIsolationSets()
+	var own isolationElements
+	for _, batch := range sets.overlayElements(name, overlay) {
+		if batch.set.Name == isoSetOwn6 {
+			own = batch
+		}
+	}
+	require.NotNil(t, own.set)
+	conn := &nftables.Conn{}
+	require.NoError(t, conn.SetAddElements(own.set, own.elements))
+	require.NoError(t, conn.Flush())
+	return func() {
+		conn := &nftables.Conn{}
+		require.NoError(t, conn.SetDeleteElements(own.set, own.elements))
+		require.NoError(t, conn.Flush())
 	}
 }
 
