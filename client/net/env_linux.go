@@ -4,8 +4,12 @@ package net
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,17 +22,29 @@ import (
 const (
 	// these have the same effect, skip socket env supported for backward compatibility
 	envSkipSocketMark = "NB_SKIP_SOCKET_MARK"
+
+	fwmarkProbeTimeout = 100 * time.Millisecond
 )
 
-var advancedRoutingSupported bool
+var (
+	advancedRoutingSupported atomic.Bool
+	// probeMu orders the probes, so that the last Init decides the result.
+	probeMu sync.Mutex
+)
 
+// Init detects whether the host supports advanced routing. The daemon calls it once at
+// startup, and clients that run without a daemon call it on every run. It is safe to
+// repeat and to call concurrently. Readers keep the previous result until a probe ends.
 func Init() {
-	advancedRoutingSupported = checkAdvancedRoutingSupport()
+	probeMu.Lock()
+	defer probeMu.Unlock()
+
+	advancedRoutingSupported.Store(checkAdvancedRoutingSupport())
 }
 
 // AdvancedRouting reports whether routing loops can be avoided without using exclusion routes
 func AdvancedRouting() bool {
-	return advancedRoutingSupported
+	return advancedRoutingSupported.Load()
 }
 
 func checkAdvancedRoutingSupport() bool {
@@ -72,18 +88,9 @@ func checkAdvancedRoutingSupport() bool {
 	return true
 }
 
+// CheckFwmarkSupport reports whether a socket with the control plane fwmark can send.
 func CheckFwmarkSupport() bool {
-	// temporarily enable advanced routing to check if fwmarks are supported
-	old := advancedRoutingSupported
-	advancedRoutingSupported = true
-	defer func() {
-		advancedRoutingSupported = old
-	}()
-
-	dialer := NewDialer()
-	dialer.Timeout = 100 * time.Millisecond
-
-	conn, err := dialer.Dial("udp", "127.0.0.1:9")
+	conn, err := dialFwmarkProbe()
 	if err != nil {
 		log.Warnf("failed to dial with fwmark: %v", err)
 		return false
@@ -95,7 +102,7 @@ func CheckFwmarkSupport() bool {
 		}
 	}()
 
-	if err := conn.SetWriteDeadline(time.Now().Add(time.Millisecond * 100)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(fwmarkProbeTimeout)); err != nil {
 		log.Warnf("failed to set write deadline: %v", err)
 		return false
 	}
@@ -108,6 +115,28 @@ func CheckFwmarkSupport() bool {
 	return true
 }
 
+// dialFwmarkProbe marks the socket itself: the package Dialer only marks once advanced
+// routing is on, and that is what the probe has yet to decide.
+func dialFwmarkProbe() (net.Conn, error) {
+	dialer := &net.Dialer{
+		Timeout: fwmarkProbeTimeout,
+		Control: func(_, _ string, c syscall.RawConn) error {
+			var markErr error
+			if err := c.Control(func(fd uintptr) {
+				markErr = setSocketOptInt(int(fd))
+			}); err != nil {
+				return fmt.Errorf("control: %w", err)
+			}
+			if markErr != nil {
+				return fmt.Errorf("set SO_MARK: %w", markErr)
+			}
+			return nil
+		},
+	}
+	return dialer.Dial("udp", "127.0.0.1:9")
+}
+
+// CheckRuleOperationsSupport reports whether the kernel supports ip rule operations.
 func CheckRuleOperationsSupport() bool {
 	rule := netlink.NewRule()
 	// low precedence, semi-random
@@ -116,6 +145,12 @@ func CheckRuleOperationsSupport() bool {
 	rule.Family = netlink.FAMILY_V4
 
 	if err := netlink.RuleAdd(rule); err != nil {
+		// Another process is probing, or a crashed one left the rule behind. The kernel
+		// got as far as comparing rules, so they work. Deleting the rule is up to its owner.
+		if errors.Is(err, syscall.EEXIST) {
+			log.Debugf("test rule already exists: %v", err)
+			return true
+		}
 		if errors.Is(err, syscall.EOPNOTSUPP) {
 			log.Warn("IP rule operations are not supported")
 			return false

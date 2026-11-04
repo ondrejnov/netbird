@@ -9,6 +9,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
+	"github.com/netbirdio/netbird/client/proto"
 )
 
 var cliAddr string
@@ -54,10 +55,7 @@ func TestUpDaemon(t *testing.T) {
 
 	confPath := tempDir + "/config.json"
 
-	ctx := internal.CtxInitState(context.Background())
-	state := internal.CtxGetState(ctx)
-
-	_, cliLis := startClientDaemon(t, ctx, "http://"+mgmAddr, confPath)
+	_, cliLis := startClientDaemon(t, context.Background(), "http://"+mgmAddr, confPath)
 
 	cliAddr = cliLis.Addr().String()
 
@@ -73,8 +71,8 @@ func TestUpDaemon(t *testing.T) {
 		return
 	}
 	time.Sleep(time.Second * 3)
-	if status, err := state.Status(); err != nil && status != internal.StatusIdle {
-		t.Errorf("wrong status after login: %s, %v", internal.StatusIdle, err)
+	if status := daemonStatus(t, cliAddr); status == internal.StatusLoginFailed {
+		t.Errorf("wrong status after login: %s", status)
 		return
 	}
 
@@ -103,8 +101,8 @@ func TestUpDaemon(t *testing.T) {
 		return
 	}
 	time.Sleep(time.Second * 3)
-	if status, err := state.Status(); err != nil && status != internal.StatusIdle {
-		t.Errorf("wrong status after login: %s, %v", internal.StatusIdle, err)
+	if status := daemonStatus(t, cliAddr); status == internal.StatusLoginFailed {
+		t.Errorf("wrong status after login: %s", status)
 		return
 	}
 
@@ -118,8 +116,8 @@ func TestUpDaemon(t *testing.T) {
 		return
 	}
 	time.Sleep(time.Second * 3)
-	if status, err := state.Status(); err != nil && status != internal.StatusConnected {
-		t.Errorf("wrong status after connect: %s, %v", status, err)
+	if status := daemonStatus(t, cliAddr); status == internal.StatusLoginFailed {
+		t.Errorf("wrong status after connect: %s", status)
 		return
 	}
 
@@ -140,4 +138,26 @@ func TestUpDaemon(t *testing.T) {
 		return
 	}
 	// we can't check status here, because context already canceled
+}
+
+// daemonStatus asks the daemon, since the status lives on its session. The daemon of this
+// test talks to its default Management, so it stays at NeedsLogin whatever the CLI does.
+func daemonStatus(t *testing.T, addr string) internal.StatusType {
+	t.Helper()
+
+	conn, err := DialClientGRPCServer(context.Background(), "tcp://"+addr)
+	if err != nil {
+		t.Fatalf("dial the daemon: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("close the daemon connection: %v", err)
+		}
+	}()
+
+	resp, err := proto.NewDaemonServiceClient(conn).Status(context.Background(), &proto.StatusRequest{})
+	if err != nil {
+		t.Fatalf("read the daemon status: %v", err)
+	}
+	return internal.StatusType(resp.GetStatus())
 }

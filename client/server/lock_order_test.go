@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
@@ -115,13 +116,45 @@ func requireWaitsOnSessionMu(t *testing.T, s *Server, rpc func() error, held ...
 
 func TestDown_TakesServerMutexBeforeSessionMu(t *testing.T) {
 	s := newTestServer()
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	s.session.actCancel = cancel
 
 	requireWaitsOnSessionMu(t, s, func() error {
 		_, err := s.Down(context.Background(), &proto.DownRequest{})
+		return err
+	}, &s.mutex)
+}
+
+// SetConfig is where the whole chain is taken: the update-settings gate reads the
+// session's config with guardedConfigMu and Server.mutex already held.
+func TestSetConfig_TakesOuterLocksBeforeSessionMu(t *testing.T) {
+	s, ctx, profName, username, _ := setupServerWithProfile(t)
+
+	requireWaitsOnSessionMu(t, s, func() error {
+		_, err := s.SetConfig(ctx, &proto.SetConfigRequest{
+			ProfileName: profName,
+			Username:    username,
+		})
+		return err
+	}, &s.guardedConfigMu, &s.mutex)
+}
+
+func TestWaitJWTToken_TakesServerMutexBeforeSessionMu(t *testing.T) {
+	s := newTestServer()
+
+	requireWaitsOnSessionMu(t, s, func() error {
+		_, err := s.WaitJWTToken(context.Background(), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
+		return err
+	}, &s.mutex)
+}
+
+func TestStartBundleCapture_TakesServerMutexBeforeSessionMu(t *testing.T) {
+	s := newTestServer()
+
+	requireWaitsOnSessionMu(t, s, func() error {
+		_, err := s.StartBundleCapture(context.Background(), &proto.StartBundleCaptureRequest{})
 		return err
 	}, &s.mutex)
 }
@@ -146,7 +179,7 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.setActCancel(func() {})
 		ss.hasActCancel()
 		ss.cancelAct()
-		ss.beginRun()
+		ss.beginRun(profilemanager.SessionKey{})
 		ss.runChans()
 		ss.isClientRunning()
 		ss.connectionGoroutineRunning()
@@ -154,12 +187,49 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.setClient(newDummyConnectClient(internal.CtxInitState(context.Background())))
 		ss.client()
 		ss.clientConnectingOrConnected()
+		ss.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{})
+		ss.currentConfig()
+		ss.runningKey()
+		ss.configBelongsTo(profilemanager.SessionKey{})
+		ss.configBelongsToRun()
+		ss.oauthFlow()
+		ss.swapOAuthFlow(oauthAuthFlow{})
+		ss.clearOAuthFlow()
+		ss.clearOAuthFlowIf(nil)
+		ss.expireOAuthFlow(nil)
+		ss.claimOAuthWait(nil, func() {})
+		ss.setCapture(nil)
+		ss.currentCapture()
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("a session method waited for an outer lock")
+	}
+}
+
+// dropPendingAuthFlows cancels a parked WaitSSOLogin, which reads the flow record on the
+// way out, so the cancel has to run outside the critical section that took it.
+func TestDropPendingAuthFlows_CancelsOutsideSessionMu(t *testing.T) {
+	s := newTestServer()
+	s.session.oauthAuthFlow = oauthAuthFlow{
+		flow:       &stubOAuthFlow{},
+		waitCancel: func() { s.session.oauthFlow() },
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.mutex.Lock()
+		defer s.mutex.Unlock()
+		s.dropPendingAuthFlows()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dropPendingAuthFlows held session.mu across the cancel")
 	}
 }
 

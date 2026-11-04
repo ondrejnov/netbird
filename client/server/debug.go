@@ -110,8 +110,8 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 
 	bundleGenerator := debug.NewBundleGenerator(
 		debug.GeneratorDependencies{
-			InternalConfig: s.config,
-			StatusRecorder: s.statusRecorder,
+			InternalConfig: s.session.currentConfig(),
+			StatusRecorder: s.session.statusRecorder,
 			SyncResponse:   syncResponse,
 			LogPath:        s.logFile,
 			UILogPath:      s.uiLogPath,
@@ -136,8 +136,8 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		return "", "", fmt.Errorf("generate debug bundle: %w", err)
 	}
 
-	if s.config != nil && s.config.ManagementURL != nil {
-		managementURL = s.config.ManagementURL.String()
+	if config := s.session.currentConfig(); config != nil && config.ManagementURL != nil {
+		managementURL = config.ManagementURL.String()
 	}
 
 	return path, managementURL, nil

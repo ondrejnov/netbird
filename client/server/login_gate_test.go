@@ -9,7 +9,6 @@ import (
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
@@ -22,7 +21,7 @@ func TestLogin_RefusedChangeLeavesTheProfileAlone(t *testing.T) {
 	s, _, activeProfile, username, _ := setupServerWithProfile(t)
 
 	// Login reads process state off the daemon's root context.
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	// A second profile that runs the SSH server, which is what makes repointing
 	// its management binding a privileged change.
@@ -54,7 +53,7 @@ func TestLogin_RefusedChangeLeavesTheProfileAlone(t *testing.T) {
 // request in between, and the authoritative check happens before any side effect.
 func TestLogin_ChangeThatBecomesPrivilegedMidRequestHasNoSideEffects(t *testing.T) {
 	s, _, activeProfile, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	// The target profile has SSH off, so the first check lets the request through.
 	target := "ssh-later"
@@ -103,7 +102,7 @@ func TestLogin_ChangeThatBecomesPrivilegedMidRequestHasNoSideEffects(t *testing.
 // can abort someone else's login by sending a request that is denied.
 func TestLogin_RefusedChangeLeavesAnInProgressLoginAlone(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	target := "ssh-enabled"
 	_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{

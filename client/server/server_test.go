@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	daemonProto "github.com/netbirdio/netbird/client/proto"
 )
@@ -34,7 +33,7 @@ func TestServer_Up(t *testing.T) {
 		profilemanager.ConfigDirOverride = ""
 	})
 
-	ctx := internal.CtxInitState(context.Background())
+	ctx := context.Background()
 
 	currUser, err := user.Current()
 	require.NoError(t, err)
@@ -63,7 +62,9 @@ func TestServer_Up(t *testing.T) {
 		t.Fatalf("failed to set active profile state: %v", err)
 	}
 
-	s := New(ctx, "console", "", false, false, false, false)
+	rootCtx, cancelRoot := context.WithCancel(ctx)
+	s := New(rootCtx, "console", "", false, false, false, false)
+	stopRunAtCleanup(t, s, cancelRoot)
 	err = s.Start()
 	require.NoError(t, err)
 
@@ -78,6 +79,24 @@ func TestServer_Up(t *testing.T) {
 	log.Errorf("error from Up: %v", err)
 
 	assert.Contains(t, err.Error(), "context deadline exceeded")
+}
+
+// stopRunAtCleanup ends the run s started before the earlier cleanups of the test restore the
+// profile paths, which are globals the run reads for its state file on every attempt.
+func stopRunAtCleanup(t *testing.T, s *Server, cancelRoot context.CancelFunc) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancelRoot()
+		_, giveUp := s.session.runChans()
+		if giveUp == nil {
+			return
+		}
+		select {
+		case <-giveUp:
+		case <-time.After(30 * time.Second):
+			t.Error("the run did not end after the root context was cancelled")
+		}
+	})
 }
 
 type mockSubscribeEventsServer struct {
@@ -111,7 +130,7 @@ func TestServer_SubcribeEvents(t *testing.T) {
 		profilemanager.ConfigDirOverride = ""
 	})
 
-	ctx := internal.CtxInitState(context.Background())
+	ctx := context.Background()
 	ic := profilemanager.ConfigInput{
 		ConfigPath: tempDir + "/default.json",
 	}
@@ -133,16 +152,18 @@ func TestServer_SubcribeEvents(t *testing.T) {
 		t.Fatalf("failed to set active profile state: %v", err)
 	}
 
-	s := New(ctx, "console", "", false, false, false, false)
+	rootCtx, cancelRoot := context.WithCancel(ctx)
+	s := New(rootCtx, "console", "", false, false, false, false)
+	stopRunAtCleanup(t, s, cancelRoot)
 
 	err = s.Start()
 	require.NoError(t, err)
 
 	u, err := url.Parse("http://non-existent-url-for-testing.invalid:12345")
 	require.NoError(t, err)
-	s.config = &profilemanager.Config{
+	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{
 		ManagementURL: u,
-	}
+	})
 
 	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()

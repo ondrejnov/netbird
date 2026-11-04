@@ -31,7 +31,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/management/server"
@@ -93,7 +92,7 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 		t.Fatalf("failed to start management server: %v", err)
 	}
 
-	ctx := internal.CtxInitState(context.Background())
+	ctx := context.Background()
 
 	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(30*time.Second))
 	defer cancel()
@@ -122,16 +121,18 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 
 	s := New(ctx, "debug", "", false, false, false, false)
 
-	s.config = config
+	s.session.setConfig(profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}, config)
 
-	s.statusRecorder = peer.NewRecorder(config.ManagementURL.String())
+	s.session.statusRecorder = peer.NewRecorder(config.ManagementURL.String())
 	t.Setenv(retryInitialIntervalVar, "1s")
 	t.Setenv(maxRetryIntervalVar, "2s")
 	t.Setenv(maxRetryTimeVar, "5s")
 	t.Setenv(retryMultiplierVar, "1")
 
 	key := profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}
-	s.connectWithRetryRuns(ctx, key, config, s.statusRecorder, nil, nil)
+	runCtx, cancelRun := s.session.runContext(ctx)
+	defer cancelRun()
+	s.connectWithRetryRuns(runCtx, key, config, s.session.statusRecorder, nil, nil)
 	if counter != 1 {
 		t.Fatalf("expected exactly 1 login attempt (PermissionDenied must stop the retry loop), got %d", counter)
 	}
