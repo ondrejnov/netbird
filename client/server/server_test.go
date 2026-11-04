@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	daemonProto "github.com/netbirdio/netbird/client/proto"
 )
@@ -34,7 +33,7 @@ func TestServer_Up(t *testing.T) {
 		profilemanager.ConfigDirOverride = ""
 	})
 
-	ctx := internal.CtxInitState(context.Background())
+	ctx := context.Background()
 
 	currUser, err := user.Current()
 	require.NoError(t, err)
@@ -111,7 +110,7 @@ func TestServer_SubcribeEvents(t *testing.T) {
 		profilemanager.ConfigDirOverride = ""
 	})
 
-	ctx := internal.CtxInitState(context.Background())
+	ctx := context.Background()
 	ic := profilemanager.ConfigInput{
 		ConfigPath: tempDir + "/default.json",
 	}

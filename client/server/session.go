@@ -47,6 +47,10 @@ type session struct {
 	// lock. The recorder synchronizes itself.
 	statusRecorder *peer.Status
 
+	// state is the status of the connection. Set by newSession and never replaced; the
+	// state synchronizes itself.
+	state *internal.ContextState
+
 	oauthAuthFlow oauthAuthFlow
 
 	// extendAuthSessionFlow holds the pending PKCE flow created by
@@ -66,9 +70,16 @@ type session struct {
 func newSession() *session {
 	return &session{
 		statusRecorder:        peer.NewRecorder(""),
+		state:                 internal.NewContextState(),
 		extendAuthSessionFlow: auth.NewPendingFlow(),
 		jwtCache:              newJWTCache(),
 	}
+}
+
+// runContext returns the context of one attempt of this session, cancelled along with
+// parent. The connect client and the engine read the state of their session from it.
+func (ss *session) runContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(internal.CtxWithState(parent, ss.state))
 }
 
 // cancelAct cancels the current attempt, if there is one. The cancel runs after the

@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	nbnet "github.com/netbirdio/netbird/client/net"
 )
@@ -21,7 +20,7 @@ func TestStart_ProbesRoutingWithoutASession(t *testing.T) {
 	s, ctx, _, _, cfgPath := setupServerWithProfile(t)
 	ctx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
-	s.rootCtx = internal.CtxInitState(ctx)
+	s.rootCtx = ctx
 
 	disableAutoConnect := true
 	_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{

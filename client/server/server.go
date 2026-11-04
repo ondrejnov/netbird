@@ -223,8 +223,8 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	state := internal.CtxGetState(s.rootCtx)
-	// Every contextState.Set in the connect/login/server paths must push a
+	state := s.session.state
+	// Every ContextState.Set in the connect/login/server paths must push a
 	// SubscribeStatus snapshot, otherwise transitions that don't happen to
 	// be accompanied by a Mark{Management,Signal,...} call (e.g. plain
 	// StatusNeedsLogin after a PermissionDenied login, StatusLoginFailed
@@ -280,7 +280,7 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(s.rootCtx)
+	ctx, cancel := s.session.runContext(s.rootCtx)
 	s.session.setActCancel(cancel)
 
 	// copy old default config
@@ -665,7 +665,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 		return nil, err
 	}
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	status := state.CurrentStatus()
 	if status == internal.StatusConnected {
 		return &proto.LoginResponse{}, nil
@@ -882,7 +882,7 @@ func (s *Server) reuseOAuthFlow(ctx context.Context, oAuthFlow auth.OAuthFlow, s
 // State transitions on exit:
 //
 //	┌──────────────────────────────────────────┬──────────────────────────────────┐
-//	│ Outcome                                  │ contextState                     │
+//	│ Outcome                                  │ ContextState                     │
 //	├──────────────────────────────────────────┼──────────────────────────────────┤
 //	│ Success → loginAttempt ok                │ NeedsLogin held; the caller's Up │
 //	│                                          │   drives Connecting → Connected  │
@@ -911,10 +911,10 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 	ctx, cancel := context.WithCancel(s.rootCtx)
 
 	// Tie the in-flight browser wait to the caller. ctx stays rooted in
-	// rootCtx so CtxGetState resolves the daemon's contextState, but if the
-	// UI window or CLI that drove the login goes away mid-flow (restart,
-	// Ctrl+C) the gRPC callerCtx cancels and we cancel the wait instead of
-	// orphaning it on rootCtx until the OAuth device-code window expires.
+	// rootCtx, but if the UI window or CLI that drove the login goes away
+	// mid-flow (restart, Ctrl+C) the gRPC callerCtx cancels and we cancel the
+	// wait instead of orphaning it on rootCtx until the OAuth device-code
+	// window expires.
 	// The goroutine exits as soon as either context completes, so it can't
 	// outlive the RPC.
 	go func() {
@@ -949,7 +949,7 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 		return nil, gstatus.Errorf(codes.Internal, "oauth flow is not initialized")
 	}
 
-	state := internal.CtxGetState(ctx)
+	state := s.session.state
 	defer func() {
 		s, err := state.Status()
 		if err != nil || (s != internal.StatusNeedsLogin && s != internal.StatusLoginFailed) {
@@ -1067,7 +1067,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	// is up but the goroutine has given up (backoff exhausted) OR when
 	// intent is down, fall through to spawn a fresh retry loop.
 	if s.session.isClientRunning() && s.session.connectionGoroutineRunning() {
-		state := internal.CtxGetState(s.rootCtx)
+		state := s.session.state
 		status, err := state.Status()
 		if err != nil {
 			s.mutex.Unlock()
@@ -1084,7 +1084,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 		log.Warnf(errRestoreResidualState, err)
 	}
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 
 	// if current state contains any error, return it
 	// in all other cases we can continue execution only if status is idle and up command was
@@ -1118,7 +1118,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 
 	// it should be nil here, but in case it isn't we cancel it.
 	s.session.cancelAct()
-	ctx, cancel := context.WithCancel(s.rootCtx)
+	ctx, cancel := s.session.runContext(s.rootCtx)
 	md, ok := metadata.FromIncomingContext(callerCtx)
 	if ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
@@ -1419,7 +1419,7 @@ func (s *Server) Down(ctx context.Context, _ *proto.DownRequest) (*proto.DownRes
 	// Setting it earlier races with the goroutine's own Set(StatusConnecting)
 	// at the top of each retry attempt, which would leave the snapshot
 	// stuck at Connecting long after the user asked to disconnect.
-	internal.CtxGetState(s.rootCtx).Set(internal.StatusIdle)
+	s.session.state.Set(internal.StatusIdle)
 
 	// Clear stale management/signal errors so the next Up() (typically for a
 	// different profile) starts with a clean status snapshot. Without this,
@@ -1548,7 +1548,7 @@ func (s *Server) cleanupAfterProfileLogout(id profilemanager.ID, username string
 		log.Errorf("failed to cleanup connection: %v", err)
 	}
 	s.session.jwtCache.clear()
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	state.Set(internal.StatusNeedsLogin)
 }
 
@@ -1591,7 +1591,7 @@ func (s *Server) finishLogout(ctx context.Context, config *profilemanager.Config
 	}
 	s.session.jwtCache.clear()
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	state.Set(internal.StatusNeedsLogin)
 
 	return &proto.LogoutResponse{}, nil
@@ -1817,7 +1817,7 @@ func (s *Server) Status(
 	s.mutex.Unlock()
 
 	if msg.WaitForReady != nil && *msg.WaitForReady && alive {
-		state := internal.CtxGetState(s.rootCtx)
+		state := s.session.state
 		status, err := state.Status()
 		if err != nil {
 			return nil, err
@@ -1862,7 +1862,7 @@ func (s *Server) Status(
 // stream so both paths return identical snapshots. ctx scopes the health
 // probe runProbes may trigger — a caller that disconnects cancels it.
 func (s *Server) buildStatusResponse(ctx context.Context, msg *proto.StatusRequest) (*proto.StatusResponse, error) {
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	status, err := state.Status()
 	if err != nil {
 		// state.Status() blanks the status when err is set (e.g. management

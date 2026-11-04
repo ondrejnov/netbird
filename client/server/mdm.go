@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -144,7 +143,7 @@ func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, run
 	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
-	ctx, cancel := context.WithCancel(s.rootCtx)
+	ctx, cancel := s.session.runContext(s.rootCtx)
 	s.session.setActCancel(cancel)
 	runningChan, giveUpChan := s.session.beginRun(key)
 	log.Info("MDM restart: spawning connectWithRetryRuns with re-resolved config")

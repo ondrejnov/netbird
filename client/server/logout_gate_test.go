@@ -43,7 +43,7 @@ func enableSSHOnProfile(t *testing.T, cfgPath string) {
 // disableProfiles enforced unable to log out at all.
 func TestLogout_ActiveProfileAllowedWhenProfilesDisabled(t *testing.T) {
 	s, _, activeProfile, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	enableSSHOnProfile(t, cfgPath)
 
 	s.profilesDisabled = true
@@ -64,7 +64,7 @@ func TestLogout_ActiveProfileAllowedWhenProfilesDisabled(t *testing.T) {
 // deregister a peer the user is not currently running.
 func TestLogout_OtherProfileStaysGatedWhenProfilesDisabled(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	other := "other-profile"
 	_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
@@ -91,7 +91,7 @@ func TestLogout_OtherProfileStaysGatedWhenProfilesDisabled(t *testing.T) {
 // is part of the comparison.
 func TestLogout_ForeignUserProfileStaysGatedWhenProfilesDisabled(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	// A legacy-style profile whose ID is its filename stem, and an active state
 	// claiming that same ID for a different user.
@@ -124,7 +124,7 @@ func TestLogout_ForeignUserProfileStaysGatedWhenProfilesDisabled(t *testing.T) {
 // for another user's profile, deregistering the active peer instead.
 func TestLogout_ForeignUserProfileDoesNotUseTheRunningConfig(t *testing.T) {
 	s, _, _, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	// The running config has the SSH server enabled, so reusing it would be
 	// refused with PermissionDenied. The namesake profile does not, so the
@@ -167,9 +167,9 @@ func TestLogout_ForeignUserProfileDoesNotUseTheRunningConfig(t *testing.T) {
 // meanwhile must keep its connection.
 func TestCleanupAfterProfileLogout_FollowsTheCurrentActiveProfile(t *testing.T) {
 	s, _, activeProfile, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 
 	s.cleanupAfterProfileLogout("some-other-profile", username)
 	status, err := state.Status()
@@ -188,7 +188,7 @@ func TestCleanupAfterProfileLogout_FollowsTheCurrentActiveProfile(t *testing.T) 
 // profile still reaches the deregistration path.
 func TestLogout_ActiveProfileAllowedWhenProfilesEnabled(t *testing.T) {
 	s, _, activeProfile, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	enableSSHOnProfile(t, cfgPath)
 
 	_, err := s.Logout(userCtx(), &proto.LogoutRequest{
@@ -231,7 +231,7 @@ type switchedDaemon struct {
 func setupSwitchedWithoutDown(t *testing.T, def, work func(path string) *profilemanager.Config) switchedDaemon {
 	t.Helper()
 	s, _, _, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	workName := "work"
 	def(profilemanager.DefaultConfigPath)
@@ -245,7 +245,7 @@ func setupSwitchedWithoutDown(t *testing.T, def, work func(path string) *profile
 
 	s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
 	s.session.setActCancel(func() {})
-	s.session.setClient(newDummyConnectClient(s.rootCtx))
+	s.session.setClient(newDummyConnectClient(internal.CtxWithState(s.rootCtx, s.session.state)))
 	s.session.setConfig(workKey, workCfg)
 
 	return switchedDaemon{s: s, username: username, work: workName, defName: profilemanager.DefaultProfileName}
@@ -253,7 +253,7 @@ func setupSwitchedWithoutDown(t *testing.T, def, work func(path string) *profile
 
 func (d switchedDaemon) status(t *testing.T) internal.StatusType {
 	t.Helper()
-	status, err := internal.CtxGetState(d.s.rootCtx).Status()
+	status, err := d.s.session.state.Status()
 	require.NoError(t, err)
 	return status
 }
