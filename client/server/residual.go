@@ -43,12 +43,32 @@ func (s *Server) restoreResidualAtStart(ctx context.Context) error {
 
 	// Without a sessions file no isolation ever ran here, and the host stays untouched.
 	if len(records) > 0 {
-		if err := firewall.RemoveResidualSessionIsolation(); err != nil {
-			merr = multierror.Append(merr, fmt.Errorf("remove session isolation: %w", err))
+		if err := s.removeResidualIsolation(records); err != nil {
+			merr = multierror.Append(merr, err)
 		}
 	}
 
 	return nberrors.FormatErrorOrNil(merr)
+}
+
+// removeResidualIsolation deletes the session interfaces and then the isolation. An interface that
+// stays keeps the isolation, the one thing left between its peers and the other networks. The state
+// files go first, since some of their cleanup needs the interface to find what to undo.
+func (s *Server) removeResidualIsolation(records []hostcoord.SlotRecord) error {
+	if err := s.removeSessionLinks(records); err != nil {
+		return fmt.Errorf("remove session links, keeping the isolation: %w", err)
+	}
+	if err := firewall.RemoveResidualSessionIsolation(); err != nil {
+		return fmt.Errorf("remove session isolation: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) removeSessionLinks(records []hostcoord.SlotRecord) error {
+	if s.removeLinksFn != nil {
+		return s.removeLinksFn(records)
+	}
+	return hostcoord.RemoveSessionLinks(records)
 }
 
 // residualStatePaths lists each state file once, because NB_DNS_STATE_FILE gives all

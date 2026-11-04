@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -358,6 +359,17 @@ func (p *probeListener) delivered() bool {
 		return true
 	case <-time.After(time.Second):
 		return false
+	}
+}
+
+// drain forgets what arrived so far, for a check of what arrives from now on.
+func (p *probeListener) drain() {
+	for {
+		select {
+		case <-p.received:
+		default:
+			return
+		}
 	}
 }
 
@@ -788,12 +800,16 @@ func TestStartRemovesIsolationResidual(t *testing.T) {
 		t.Cleanup(cancel)
 		s.rootCtx = rootCtx
 		install(t)
+		requireKernelInterface(t)
+		addResidualLink(t, "wt0")
 
 		require.NoError(t, s.restoreResidualAtStart(ctx))
 
 		nft, ipt := present(t)
 		assert.True(t, nft, "the table is not known to be ours")
 		assert.True(t, ipt, "the chains are not known to be ours")
+		_, err := netlink.LinkByName("wt0")
+		assert.NoError(t, err, "the interface is not known to be ours")
 	})
 
 	t.Run("a sessions file removes both", func(t *testing.T) {
@@ -812,5 +828,45 @@ func TestStartRemovesIsolationResidual(t *testing.T) {
 		nft, ipt := present(t)
 		assert.False(t, nft, "the nftables isolation should be gone")
 		assert.False(t, ipt, "the iptables isolation should be gone")
+	})
+
+	// The isolation is what still keeps an interface that cannot go from the other networks, and
+	// the daemon does not run next to it.
+	t.Run("a link that stays keeps the isolation and refuses the start", func(t *testing.T) {
+		t.Setenv("NB_DNS_STATE_FILE", "")
+		t.Setenv(netstack.EnvUseNetstackMode, "false")
+		requireKernelInterface(t)
+		s, ctx, profile, username, _ := setupServerWithProfile(t)
+		rootCtx, cancel := context.WithCancel(ctx)
+		t.Cleanup(cancel)
+		s.rootCtx = rootCtx
+		s.sessionSet = newSessionSet(true)
+		s.removeLinksFn = func([]hostcoord.SlotRecord) error { return errors.New("cannot delete the link") }
+		writeDesiredSessions(t, map[profilemanager.SessionKey]hostcoord.DesiredState{
+			{Profile: profilemanager.ID(profile), Username: username}: hostcoord.DesiredUp,
+		})
+		install(t)
+		addResidualLink(t, "wt0")
+
+		require.Error(t, s.Start(), "the start must not go on next to a live session interface")
+
+		nft, ipt := present(t)
+		assert.True(t, nft, "the nftables isolation should stay with the link")
+		assert.True(t, ipt, "the iptables isolation should stay with the link")
+		assert.Nil(t, s.slots, "a refused start should leave no slots behind")
+		_, running := s.focusedSession().runningKey()
+		assert.False(t, running, "a refused start should run no session")
+	})
+}
+
+// addResidualLink leaves the kernel interface a crashed daemon would.
+func addResidualLink(t *testing.T, name string) {
+	t.Helper()
+	link := &netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: name}}
+	require.NoError(t, netlink.LinkAdd(link))
+	t.Cleanup(func() {
+		if existing, err := netlink.LinkByName(name); err == nil {
+			_ = netlink.LinkDel(existing)
+		}
 	})
 }

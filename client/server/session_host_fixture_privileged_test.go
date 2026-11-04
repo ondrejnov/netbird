@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
 
 	"github.com/netbirdio/netbird/client/firewall"
 	"github.com/netbirdio/netbird/client/internal"
@@ -111,11 +112,12 @@ func writeNetworkStore(t *testing.T, network hostNetwork) string {
 }
 
 // startNetwork runs a Management of its own for the network and writes a registered profile for it.
-func startNetwork(t *testing.T, ctx context.Context, dir, profile, signalAddr string, network hostNetwork) {
+// A test can stop the returned server to make the network unreachable.
+func startNetwork(t *testing.T, ctx context.Context, dir, profile, signalAddr string, network hostNetwork) *grpc.Server {
 	t.Helper()
 
 	logins := 0
-	_, mgmtAddr, err := startManagement(t, signalAddr, writeNetworkStore(t, network), &logins)
+	server, mgmtAddr, err := startManagement(t, signalAddr, writeNetworkStore(t, network), &logins)
 	require.NoError(t, err)
 
 	config, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
@@ -124,6 +126,7 @@ func startNetwork(t *testing.T, ctx context.Context, dir, profile, signalAddr st
 	})
 	require.NoError(t, err)
 	registerPeer(t, ctx, config)
+	return server
 }
 
 // keepRouterConnected marks the routing peer connected until the test ends. Without a counterpart

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 a obě poloviny PR 13 jsou hotové, viz 2.5. Další krok je PR 14 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 a obě poloviny PR 13 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links`, viz 2.5. Další krok je PR 14 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -108,13 +108,13 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q16 | Adresy na interface jiné session mimo její prefix, např. `fe80::` | Nezahrnuto do `overlays` | 5 |
 | Q17 | Formát `sessions.json` | **Schváleno:** `{version:1, sessions:[{profile, username, slot, desired}]}`, neznámé pole je poškození | 7 |
 | Q18 | Explicitní `WgPort` obsazený cizím procesem | Port z alokátoru jako dnes, alternativa je odmítnutí | 7 |
-| Q19 | Název kolidující s cizím linkem, který není session | Neřešeno, `wg_link_linux.go` by ho smazal a od zbytku po pádu ho odlišit neumí | 7, 13 |
+| Q19 | Název kolidující s cizím linkem, který není session | Úklid po pádu maže jen link typu `wireguard` se jménem slotu, viz `f3/residual-links` v 2.5. Cizí WireGuard se stejným jménem od zbytku odlišit neumí a `wg_link_linux.go` při startu session smaže cokoli se stejným jménem, to je dál neřešené | 7, 13 |
 | Q20 | Foreground režim a zámek `sessions.json` | Druhá instance se odmítne. Návrh: foreground `Slots` vůbec neotevírá | 7, 13 |
 | Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
 | Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
 | Q23 | Selhání v6 části izolace u session s v6 v nainstalované rovině iptables | Add vrací chybu, pokus bez overlaye nejde v harnessu otestovat | 5 |
 | Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. **Zatím vyřešeno odmítnutím:** vedle běžící session `Up` a `Login` zbytek neuklízí a `CleanState` se odmítne, viz 2.5. Napojení prostředků to nemění: soubor z běhu před sloty nese názvy slotu 0, otevřené v 2.5 | 11, 13 |
-| Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu | 11 |
+| Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu a se `sessions.json` smaže i jeho link se jménem slotu | 11 |
 | Q26 | `RemoveProfile` běžícího profilu | **Rozhodnuto a opraveno** ve `f3/run-config`: `FailedPrecondition` před deregistrací. `logout` podle 5.7 zůstává na PR 16 | 11, 16 |
 | Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
 | Q28 | `onMDMPolicyChange` čeká na `giveUpChan` pod `Server.mutex` | **Rozhodnuto a opraveno** ve `f3/mdm-wait`: čekání běží bez zámku, viz 2.4 | 13 |
@@ -370,12 +370,25 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Výběr backendu v testu:** bez zásahu kontejner volí iptables (iptables-nft). nftables vybere tabulka `filter` s chainem, kterou test založí.
 - **I1:** `testdata/host_snapshot_*.golden` jsou zapsané před napojením a jednorázově ověřené na `main` (`313f71fb4`) v dočasném worktree, shoda bajt po bajtu pro oba backendy: linky, pravidla, routy, nft, `iptables-save`, sysctl, `resolv.conf`. Soubory se kvůli průchodu testu nepřegenerovávají. Při porovnání čistého hostitele (I7) se ignorují prázdné vestavěné chainy, ty zakládá iptables-nft při každém použití, i bez NetBirdu.
 
+**`f3/residual-links`, nález po PR 13:**
+
+- **Problém:** kernel link přežije pád i s peery. Session, která se po restartu nepřipojí, k `attach` nedojde, takže její interface stojí mimo izolaci nového daemonu a peer přes něj dosáhne na lokální službu přes overlay jiné sítě. Okno nemá horní mez.
+- **Start** po state souborech a flushi smaže linky všech záznamů ze `sessions.json`, i `desired=down`, a teprve pak izolaci. Soubor neříká, co běželo. State soubory jdou první, protože úklid DNS na systemd-resolved hledá link podle jména (`newSystemdDbusConfigurator`). Izolace jde poslední, do té doby je to jediné, co link drží od ostatních sítí.
+- **Co je naše:** typ `wireguard` a jméno odvozené z čísla slotu (`wtN`), jiné jméno soubor nenese (Q17). Jiný typ se stejným jménem zůstane s varováním v logu, stejně jako WireGuard link se jménem, které žádný slot nemá. Userspace interface pád nepřežije, TUN zaniká s procesem.
+- **Selhání (I6):** když link nejde smazat nebo zjistit, izolace zůstává. S gate `VerifyNoSessionLinks` po úklidu odmítne start služby, kontrola je nezávislá na průběhu úklidu. Bez gate se to jen zaloguje, jako ostatní selhání úklidu.
+- **Bez `sessions.json`** se nic nemaže (I1). Soubor z dřívějšího běhu s gate spustí úklid i po jejím vypnutí, stejně jako u izolace.
+- **Zůstává krátké okno:** mezi úklidem state souboru a smazáním linku je link živý bez pravidel své session, izolace ale ještě platí. Trvá po dobu úklidu.
+- **Test** spouští skutečný daemon v podprocesu a zabíjí ho přes `SIGKILL`, takže na hostiteli zůstane přesně to, co po pádu. Peer je kernel WireGuard v samostatném netns přes veth. Kontrola před restartem ověří, že tunel přes `wt1` doručuje, což neprůchodnost po startu dělá průkaznou. Test čeká na peera ve stavu session, protože ACL se aplikuje dřív než peery a před první network mapou by firewall session peera nepustil.
+- **Neřešeno, čeká na rozhodnutí:** session s explicitním `WgIface` má jméno jen v profilovém configu, její link po pádu zůstane. Viz „Otevřené po PR 13".
+
 **Otevřené po PR 13:**
 
 - **Residual vedle běžící session (Q24):** soubor z běhu před sloty nese názvy slotu 0, proto `Up` vedle jiné session zbytek dál neuklízí a uklidí ho až start služby. Pokud `Cleanup` selhal a zůstal v souboru, další běh téhož profilu jeho záznam přepíše.
 - **Klíč slotu 0 ze souboru (2.4):** nese sanitizované jméno uživatele. Důsledek je jen nevyužitý záznam a jiné číslo slotu pro `first.last`, názvy jsou po napojení na slotu, ne na profilu. Neřešeno.
 - **SSH config (`99-netbird.conf`):** jeden soubor pro celý hostitel, stop jedné session ho smaže i druhé (PR 17). V testech je SSH vypnuté.
 - **DNS:** ověřen jen backend `file`, který v kontejneru vybere daemon. Pro resolved a NM platí Q8.
+- **Link s explicitním `WgIface` po pádu:** úklid zná jen jména slotů, link s vlastním názvem přežije mimo izolaci. Rozhoduje vlastník: smazat link typu `wireguard` se jménem z profilového configu, nebo explicitní název při gate odmítnout (odchylka od 5.1).
+- **Cizí WireGuard na jméně slotu:** typ a jméno ho od zbytku po pádu neodliší, start ho smaže. Odlišit by šel porovnáním veřejného klíče zařízení s klíčem profilu, nečitelný config by pak ale znamenal živý link bez izolace nebo odmítnutí startu. Rozhoduje vlastník.
 
 ## 3. Architektura: proč jeden daemon
 
