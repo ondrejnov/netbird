@@ -84,7 +84,7 @@ func TestSessionLifecycle_ConcurrentAccess(t *testing.T) {
 // channels nobody will ever close.
 func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	s := newTestServer()
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	mgmtURL, err := url.Parse("https://management.example:443")
 	require.NoError(t, err)
 	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: mgmtURL})
@@ -116,7 +116,7 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 // Login and Up replace it. Run with -race, this fails if a read skips session.mu.
 func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
 	s := newTestServer()
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	mgmtURL, err := url.Parse("https://management.example:443")
 	require.NoError(t, err)
 	first := &profilemanager.Config{ManagementURL: mgmtURL}
@@ -295,4 +295,60 @@ func TestExtendSessionLoginHint_FollowsRunningProfile(t *testing.T) {
 
 	s.session.beginRun(profilemanager.SessionKey{Profile: "gone", Username: username})
 	assert.Empty(t, s.extendSessionLoginHint(), "a running profile with no recorded account has no hint")
+}
+
+// The daemon's root context carries no connection state: it belongs to the session. Every
+// handler that reports or changes the status has to find it there.
+func TestServerHandlers_WorkWithoutStateInRootContext(t *testing.T) {
+	s := New(context.Background(), "console", "", false, false, false, false)
+	managementURL, err := url.Parse("https://management.example.com")
+	require.NoError(t, err)
+	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: managementURL})
+
+	require.NotPanics(t, func() {
+		resp, err := s.Status(context.Background(), &proto.StatusRequest{})
+		require.NoError(t, err)
+		assert.Equal(t, string(internal.StatusIdle), resp.GetStatus(), "a new session should report idle")
+	}, "the status must not depend on the root context")
+
+	agent := &serverAgent{s}
+	require.NotPanics(t, func() {
+		status, err := agent.Status()
+		require.NoError(t, err)
+		assert.Equal(t, internal.StatusIdle, status, "the sleep handler should read the session status")
+	}, "the sleep handler must not depend on the root context")
+}
+
+// Each session has its own status: a login that fails in one must not show up in another.
+// The connect client and the engine read the status from their context, so the context of
+// a run has to lead to the state of the session that started it.
+func TestSessionState_BelongsToOneSession(t *testing.T) {
+	first, second := newSession(), newSession()
+
+	ctx, cancel := first.runContext(context.Background())
+	defer cancel()
+	assert.Same(t, first.state, internal.CtxGetState(ctx), "a run should resolve the state of its session")
+
+	client := newDummyConnectClient(ctx)
+	first.state.Set(internal.StatusConnected)
+	assert.Equal(t, internal.StatusConnected, client.Status(), "the client should report the state of its session")
+	assert.False(t, first.clientConnectingOrConnected(), "no client is published on the session yet")
+
+	first.setClient(client)
+	assert.True(t, first.clientConnectingOrConnected(), "the session should see its own client connected")
+
+	_ = internal.CtxGetState(ctx).Wrap(internal.ErrResetConnection)
+	_, err := second.state.Status()
+	assert.NoError(t, err, "an error of one session must not reach another")
+	assert.Equal(t, internal.StatusIdle, second.state.CurrentStatus(), "the other session should stay idle")
+}
+
+// The context of a run ends with the parent: the daemon's shutdown stops every run.
+func TestSessionRunContext_FollowsParent(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	ctx, cancel := newSession().runContext(parent)
+	defer cancel()
+
+	cancelParent()
+	assert.ErrorIs(t, ctx.Err(), context.Canceled, "the run should end with its parent")
 }

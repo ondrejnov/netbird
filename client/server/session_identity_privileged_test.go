@@ -16,7 +16,6 @@ import (
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/auth"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
@@ -55,7 +54,7 @@ func (h *retryGapHook) Fire(entry *log.Entry) error {
 // unusable private key and repairs it in the gap between the attempts.
 func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 	s, ctx, profileA, username, cfgPathA := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(ctx)
+	s.rootCtx = ctx
 	dir := filepath.Dir(cfgPathA)
 
 	_, signalAddr, err := startSignal(t)
@@ -160,7 +159,7 @@ type switchedSession struct {
 func startSessionOnDefault(t *testing.T) *switchedSession {
 	t.Helper()
 	s, ctx, _, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(ctx)
+	s.rootCtx = ctx
 	dir := filepath.Dir(cfgPath)
 
 	_, signalAddr, err := startSignal(t)
@@ -281,7 +280,7 @@ func TestMDMRestartWithoutSwitchKeepsProfile(t *testing.T) {
 // it does today. A Login that took over ends up here, once it cancelled the old run.
 func TestMDMRestartWithRunOverFollowsActiveProfile(t *testing.T) {
 	s, ctx, activeProfile, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(ctx)
+	s.rootCtx = ctx
 	t.Setenv(retryInitialIntervalVar, "100ms")
 
 	_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{

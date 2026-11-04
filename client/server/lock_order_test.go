@@ -116,7 +116,7 @@ func requireWaitsOnSessionMu(t *testing.T, s *Server, rpc func() error, held ...
 
 func TestDown_TakesServerMutexBeforeSessionMu(t *testing.T) {
 	s := newTestServer()
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	s.session.actCancel = cancel
