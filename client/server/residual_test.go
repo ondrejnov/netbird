@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -90,8 +91,9 @@ func writeStoredSessions(t *testing.T, keys ...profilemanager.SessionKey) {
 }
 
 // A crash leaves the state of every session that ran. All of it has to be undone by the time
-// the daemon starts its first session, not only what the active profile recorded.
-func TestRestoreResidualAtStart_CleansEveryStoredSession(t *testing.T) {
+// the daemon starts its first session, not only what the active profile recorded. What runs
+// is known only in memory, so a profile is not left out for missing from the sessions file.
+func TestRestoreResidualAtStart_CleansEveryProfile(t *testing.T) {
 	f := newResidualFixture(t)
 	unlisted := profilemanager.SessionKey{Profile: "unlisted", Username: f.active.Username}
 	f.writeState(t, unlisted)
@@ -101,19 +103,96 @@ func TestRestoreResidualAtStart_CleansEveryStoredSession(t *testing.T) {
 
 	assert.False(t, f.residual(t, f.other), "a stored session should be cleaned")
 	assert.False(t, f.residual(t, f.active), "the active profile should be cleaned even when it is not stored")
-	assert.True(t, f.residual(t, unlisted), "a profile that is not stored should stay as it is")
+	assert.False(t, f.residual(t, unlisted), "a profile that is not stored should be cleaned too")
 	assert.Equal(t, 1, f.flushes, "the marked routes should be flushed once")
 }
 
-// The installation of someone who never enabled concurrent profiles: the same cleanup as
-// always, and nothing new on disk.
+// The scenario of a run on another profile than the active one: default ran, work got selected
+// without a Down, and the daemon crashed. Only state.json holds what default did to the host,
+// and nothing on disk says it ran. The layout is the one of an installation, with a directory
+// per user.
+func TestRestoreResidualAtStart_CleansProfileDirectoriesOfAllUsers(t *testing.T) {
+	f := newResidualFixture(t)
+	profilemanager.ConfigDirOverride = ""
+
+	dir := profilemanager.DefaultConfigPathDir
+	stateFile := func(parts ...string) string {
+		path := filepath.Join(append([]string{dir}, parts...)...)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte(residualStateJSON), 0o600))
+		return path
+	}
+	hasResidual := func(path string) bool {
+		names, err := statemanager.New(path).GetSavedStateNames()
+		require.NoError(t, err)
+		return len(names) > 0
+	}
+
+	cleaned := []string{
+		stateFile("state.json"),
+		stateFile("alice", "work.state.json"),
+		stateFile("bob", "home.state.json"),
+	}
+
+	// None of these is the state file of a profile.
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	require.NoError(t, os.WriteFile(outside, []byte(residualStateJSON), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "alice", "link.state.json")))
+	backup := stateFile("alice", "work.state.json.corrupted.1")
+	invalid := stateFile("alice", "not.a.stem.state.json")
+
+	require.NoError(t, f.s.restoreResidualAtStart(f.ctx))
+
+	for _, path := range cleaned {
+		assert.False(t, hasResidual(path), "%s should be cleaned", path)
+	}
+	assert.True(t, hasResidual(outside), "a symlink should not be followed")
+	assert.True(t, hasResidual(backup), "a backup of a corrupted file should stay")
+	assert.True(t, hasResidual(invalid), "a name that is no profile should stay")
+	assert.Equal(t, 1, f.flushes, "the marked routes should be flushed once")
+
+	_, err := os.Stat(filepath.Join(dir, "sessions.json"))
+	assert.ErrorIs(t, err, os.ErrNotExist, "the cleanup must not create a sessions file")
+}
+
+// One session with the gate off may only end up with a cleaner host (I1): a state file with
+// nothing to undo keeps its bytes and its modification time.
+func TestRestoreResidualAtStart_LeavesFileWithoutResidualUntouched(t *testing.T) {
+	f := newResidualFixture(t)
+
+	contents := map[string]string{
+		"empty":        `{}`,
+		"cleaned":      `{"route_state":null,"dns_state":null}`,
+		"unregistered": `{"some_future_state":{"a": 1}}`,
+	}
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for name, content := range contents {
+		path := f.statePath(profilemanager.SessionKey{Profile: profilemanager.ID(name), Username: f.active.Username})
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		require.NoError(t, os.Chtimes(path, past, past))
+	}
+
+	require.NoError(t, f.s.restoreResidualAtStart(f.ctx))
+
+	for name, content := range contents {
+		path := f.statePath(profilemanager.SessionKey{Profile: profilemanager.ID(name), Username: f.active.Username})
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, content, string(data), "%s should keep its content", name)
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		assert.True(t, info.ModTime().Equal(past), "%s should not be written", name)
+	}
+}
+
+// The installation of someone who never enabled concurrent profiles: nothing new on disk.
 func TestRestoreResidualAtStart_WithoutSessionsFileLeavesNoTrace(t *testing.T) {
 	f := newResidualFixture(t)
 
 	require.NoError(t, f.s.restoreResidualAtStart(f.ctx))
 
 	assert.False(t, f.residual(t, f.active), "the active profile should be cleaned")
-	assert.True(t, f.residual(t, f.other), "without a sessions file no other profile is known")
+	assert.False(t, f.residual(t, f.other), "a profile found on disk should be cleaned without a sessions file")
 	assert.Equal(t, 1, f.flushes, "the marked routes should be flushed as before")
 
 	for _, name := range []string{"sessions.json", "sessions.lock"} {
@@ -160,7 +239,7 @@ func TestResidualStatePaths_SharedFileOnce(t *testing.T) {
 	t.Setenv("NB_DNS_STATE_FILE", shared)
 
 	records := []hostcoord.SlotRecord{{Key: f.other}, {Key: f.active, Slot: 1}}
-	assert.Equal(t, []string{shared}, f.s.residualStatePaths(records), "one file should be cleaned once")
+	assert.Equal(t, []string{shared}, f.s.residualStatePaths(records, []profilemanager.SessionKey{f.other}), "one file should be cleaned once")
 }
 
 // The whole of Start: everything is clean before the first session gets to run.
@@ -222,6 +301,107 @@ func TestLogin_CleansOnlyTheStateFileOfItsProfile(t *testing.T) {
 	assert.Equal(t, 1, f.flushes, "no other session runs, so the flush should stay")
 }
 
+func (f *residualFixture) login(t *testing.T) {
+	t.Helper()
+	active, err := f.s.profileManager.GetActiveProfileState()
+	require.NoError(t, err)
+	_, _, _, err = f.s.authorizeAndPrepareLogin(f.ctx, &proto.LoginRequest{}, active)
+	require.NoError(t, err)
+}
+
+// The check of what runs and the cleanup are one step only under the mutex Up and the MDM
+// restart hold when they start a run.
+func TestLogin_CleansUnderTheServerMutex(t *testing.T) {
+	f := newResidualFixture(t)
+
+	var mutexHeld bool
+	f.s.flushRoutesFn = func() error {
+		mutexHeld = !f.s.mutex.TryLock()
+		if !mutexHeld {
+			f.s.mutex.Unlock()
+		}
+		return nil
+	}
+
+	f.login(t)
+
+	assert.True(t, mutexHeld, "the cleanup should run under the server mutex")
+}
+
+// Login gives up the mutex after cancelling the current attempt, and a run can start in that
+// gap. The cancel below stands in for it, since it runs right where the mutex is given up.
+func TestLogin_RunStartedAfterTheCancel(t *testing.T) {
+	tests := []struct {
+		name      string
+		newRun    func(f *residualFixture) profilemanager.SessionKey
+		wantClean bool
+		wantFlush int
+	}{
+		{
+			name:      "new run of the same profile owns the state file and the routes",
+			newRun:    func(f *residualFixture) profilemanager.SessionKey { return f.active },
+			wantClean: false,
+			wantFlush: 0,
+		},
+		{
+			name:      "new run of another profile owns only the routes",
+			newRun:    func(f *residualFixture) profilemanager.SessionKey { return f.other },
+			wantClean: true,
+			wantFlush: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newResidualFixture(t)
+			f.s.session.beginRun(f.active)
+			f.s.session.setActCancel(func() { f.s.session.beginRun(tt.newRun(f)) })
+
+			f.login(t)
+
+			assert.Equal(t, tt.wantClean, !f.residual(t, f.active), "whether the state file of the profile got cleaned")
+			assert.Equal(t, tt.wantFlush, f.flushes, "number of flushes")
+		})
+	}
+}
+
+// The run Login itself cancelled may still be on its way out. That is no new run: what it
+// leaves in the file is what Login is there to clean.
+func TestLogin_CleansAfterItsOwnCancelledRun(t *testing.T) {
+	f := newResidualFixture(t)
+	f.s.session.beginRun(f.active)
+	f.s.session.setActCancel(func() {})
+
+	f.login(t)
+
+	assert.False(t, f.residual(t, f.active), "the state file of the cancelled run should be cleaned")
+	assert.Equal(t, 1, f.flushes, "no other session runs, so the flush should stay")
+}
+
+// A policy change must not bring back a profile that is gone: it would get a new identity and
+// the default Management URL, and start connecting there. Only the run has to end.
+func TestMDMRestart_RunningProfileWithoutConfigEndsTheRun(t *testing.T) {
+	f := newResidualFixture(t)
+	removed := profilemanager.SessionKey{Profile: "removed-profile", Username: f.active.Username}
+	cfgPath, err := (&profilemanager.ActiveProfileState{ID: removed.Profile, Username: removed.Username}).FilePath()
+	require.NoError(t, err)
+
+	// Should a run start anyway, it ends before it reaches any network.
+	rootCtx, cancel := context.WithCancel(f.ctx)
+	cancel()
+	f.s.rootCtx = rootCtx
+	stopRunAtCleanup(t, f.s, cancel)
+
+	_, giveUp := f.s.session.beginRun(removed)
+	f.s.session.setActCancel(func() { close(giveUp) })
+
+	assert.Error(t, f.s.onMDMPolicyChange(nil, nil), "the restart should be refused")
+
+	assert.NoFileExists(t, cfgPath, "the removed profile should not get a new config")
+	assert.False(t, f.s.session.isClientRunning(), "the run should count as ended")
+	_, running := f.s.session.runningKey()
+	assert.False(t, running, "nothing should run")
+}
+
 func TestRestoreOwnResidual_Flush(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -278,35 +458,121 @@ func TestRestoreOwnResidual_Flush(t *testing.T) {
 	}
 }
 
-// A state file with no sessions file comes from before slots, and the interface and firewall
-// names it records are those of slot 0. Its owner has to keep that slot.
-func TestOpenSlots_ExistingStateFileMakesActiveProfileOwnerOfSlotZero(t *testing.T) {
-	f := newResidualFixture(t)
-	base := profilemanager.DefaultConfigPathDir
+func (f *residualFixture) removeState(t *testing.T, keys ...profilemanager.SessionKey) {
+	t.Helper()
+	for _, key := range keys {
+		require.NoError(t, os.Remove(f.statePath(key)))
+	}
+}
 
-	slots, err := openSlots(base, f.active, f.statePath(f.active))
+func (f *residualFixture) writeDefaultState(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(profilemanager.DefaultConfigPathDir, "state.json")
+	require.NoError(t, os.WriteFile(path, []byte(residualStateJSON), 0o600))
+}
+
+// slotZeroOwner opens the slots and returns what got stored for slot 0.
+func (f *residualFixture) slotZeroOwner(t *testing.T) hostcoord.SlotRecord {
+	t.Helper()
+	base := profilemanager.DefaultConfigPathDir
+	slots, err := f.s.openSlots(base, f.active)
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, slots.Close()) })
 
 	records, err := hostcoord.StoredRecords(base)
 	require.NoError(t, err)
 	require.Len(t, records, 1, "the owner should reach the disk right away")
-	assert.Equal(t, f.active, records[0].Key, "the active profile should be the owner")
 	assert.Equal(t, hostcoord.Slot(0), records[0].Slot, "the owner should hold slot 0")
 	assert.Equal(t, hostcoord.DesiredDown, records[0].Desired, "migration is no request to connect")
+	return records[0]
+}
+
+// A state file with no sessions file comes from before slots, and the interface and firewall
+// names it records are those of slot 0. Its owner has to keep that slot.
+func TestOpenSlots_ActiveStateFileMakesActiveProfileOwner(t *testing.T) {
+	f := newResidualFixture(t)
+	f.removeState(t, f.other)
+
+	assert.Equal(t, f.active, f.slotZeroOwner(t).Key, "the active profile should be the owner")
 
 	// The next start cleans the file through the stored session.
 	require.NoError(t, f.s.restoreResidualAtStart(f.ctx))
 	assert.False(t, f.residual(t, f.active), "the owner's state file should be cleaned")
-	assert.True(t, f.residual(t, f.other), "a profile that is not stored should stay as it is")
+}
+
+// The profile that left the only state file is the one using the names of slot 0, whichever
+// profile happens to be selected.
+func TestOpenSlots_OnlyStateFileOfAnotherProfileMakesItOwner(t *testing.T) {
+	f := newResidualFixture(t)
+	f.removeState(t, f.active)
+
+	assert.Equal(t, f.other.Profile, f.slotZeroOwner(t).Key.Profile, "the profile with the state file should be the owner")
+}
+
+func TestOpenSlots_OnlyDefaultStateFileMakesDefaultOwner(t *testing.T) {
+	f := newResidualFixture(t)
+	f.removeState(t, f.active, f.other)
+	f.writeDefaultState(t)
+
+	owner := f.slotZeroOwner(t)
+	assert.Equal(t, profilemanager.ID(profilemanager.DefaultProfileName), owner.Key.Profile, "default should be the owner")
+}
+
+// The default profile is shared by every user, so the active state can carry a username the
+// state file does not.
+func TestOpenSlots_ActiveDefaultProfileKeepsItsKey(t *testing.T) {
+	f := newResidualFixture(t)
+	f.removeState(t, f.active, f.other)
+	f.writeDefaultState(t)
+	f.active = profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName, Username: f.active.Username}
+
+	assert.Equal(t, f.active, f.slotZeroOwner(t).Key, "the key of the active profile should be stored")
+}
+
+func TestOpenSlots_SeveralStateFilesMakeActiveProfileOwner(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, f *residualFixture)
+	}{
+		{
+			name:  "the active profile has one of them",
+			setup: func(*testing.T, *residualFixture) {},
+		},
+		{
+			name: "the active profile has none",
+			setup: func(t *testing.T, f *residualFixture) {
+				f.removeState(t, f.active)
+				f.writeDefaultState(t)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newResidualFixture(t)
+			tt.setup(t, f)
+
+			assert.Equal(t, f.active, f.slotZeroOwner(t).Key, "the active profile should be the owner")
+		})
+	}
+}
+
+// The start cleans what the files record and keeps the files, so the owner stays the same
+// whether the slots open before or after the cleanup.
+func TestOpenSlots_OwnerDoesNotDependOnTheCleanup(t *testing.T) {
+	f := newResidualFixture(t)
+	f.removeState(t, f.active)
+
+	require.NoError(t, f.s.restoreResidualAtStart(f.ctx))
+
+	assert.Equal(t, f.other.Profile, f.slotZeroOwner(t).Key.Profile, "the cleaned file should still name the owner")
 }
 
 func TestOpenSlots_NoStateFileNamesNoOwner(t *testing.T) {
 	f := newResidualFixture(t)
-	require.NoError(t, os.Remove(f.statePath(f.active)))
+	f.removeState(t, f.active, f.other)
 	base := profilemanager.DefaultConfigPathDir
 
-	slots, err := openSlots(base, f.active, f.statePath(f.active))
+	slots, err := f.s.openSlots(base, f.active)
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, slots.Close()) })
 
@@ -319,7 +585,7 @@ func TestOpenSlots_StoredSessionsWinOverStateFile(t *testing.T) {
 	f := newResidualFixture(t)
 	writeStoredSessions(t, f.other)
 
-	slots, err := openSlots(profilemanager.DefaultConfigPathDir, f.active, f.statePath(f.active))
+	slots, err := f.s.openSlots(profilemanager.DefaultConfigPathDir, f.active)
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, slots.Close()) })
 
@@ -328,15 +594,16 @@ func TestOpenSlots_StoredSessionsWinOverStateFile(t *testing.T) {
 	assert.Equal(t, f.other, records[0].Key, "slot 0 should stay with its stored owner")
 }
 
-// Whether the state file exists decides who owns slot 0. An answer the daemon did not get must
+// Whether a state file exists decides who owns slot 0. An answer the daemon did not get must
 // not be read as "no": the slot could go to a profile whose names differ from those recorded.
 func TestOpenSlots_UnknownStateFileRefuses(t *testing.T) {
 	f := newResidualFixture(t)
 	blocker := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+	profilemanager.DefaultConfigPathDir = blocker
 	base := t.TempDir()
 
-	_, err := openSlots(base, f.active, filepath.Join(blocker, "state.json"))
+	_, err := f.s.openSlots(base, f.active)
 	assert.Error(t, err)
 
 	_, err = os.Stat(filepath.Join(base, "sessions.json"))

@@ -118,27 +118,20 @@ func (s *Server) publishConfigChangedEvent(source string) {
 // MDM change behaves identically to a fresh boot under the new policy.
 // A profile selected without a Down stays selected: the policy change is
 // no request to connect it. When no run was alive, running is false and
-// the active profile is the one started.
+// the active profile is the one started. The running profile is read as
+// stored, without provisioning: it can have been removed since it started,
+// and a new identity would bring it back. The run then stays ended.
 //
 // MUST be called with s.mutex held — onMDMPolicyChange holds the lock
 // for the entire restart sequence (cancel + quiescence wait + re-spawn)
 // so concurrent Up/Down/Status RPCs observe a coherent post-restart
 // state.
 func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, running bool) error {
-	profile := profileStateOf(runKey)
-	if !running {
-		activeProf, err := s.profileManager.GetActiveProfileState()
-		if err != nil {
-			return fmt.Errorf("get active profile state: %w", err)
-		}
-		profile = activeProf
-	}
-	config, _, err := s.getConfig(profile)
+	key, config, err := s.mdmRestartConfig(runKey, running)
 	if err != nil {
-		return fmt.Errorf("get profile config: %w", err)
+		return err
 	}
 
-	key := profile.SessionKey()
 	s.session.setConfig(key, config)
 	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
@@ -150,6 +143,27 @@ func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, run
 	go s.connectWithRetryRuns(ctx, key, config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
+}
+
+func (s *Server) mdmRestartConfig(runKey profilemanager.SessionKey, running bool) (profilemanager.SessionKey, *profilemanager.Config, error) {
+	if running {
+		config, err := s.storedRunningConfig(runKey)
+		if err != nil {
+			s.session.markClientDown()
+			return profilemanager.SessionKey{}, nil, fmt.Errorf("get running profile config: %w", err)
+		}
+		return runKey, config, nil
+	}
+
+	activeProf, err := s.profileManager.GetActiveProfileState()
+	if err != nil {
+		return profilemanager.SessionKey{}, nil, fmt.Errorf("get active profile state: %w", err)
+	}
+	config, _, err := s.getConfig(activeProf)
+	if err != nil {
+		return profilemanager.SessionKey{}, nil, fmt.Errorf("get profile config: %w", err)
+	}
+	return activeProf.SessionKey(), config, nil
 }
 
 // mdmManagedFieldConflicts returns the names of MDM-managed keys whose
