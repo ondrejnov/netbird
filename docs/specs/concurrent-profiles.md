@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. Další krok je F3, PR 12 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 a obě poloviny PR 13 jsou hotové, viz 2.5. Další krok je PR 14 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -98,13 +98,13 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q6 | Kolize DNS domény (sekce 6) | Neimplementováno, rozhraní pro zjištění kolize není známé | 6 |
 | Q7 | Prefixové porovnání v ICE blacklistu | `wt1` vyloučí i `wt10`, chyba na straně vyloučení | 8 |
 | Q8 | Ověření DNS na reálném resolved a NM | Harness je Alpine bez systemd, testy běží proti falešným službám na D-Bus | 6 |
-| Q9 | **Vynucení I3, I4 v userspace režimu (sekce 7)** | **Rozhodnuto:** vynucení se řídí typem firewallu, jaderná izolace je povinná všude, kde existuje nativní backend | 5, 13 |
-| Q10 | **`nativeRouter` v uspfilteru** | **Rozhodnuto:** routovaný paket jde do jádra, proto je v tomto režimu jaderná izolace povinná | 5, 13 |
+| Q9 | **Vynucení I3, I4 v userspace režimu (sekce 7)** | **Rozhodnuto a napojeno:** vynucení se řídí typem firewallu, jaderná izolace je povinná všude, kde existuje nativní backend, viz 2.5 | 5, 13 |
+| Q10 | **`nativeRouter` v uspfilteru** | **Rozhodnuto a napojeno:** routovaný paket jde do jádra, proto je v tomto režimu jaderná izolace povinná. Bez nativního backendu se session s vypnutými server routes odmítne, viz 2.5 | 5, 13 |
 | Q11 | Minimální jádro | `own` potřebuje jádro 5.6 a novější, na starším se session nespustí | 5 |
 | Q12 | iptables bez modulů ipset | Izolace odmítne session (I6), bez fallbacku | 5 |
-| Q13 | Session s v6 bez funkční v6 izolace | **Rozhodnuto:** v6 se odebere a session pokračuje na v4 | 5, 13 |
+| Q13 | Session s v6 bez funkční v6 izolace | **Rozhodnuto a napojeno:** v6 se odebere a session pokračuje na v4 | 5, 13 |
 | Q14 | Opakování `Verify` | Jen po instalaci enginu, cizí pravidlo nad skokem v iptables by do té doby izolaci obešlo | 5, 13 |
-| Q15 | Překryv v6 u běžící session | `Add` hlásí `IPv6Disabled`, daemon musí v6 odebrat za běhu | 5, 15 |
+| Q15 | Překryv v6 u běžící session | `Add` běží při každém pokusu enginu a změna adresy z Managementu engine restartuje, `IPv6Disabled` proto odebere v6 v dalším pokusu. Session, která v6 ztratila, ho po odchodu druhé session získá až po svém restartu | 5, 13, 15 |
 | Q16 | Adresy na interface jiné session mimo její prefix, např. `fe80::` | Nezahrnuto do `overlays` | 5 |
 | Q17 | Formát `sessions.json` | **Schváleno:** `{version:1, sessions:[{profile, username, slot, desired}]}`, neznámé pole je poškození | 7 |
 | Q18 | Explicitní `WgPort` obsazený cizím procesem | Port z alokátoru jako dnes, alternativa je odmítnutí | 7 |
@@ -113,7 +113,7 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
 | Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
 | Q23 | Selhání v6 části izolace u session s v6 v nainstalované rovině iptables | Add vrací chybu, pokus bez overlaye nejde v harnessu otestovat | 5 |
-| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. **Zatím vyřešeno odmítnutím:** vedle běžící session `Up` a `Login` zbytek neuklízí a `CleanState` se odmítne, viz 2.5. Úklid podle názvů slotu patří k napojení prostředků | 11, 13 |
+| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. **Zatím vyřešeno odmítnutím:** vedle běžící session `Up` a `Login` zbytek neuklízí a `CleanState` se odmítne, viz 2.5. Napojení prostředků to nemění: soubor z běhu před sloty nese názvy slotu 0, otevřené v 2.5 | 11, 13 |
 | Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu | 11 |
 | Q26 | `RemoveProfile` běžícího profilu | **Rozhodnuto a opraveno** ve `f3/run-config`: `FailedPrecondition` před deregistrací. `logout` podle 5.7 zůstává na PR 16 | 11, 16 |
 | Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
@@ -324,9 +324,8 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   publikovaný až do konce `engine.Stop`, aby `CleanState` nesáhl na hostitele pod ním. Ostatní RPC v té chvíli odpovídají ze
   stavu rušeného běhu, stejně jako při MDM restartu. Bez gate je jediný rozdíl, že během zastavení enginu a deregistrace
   odpovídají ostatní RPC. `Up` bez gate drží `Server.mutex` po celou dobu jako dřív.
-- **Dočasné odmítnutí:** nic zatím session nedává vlastní interface, port ani izolaci, proto `admitSessionLocked` vrátí
-  `Unimplemented`, když hostitele drží jiná session. `hostIsolationWired` nastavují jen testy, napojení prostředků ho nahradí.
-  Limit se kontroluje před tím. Hostitele drží session s živou gorutinou, během MDM restartu a od přijetí po spuštění běhu
+- **Dočasné odmítnutí (do druhé poloviny PR 13):** nic zatím session nedává vlastní interface, port ani izolaci, proto `admitSessionLocked` vrací
+  `Unimplemented`, když hostitele drží jiná session. Hostitele drží session s živou gorutinou, během MDM restartu a od přijetí po spuštění běhu
   (`hostClaim`). `Down` ho tedy uvolní až koncem gorutiny, a to i když se zasekne. První session běží s názvy z configu bez
   ohledu na číslo slotu, které zatím jen rezervuje místo v `sessions.json` (`Slots.Ensure`, porty nedrží).
 - **Odmítnutí při gate** (`refuseUnsupportedRuntime`, `FailedPrecondition`): netstack, `AdvancedRouting()` false,
@@ -336,24 +335,47 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   Kontrola identity je PR 14.
 - **`Down`** s `all` míří na všechny, kombinace se selektorem je `InvalidArgument`. `Down` a `Logout` zapisují `desired=down`.
   Zastavení služby jde přes `StopSessions`, které `desired` nemění, a stejně tak sleep.
-- **`Status`:** `sessions` se plní jen s gate a obsahuje běžící session a `focused`. `interface_name` je zatím z configu.
+- **`Status`:** `sessions` se plní jen s gate a obsahuje běžící session a `focused`. `interface_name` je od druhé poloviny ze `Slots.Running`.
 - **Obnova:** `desired=up` startuje s focused první. Focused se připojí i bez uloženého stavu, pokud při startu neexistoval
   žádný záznam, protože migrace ukládá vlastníka slotu 0 jako `down` a daemon doposud aktivní profil připojoval. `DisableAutoConnect` má
   přednost před `desired`. Config nefocused session se čte bez provisioningu, smazaný profil se nevrátí. Bez gate se soubor jen
-  čte a připojí se aktivní profil. Před napojením se vrátí jen první session, ostatní zůstanou `up` a zaloguje se chyba.
+  čte a připojí se aktivní profil.
   Poškozený `sessions.json` s gate odmítne start služby a soubor zůstane na místě.
 - **Sleep a MDM** běží přes všechny session souběžně (`forEachSession`). Probuzení vrací jen to, co sleep vzal dolů. MDM obnoví
-  config i session bez běhu, protože z něj čtou kill switche. Běh, který vzdal, se nevrátí, pokud mezitím hostitele drží jiná.
+  config i session bez běhu, protože z něj čtou kill switche. Běh, který vzdal, se nevrátí, pokud mezitím limit zaplnily jiné session.
 - **`Login` s gate** cílí jen na focused, jiný profil je `FailedPrecondition`, protože navazující `WaitSSOLogin` jinou session
   zatím nepojmenuje a `Login` focus nepřesouvá. `up --profile X` z dnešního CLI funguje, protože nejdřív přepne.
 - **`Logout` a `RemoveProfile` s gate** běžící session odmítnou před deregistrací (5.7).
 - **Přesunuto na session:** `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`. Záchyty si pamatují vlastníka, focus se
   může během záchytu změnit. **Zůstává na `Server`:** `bundleCapture`, `persistSyncResponse`, `probeThrottle` (PR 14, 17).
-- **Zatím nepokryto:** `localMetrics` a `updateManager` jsou svázané se session focused při startu a `SetUpdateManager`
-  dostane i nefocused session (5.4 bod 5, další krok a PR 17). `generateDebugBundle` běží celý pod `Server.mutex` a zdrží ostatní
+- **Zatím nepokryto:** `localMetrics` a `updateManager` jsou svázané se session focused při startu (PR 17). `generateDebugBundle` běží celý pod `Server.mutex` a zdrží ostatní
   session (PR 17). `SubscribeStatus` a `SubscribeEvents` zůstávají na session focused v okamžiku přihlášení (PR 14). Událost
   o změně seznamu profilů proto jde na předchozí i nový focus. `Profile.connection_status` a `SystemEvent.profile_id` se
   neplní (PR 16, 17).
+
+**PR 13, druhá polovina, `f3/host-wiring`:**
+
+- **Tvar:** `internal.DaemonHost` je jeden na daemon (`Coordinator`, `Slots`, `SessionIsolation`, `Accounting`), vzniká ve startu a předává se závislostí. `SessionHost` je podíl jedné session a dostává ho `ConnectClient` přes `WithSessionHost` a engine přes `EngineConfig.Session`. Nil znamená dnešní chování a všechny háčky v `engine.go` ho berou. Dočasné `Unimplemented` je pryč, `admitSessionLocked` hlídá jen limit.
+- **Každý pokus enginu** projde `attach`: `Slots.Reserve` podle hodnot z configu, kontrola překryvu, `Isolation.Add`, `Sessions.Set`. `detach` běží až po zastavení enginu a pořadí pod `attachMu` je opačné. Nový `Reserve` při každém pokusu znamená, že port obsazený mezi pokusy dostane nový z alokátoru. Do configu se nic nezapisuje, `run` předává jméno a port jen v `EngineConfig`.
+- **`ErrSessionRefused`** ukončí obě retry smyčky (`backoff.Permanent`). Platí pro selhání `attach`, `Verify` po `engine.Start` a pro `ErrSessionNotIsolated` z firewallu. Refused session zůstává v `sessions.json` jako `up`, zkusí se znovu po restartu služby. `Up` bez `async` zatím vrací obecné `client gave up to connect`, konkrétní důvod je v logu a patří do `conflict` v PR 15.
+- **Backend se zjišťuje jednou za daemon** (`SessionIsolation`), protože `check()` odpovídá podle tabulek a první session je mění: s jedinou tabulkou `netbird` by další odpověď byla `IPTABLES`. Manager i izolace pak používají stejný backend.
+- **Vynucení (Q9, Q10):** `NewSessionFirewall` odmítne nil izolaci i nil zdroj, nativní backend bez session v jaderné izolaci, nepřítomnost backendu u kernel interfacu a uspfilter s vypnutými server routes bez jaderné izolace. Poslední případ je konzervativní: `nativeRouter` se v uspfilteru nastaví až v `EnableRouting`, které bez server routes nikdo nevolá, kontrola se ale opírá o config, ne o okamžitý stav. Forced uspfilter vedle nativního backendu má obojí. `DisableFirewall` bez nativního backendu se odmítne v `attach`.
+- **Přesunuto do `SessionIsolation`:** `ipfwdstate.HostState`, protože `ipfwdstate` se na WASM nepřeloží a jeho jediní uživatelé jsou nativní managery. Manager session sdílený stav při `Close` uvolní, takže `ip_forward` vrátí poslední session i bez `DisableRouting`.
+- **`firewalld.SetParentContext`** session nevolá: rodič je jeden na proces a konec jedné session by jinému `TrustInterface` tiše vypnul. `TrustInterface` session tak nejde zrušit jejím kontextem. Parametr podle 5.4 bod 7 tím není hotový.
+- **`currentMTU`** je atomický, dva souběžné starty ho pod `-race` shodily. Hodnota dál platí pro celý proces, pole resolveru podle 5.4 bod 7 není hotové. Certproof se neměnil.
+- **I8:** `GetDefaultNextHopExcluding` vrátí výchozí trasu z main, když vyhledání skončí na interface některé session. Monitor dostane seznam přes `WithNetbirdInterfaces`. Sledování v `checkChange` se neměnilo, filtruje main.
+- **`updateManager`** se rozhoduje při startu běhu podle tehdejšího focusu. `SwitchProfile` za běhu ho nepřesouvá, nový focus ho dostane při dalším běhu (PR 17).
+- **RemoveAll** běží při startu služby jen, když existuje záznam v `sessions.json`, i při vypnuté gate. Bez něj hostitel zůstane netknutý (I1), test to hlídá včetně cizí tabulky `netbird-iso`.
+- **Harness:** kernel WireGuard v kontejneru je k dispozici. `TestTwoSessionsOnRealEngines` běží na userspace i kernel interfacu s nftables i iptables. Pakety mezi sítěmi se testují jen na userspace interfacu, protože se vkládají do TUN přes `Engine.InjectFromPeer` (jen pod tagem `privileged`), kernel interface takový vstup nemá. Každý drop má kontrolu: bez odesílatele v izolaci stejný paket projde, po vrácení se zahodí i známý flow. Routing peer v testech existuje jen v network map a test ho značí jako připojený, routy tak instaluje skutečný watcher. Data mezi skutečnými peery zůstávají na e2e z brány v1.
+- **Výběr backendu v testu:** bez zásahu kontejner volí iptables (iptables-nft). nftables vybere tabulka `filter` s chainem, kterou test založí.
+- **I1:** `testdata/host_snapshot_*.golden` jsou zapsané před napojením a jednorázově ověřené na `main` (`313f71fb4`) v dočasném worktree, shoda bajt po bajtu pro oba backendy: linky, pravidla, routy, nft, `iptables-save`, sysctl, `resolv.conf`. Soubory se kvůli průchodu testu nepřegenerovávají. Při porovnání čistého hostitele (I7) se ignorují prázdné vestavěné chainy, ty zakládá iptables-nft při každém použití, i bez NetBirdu.
+
+**Otevřené po PR 13:**
+
+- **Residual vedle běžící session (Q24):** soubor z běhu před sloty nese názvy slotu 0, proto `Up` vedle jiné session zbytek dál neuklízí a uklidí ho až start služby. Pokud `Cleanup` selhal a zůstal v souboru, další běh téhož profilu jeho záznam přepíše.
+- **Klíč slotu 0 ze souboru (2.4):** nese sanitizované jméno uživatele. Důsledek je jen nevyužitý záznam a jiné číslo slotu pro `first.last`, názvy jsou po napojení na slotu, ne na profilu. Neřešeno.
+- **SSH config (`99-netbird.conf`):** jeden soubor pro celý hostitel, stop jedné session ho smaže i druhé (PR 17). V testech je SSH vypnuté.
+- **DNS:** ověřen jen backend `file`, který v kontejneru vybere daemon. Pro resolved a NM platí Q8.
 
 ## 3. Architektura: proč jeden daemon
 
