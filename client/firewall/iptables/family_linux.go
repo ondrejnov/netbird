@@ -101,6 +101,7 @@ type family struct {
 	iptablesClient *iptables.IPTables
 	wgIface        iFaceMapper
 	v6             bool
+	names          chainNames
 
 	// Peer ACL chain bookkeeping.
 	entries         aclEntries
@@ -127,11 +128,17 @@ type family struct {
 	stateManager *statemanager.Manager
 }
 
-func newFamily(iptablesClient *iptables.IPTables, wgIface iFaceMapper, mtu uint16) (*family, error) {
+func newFamily(iptablesClient *iptables.IPTables, wgIface iFaceMapper, mtu uint16, opts ...Option) (*family, error) {
+	names, err := newChainNames(newConfig(opts...).slot)
+	if err != nil {
+		return nil, fmt.Errorf("derive chain names: %w", err)
+	}
+
 	r := &family{
 		iptablesClient:  iptablesClient,
 		wgIface:         wgIface,
 		v6:              iptablesClient.Proto() == iptables.ProtocolIPv6,
+		names:           names,
 		entries:         make(aclEntries),
 		optionalEntries: make(map[chainKey][]entry),
 		filters:         make(map[nbid.RuleID]*Rule),
