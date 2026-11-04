@@ -31,7 +31,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/management/server"
@@ -41,6 +40,7 @@ import (
 	"github.com/netbirdio/netbird/management/server/settings"
 	"github.com/netbirdio/netbird/management/server/store"
 	"github.com/netbirdio/netbird/management/server/telemetry"
+	"github.com/netbirdio/netbird/management/server/types"
 	mgmtProto "github.com/netbirdio/netbird/shared/management/proto"
 	"github.com/netbirdio/netbird/shared/signal/proto"
 	signalServer "github.com/netbirdio/netbird/signal/server"
@@ -87,12 +87,12 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 
 	counter := 0
 	// start the management server
-	_, mgmtAddr, err := startManagement(t, signalAddr, &counter)
+	_, mgmtAddr, err := startManagement(t, signalAddr, "", &counter)
 	if err != nil {
 		t.Fatalf("failed to start management server: %v", err)
 	}
 
-	ctx := internal.CtxInitState(context.Background())
+	ctx := context.Background()
 
 	ctx, cancel := context.WithDeadline(ctx, time.Now().Add(30*time.Second))
 	defer cancel()
@@ -121,15 +121,18 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 
 	s := New(ctx, "debug", "", false, false, false, false)
 
-	s.config = config
+	s.session.setConfig(profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}, config)
 
-	s.statusRecorder = peer.NewRecorder(config.ManagementURL.String())
+	s.session.statusRecorder = peer.NewRecorder(config.ManagementURL.String())
 	t.Setenv(retryInitialIntervalVar, "1s")
 	t.Setenv(maxRetryIntervalVar, "2s")
 	t.Setenv(maxRetryTimeVar, "5s")
 	t.Setenv(retryMultiplierVar, "1")
 
-	s.connectWithRetryRuns(ctx, config, s.statusRecorder, nil, nil)
+	key := profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}
+	runCtx, cancelRun := s.session.runContext(ctx)
+	defer cancelRun()
+	s.connectWithRetryRuns(runCtx, key, config, s.session.statusRecorder, nil, nil)
 	if counter != 1 {
 		t.Fatalf("expected exactly 1 login attempt (PermissionDenied must stop the retry loop), got %d", counter)
 	}
@@ -145,7 +148,7 @@ func (m *mockServer) Login(ctx context.Context, req *mgmtProto.EncryptedMessage)
 	return m.ManagementServiceServer.Login(ctx, req)
 }
 
-func startManagement(t *testing.T, signalAddr string, counter *int) (*grpc.Server, string, error) {
+func startManagement(t *testing.T, signalAddr, storeFile string, counter *int) (*grpc.Server, string, error) {
 	t.Helper()
 	dataDir := t.TempDir()
 
@@ -165,7 +168,7 @@ func startManagement(t *testing.T, signalAddr string, counter *int) (*grpc.Serve
 		return nil, "", err
 	}
 	s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
-	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), "", config.Datadir)
+	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), storeFile, config.Datadir)
 	if err != nil {
 		return nil, "", err
 	}
@@ -179,9 +182,9 @@ func startManagement(t *testing.T, signalAddr string, counter *int) (*grpc.Serve
 	ctrl := gomock.NewController(t)
 	t.Cleanup(ctrl.Finish)
 
-	permissionsManagerMock := permissions.NewMockManager(ctrl)
+	permissionsManager := permissions.NewManager(store)
 	peerLiveness := peerlivenesstest.NewStarted(t, store)
-	peersManager := peers.NewManager(store, permissionsManagerMock, peerLiveness)
+	peersManager := peers.NewManager(store, permissionsManager, peerLiveness)
 	settingsManagerMock := settings.NewMockManager(ctrl)
 
 	jobManager := job.NewJobManager(nil, store, peersManager)
@@ -197,12 +200,20 @@ func startManagement(t *testing.T, signalAddr string, counter *int) (*grpc.Serve
 	require.NoError(t, err)
 
 	settingsMockManager := settings.NewMockManager(ctrl)
+	settingsMockManager.EXPECT().
+		GetSettings(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&types.Settings{}, nil).
+		AnyTimes()
+	settingsMockManager.EXPECT().
+		GetExtraSettings(gomock.Any(), gomock.Any()).
+		Return(&types.ExtraSettings{}, nil).
+		AnyTimes()
 	groupsManager := groups.NewManagerMock()
 
 	requestBuffer := server.NewAccountRequestBuffer(context.Background(), store)
 	peersUpdateManager := update_channel.NewPeersUpdateManager(metrics)
 	networkMapController := controller.NewController(context.Background(), store, metrics, peersUpdateManager, requestBuffer, server.MockIntegratedValidator{}, settingsMockManager, "netbird.selfhosted", manager.NewEphemeralManager(store, peersManager), config, nil)
-	accountManager, err := server.BuildManager(context.Background(), config, store, networkMapController, jobManager, nil, "", eventStore, nil, false, ia, metrics, settingsMockManager, permissionsManagerMock, false, cacheStore, peerLiveness)
+	accountManager, err := server.BuildManager(context.Background(), config, store, networkMapController, jobManager, nil, "", eventStore, nil, false, ia, metrics, settingsMockManager, permissionsManager, false, cacheStore, peerLiveness)
 	if err != nil {
 		return nil, "", err
 	}

@@ -9,7 +9,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	nberrors "github.com/netbirdio/netbird/client/errors"
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/routemanager/systemops"
 	"github.com/netbirdio/netbird/client/internal/statemanager"
 	"github.com/netbirdio/netbird/client/proto"
@@ -38,7 +37,7 @@ func (s *Server) ListStates(_ context.Context, _ *proto.ListStatesRequest) (*pro
 
 // CleanState handles cleaning of states (performing cleanup operations)
 func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (*proto.CleanStateResponse, error) {
-	if s.connectClient != nil && (s.connectClient.Status() == internal.StatusConnected || s.connectClient.Status() == internal.StatusConnecting) {
+	if s.session.clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
 
@@ -81,7 +80,7 @@ func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (
 
 // DeleteState handles deletion of states without cleanup
 func (s *Server) DeleteState(ctx context.Context, req *proto.DeleteStateRequest) (*proto.DeleteStateResponse, error) {
-	if s.connectClient != nil && (s.connectClient.Status() == internal.StatusConnected || s.connectClient.Status() == internal.StatusConnecting) {
+	if s.session.clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
 
@@ -120,6 +119,22 @@ func RestoreResidualState(ctx context.Context, statePath string) error {
 		return nil
 	}
 
+	var merr *multierror.Error
+
+	if err := cleanStateFile(ctx, statePath); err != nil {
+		merr = multierror.Append(merr, err)
+	}
+
+	// clean up any remaining routes independently of the state file
+	if err := flushMarkedRoutes(); err != nil {
+		merr = multierror.Append(merr, err)
+	}
+
+	return nberrors.FormatErrorOrNil(merr)
+}
+
+// cleanStateFile undoes what one state file records and persists the outcome.
+func cleanStateFile(ctx context.Context, statePath string) error {
 	mgr := statemanager.New(statePath)
 
 	// register the states we are interested in restoring
@@ -136,10 +151,12 @@ func RestoreResidualState(ctx context.Context, statePath string) error {
 		merr = multierror.Append(merr, fmt.Errorf("persist state: %w", err))
 	}
 
-	// clean up any remaining routes independently of the state file
-	if err := systemops.New(nil, nil).FlushMarkedRoutes(); err != nil {
-		merr = multierror.Append(merr, fmt.Errorf("flush marked routes: %w", err))
-	}
-
 	return nberrors.FormatErrorOrNil(merr)
+}
+
+func flushMarkedRoutes() error {
+	if err := systemops.New(nil, nil).FlushMarkedRoutes(); err != nil {
+		return fmt.Errorf("flush marked routes: %w", err)
+	}
+	return nil
 }

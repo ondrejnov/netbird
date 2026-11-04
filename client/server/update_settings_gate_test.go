@@ -10,7 +10,6 @@ import (
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/mdm"
 	"github.com/netbirdio/netbird/client/proto"
@@ -110,10 +109,10 @@ func TestSetConfig_ChangeAllowedWhenTheSwitchIsOff(t *testing.T) {
 func TestLogin_ChangingTheManagementURLIsRefused(t *testing.T) {
 	s, _, profName, username, cfgPath := setupServerWithProfile(t)
 	s.updateSettingsDisabled = true
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	cancelled := false
-	s.actCancel = func() { cancelled = true }
+	s.session.actCancel = func() { cancelled = true }
 
 	_, err := s.Login(userCtx(), &proto.LoginRequest{
 		Username:      &username,
@@ -294,7 +293,7 @@ func TestSetConfig_ManagementURLSpellingsPassTheGate(t *testing.T) {
 func TestLogin_RestatingTheStoredConfigPassesTheGate(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
 	s.updateSettingsDisabled = true
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	// Stand in for the management round trip the handler makes once the gate
 	// lets it through, so this test exercises the gate and not the network:
@@ -321,7 +320,7 @@ func TestLogin_RestatingTheStoredConfigPassesTheGate(t *testing.T) {
 func TestLogin_ChangeThatAppearsMidRequestIsRefused(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
 	s.updateSettingsDisabled = true
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	target := "moved-under-us"
 	targetPath := filepath.Join(profilemanager.DefaultConfigPathDir, target+".json")
@@ -332,7 +331,7 @@ func TestLogin_ChangeThatAppearsMidRequestIsRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelled := false
-	s.actCancel = func() { cancelled = true }
+	s.session.actCancel = func() { cancelled = true }
 
 	// Stand in for a concurrent writer that repoints the profile between the two
 	// checks, which is the interleaving the lock has to make safe. The login

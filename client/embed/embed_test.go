@@ -3,6 +3,7 @@ package embed
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -66,6 +67,33 @@ func TestClientStartTimeoutRollback(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		t.Fatal("client.Start did not return after its context expired: Engine.Stop deadlocked against Engine.Start waiting for the signal stream")
 	}
+}
+
+// A client given a state file keeps its state on disk, so the connect client has to
+// receive that file. Without it Start would fail on the missing path right away instead
+// of reaching the signal server and running into the context deadline.
+func TestClientStartWithStatePathReachesEngine(t *testing.T) {
+	// New exports the path through this variable, t.Setenv restores it afterwards.
+	t.Setenv("NB_DNS_STATE_FILE", "")
+
+	signalAddr := startBlackholeSignal(t)
+	mgmAddr := startManagement(t, signalAddr)
+
+	wgPort := 0
+	client, err := New(Options{
+		DeviceName:    "embed-state-path-test",
+		SetupKey:      testSetupKey,
+		ManagementURL: "http://" + mgmAddr,
+		WireguardPort: &wgPort,
+		StatePath:     filepath.Join(t.TempDir(), "state.json"),
+	})
+	require.NoError(t, err, "embed client creation must succeed")
+
+	startCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.ErrorIs(t, client.Start(startCtx), context.DeadlineExceeded,
+		"Start must get as far as the signal stream")
 }
 
 // startBlackholeSignal starts a gRPC server without the SignalExchange service

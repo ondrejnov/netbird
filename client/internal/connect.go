@@ -53,6 +53,10 @@ import (
 	"github.com/netbirdio/netbird/version"
 )
 
+// errNoStatePath means a client that keeps its state on disk was built without a state
+// file. Falling back to the active profile would pair the config with a foreign file.
+var errNoStatePath = errors.New("state file path is not set")
+
 // androidRunOverride is set on Android to inject mobile dependencies
 // when using embed.Client (which calls Run() with empty MobileDependency).
 var androidRunOverride func(c *ConnectClient, runningChan chan struct{}, logPath string) error
@@ -80,8 +84,12 @@ type ConnectClient struct {
 	// availability and sweeps connections on network change.
 	netMgr *netevents.Manager
 
+	// statePath is the state file of the profile this client runs.
+	statePath           string
 	profileOwner        string
 	profileOwnerUnknown bool
+	// daemonSession marks a client whose daemon already probed the routing support.
+	daemonSession bool
 }
 
 // ConnectClientOption configures optional ConnectClient behavior.
@@ -98,16 +106,23 @@ func WithNetEvents(events *netevents.Manager) ConnectClientOption {
 	return func(c *ConnectClient) { c.netMgr = events }
 }
 
-// WithProfileOwner names the OS account the active profile belongs to, whose own
-// certificate store answers user certificate posture checks.
-func WithProfileOwner(username string) ConnectClientOption {
-	return func(c *ConnectClient) { c.profileOwner = username }
+// WithStatePath names the state file of a client that runs no daemon session.
+func WithStatePath(path string) ConnectClientOption {
+	return func(c *ConnectClient) { c.statePath = path }
 }
 
-// WithUnknownProfileOwner records that the active profile's owner could not be
-// determined, so no user's certificate store answers certificate posture checks.
-func WithUnknownProfileOwner() ConnectClientOption {
-	return func(c *ConnectClient) { c.profileOwnerUnknown = true }
+// WithSessionKey binds the client to one profile. The state file and the account
+// whose certificate store answers user certificate posture checks both come from
+// the key and never from the active profile, which can change while the client runs.
+// An empty key leaves the owner unknown, so that no user's store answers those checks.
+// Only the daemon runs clients with a key, and it probes the routing support at startup.
+func WithSessionKey(key profilemanager.SessionKey) ConnectClientOption {
+	return func(c *ConnectClient) {
+		c.statePath = profilemanager.NewServiceManager("").GetStatePathFor(key)
+		c.profileOwner = key.Username
+		c.profileOwnerUnknown = key.Profile == ""
+		c.daemonSession = true
+	}
 }
 
 func NewConnectClient(
@@ -227,7 +242,9 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 
 	log.Infof("starting NetBird client version %s on %s/%s", version.NetbirdVersion(), runtime.GOOS, runtime.GOARCH)
 
-	nbnet.Init()
+	if !c.daemonSession {
+		nbnet.Init()
+	}
 
 	// Initialize metrics once at startup (always active for debug bundles)
 	if c.clientMetrics == nil {
@@ -300,8 +317,10 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 		path = mobileDependency.StateFilePath
 		stateManager = statemanager.New(path)
 	default:
-		sm := profilemanager.NewServiceManager("")
-		path = sm.GetStatePath()
+		if c.statePath == "" {
+			return wrapErr(errNoStatePath)
+		}
+		path = c.statePath
 		stateManager = statemanager.New(path)
 	}
 	stateManager.RegisterState(&sshconfig.ShutdownState{})

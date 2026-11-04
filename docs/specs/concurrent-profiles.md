@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. Další krok je F2, před ním rozhodnout 2.3 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. Další krok je F3, PR 12 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -112,6 +112,13 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q20 | Foreground režim a zámek `sessions.json` | Druhá instance se odmítne. Návrh: foreground `Slots` vůbec neotevírá | 7, 13 |
 | Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
 | Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
+| Q23 | Selhání v6 části izolace u session s v6 v nainstalované rovině iptables | Add vrací chybu, pokus bez overlaye nejde v harnessu otestovat | 5 |
+| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. S gate může `Up` téhož profilu sáhnout na výchozí názvy běžící session (I2), řešit v PR 13 | 11, 13 |
+| Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu | 11 |
+| Q26 | `RemoveProfile` běžícího profilu | Projde, běh skončí až při MDM restartu. `profile remove` má podle 5.7 vracet chybu, řešit v PR 16 | 11, 16 |
+| Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
+| Q28 | `onMDMPolicyChange` čeká na `giveUpChan` pod `Server.mutex` | Vada z upstreamu, stále se týká RPC po dobu čekání. Řešit před F3 | 13 |
+| Q29 | Config běhu proti configu vybraného profilu v `Status`, debug bundlu a kill switchích | Neřešeno, PR 13 je přepne na config běhu nebo oddělí | 13 |
 
 **Nový nález, globální stav v závislosti:** `allocSetID` v `github.com/google/nftables@v0.3.0/set.go:48,505` je
 nesynchronizovaný čítač procesu. Na `origin/main` ho shodí `TestEngine_MultiplePeers` pod `-race` (1 ze 4 běhů).
@@ -127,6 +134,109 @@ při residual cleanupu, a `RetryHandovers` při obnově interface.
 
 **Ověřování:** testy klienta se na hostiteli s běžícím daemonem nespouštějí. `TestLogin` bez `--daemon-addr` mluví se
 skutečným socketem a přepíše jeho config. Privilegovaný harness se při ověřování oprav spouští s `-count=1`.
+
+### 2.4 Poznatky z implementace F2
+
+**PR 9, identita parametrem:**
+
+- `SessionKey` je v `profilemanager`, protože `GetStatePathFor(key)` patří tam a `hostcoord` tento balíček importuje.
+  `hostcoord.SessionKey` je alias na stejný typ.
+- Daemon předává klíč spolu s configem do `connectWithRetryRuns` a `connect`. `ConnectClient` bere state soubor i
+  vlastníka úložiště certifikátů z `WithSessionKey`. Klient bez identity (foreground, embed) dostane cestu jednou při
+  vytvoření přes `WithStatePath`. Diskový klient bez cesty se odmítne spustit, na aktivní profil se nevrací.
+- **Závod z tabulky v sekci 4 je užší, než vypadal.** Vnitřní smyčka `Run` drží cestu po celou dobu běhu, takže
+  `ErrResetConnection` se ho netýká. Vnější retry v `connectWithRetryRuns` nastane jen po chybě před spuštěním smyčky
+  (nepoužitelný klíč v configu) nebo po vyčerpání tříměsíčního backoffu. Druhé okno je mezi spuštěním gorutiny v `Up`
+  a začátkem `Run`. Regresní test proto vyvolá retry nepoužitelným klíčem, který opraví v mezeře mezi pokusy.
+- Větev `DisableAutoConnect` četla `s.config` v gorutině bez zámku a mohla spojit config nového profilu s klíčem
+  starého. Teď používá parametry.
+- `NB_DNS_STATE_FILE` přebíjí state soubor všech profilů, takže se session v F3 o jeden soubor dělí (Q3). Není
+  rozhodnuto.
+- Aktivní profil dál čtou jen RPC na úrovni daemonu: residual restore v `Start`, `ListStates`, `CleanState`,
+  `DeleteState`, debug bundle (5.4 bod 6) a state manager `updateManager` (5.4 bod 5). `Up` a `Login` od PR 11 ne.
+
+**PR 10, extrakce `session`:**
+
+- Rozděleno na tři větve podle skupin polí: `f2/session-lifecycle`, `f2/session-state`, `f2/session-auth`. `Server` drží
+  jednu session v poli `session` nastaveném v `New`, slot zatím není potřeba.
+- `session.mu` je list: chrání jednotlivá čtení a zápisy polí, nedrží se přes volání ven a `session` nemá odkaz na
+  `Server`. Sekvence „zkontroluj a proveď" zůstávají pod `Server.mutex` jako dřív, takže atomické jsou jen díky němu.
+  Přechod na více session je musí přesunout, až přestane stačit globální zámek.
+- `statusRecorder`, `jwtCache` a `extendAuthSessionFlow` se po `newSession` nemění a synchronizují se samy, zámek nemají.
+- Čtení bez zámku v `Status`, `waitForUp`, `runProbes`, `CleanState`, `DeleteState`, přihlášení a kontrolách politik byla
+  datový závod, teď jsou seřazená přes `session.mu`. Čekání v `Status` čte kanály běhu v každé iteraci, aby sledovalo
+  restart z MDM.
+- Na `Server` zůstává `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`, `bundleCapture`, `persistSyncResponse` a
+  `probeThrottle`. Zadání je neřadí k žádné skupině, jejich přesun rozhodne PR 13.
+- **Závada z PR 9, opravená ve `f2/nbnet-init-once`:** sekce 8 řadí `nbnet.Init` do PR 9, ale `advancedRoutingSupported`
+  zůstala nesynchronizovaná. `TestServer_SubcribeEvents` na ní pod `-race` občas selhal, i na `f2/identity` (3 ze 6 běhů).
+  `TestLogin` v `client/cmd` pod `-race` selhává i bez PR 10, závod je v logování v `util/log.go`.
+
+**`f2/nbnet-init-once`, N2 a 5.2:**
+
+- `Server.Start` volá `nbnet.Init` hned po residual restore, stejně jako foreground v `up.go`. Klient s `WithSessionKey`
+  ho nevolá. Foreground a embed ho volají při každém běhu jako dřív, protože embed nastavuje netstack přes env až v `New`.
+- **Rozdíl pro jednu session, schválený zadáním:** podpora se zjišťuje jednou za běh daemonu. `down` a `up` už chybu sondy
+  neopraví, je potřeba restart služby. `AdvancedRouting` platí už před první session, takže `Login` před prvním `Up`
+  používá značené sockety stejně jako po `down`.
+- `EEXIST` na probe pravidle znamená, že pravidla fungují. Cizí pravidlo sonda nemaže, zbytek po pádu tedy zůstane
+  (není rozhodnuto, viz I7). Hledá v main stejně jako výchozí 32766, zastíní jen cizí pravidla s prioritou mezi nimi.
+
+**PR 11, `f2/context-residual`:**
+
+- `contextState` je na session jako `session.state`. Connect client a engine ho dál čtou přes `CtxGetState`, kontext běhu
+  staví `session.runContext`. `rootCtx` žádný stav nenese, foreground, embed a mobilní klienti si ho zakládají sami.
+- **Start:** `restoreResidualAtStart` uklidí state soubory všech profilů (viz `f2/residual-fixes` níže), pak jednou
+  zavolá `FlushMarkedRoutes`. `sessions.json` (`<DefaultConfigPathDir>/sessions.json`) jen čte přes
+  `hostcoord.StoredRecords`, bez zámku, takže instalace bez něj ho nezíská. Soubor z dřívějšího běhu s gate se
+  uklidí i po jejím vypnutí. Poškozený soubor zůstane na místě a zaloguje se, ostatní soubory se uklidí.
+- **`Up` a `Login`:** `restoreOwnResidual` čistí jen soubor profilu, který se spouští, a `FlushMarkedRoutes` volá, jen když
+  neběží session jiného profilu.
+- **Rozdíl pro jednu session, vynucený 5.2:** úklid běží až po přepnutí profilu. `Up(work)` s aktivním `default` čistí
+  `work`, ne `default` jako dřív. Zbytek v `default` počká na jeho `Up` nebo restart služby, který uklidí všechny profily.
+  `Up`, který skončí chybou před
+  výběrem profilu (`up already in progress`, chybí config), už nečistí nic. `Login(work)`, zatímco zrušený běh `default`
+  ještě nedoběhl, neflushuje; flush udělá `Up`, který po něm následuje (flush dělá něco jen na macOS a BSD).
+- **Migrace:** `openSlots` přes `hostcoord.WithSlotZeroOwner` předá slot 0 podle state souborů, pokud chybí `sessions.json`
+  (pravidlo viz `f2/residual-fixes` níže). Nezjistitelná existence souboru znamená odmítnutí, ne „nikdo". Bez gate se
+  nevolá, proto v produkci zatím nemá volajícího: PR 13 ho zavolá při zapnuté gate před `restoreResidualAtStart`.
+- **Rozhodnutí vlastníka:** `ListStates`, `CleanState` a `DeleteState` v F3 cílí na `focused` session, v F2 se nemění.
+  `NB_DNS_STATE_FILE` se v F2 nemění, v F3 ho gate odmítne.
+- Retry gorutina `s.mutex` nepotřebuje. `connect` ho bral kolem `setClient`, zatímco MDM restart ho drží po dobu čekání na
+  konec gorutiny, takže restart vypršel a RPC stála. Zápis chrání `session.mu`.
+- `TestUpDaemon` nikdy neověřoval stav: daemon testu zůstává v `NeedsLogin`, stará podmínka padala jen na chybě, která
+  nepřišla. Teď se ptá přes RPC a odmítá `LoginFailed`.
+
+**`f2/residual-fixes`:**
+
+- **Start uklízí všechny profily.** Běžící profil (`runKey`) je jen v paměti, takže po pádu nikdo neví, který běžel:
+  mohl to být jiný než aktivní (`SwitchProfile` bez `Down`, `profile select` ve stavu Connecting), nebo `Down`, jehož
+  teardown selhal. `ServiceManager.StateFileProfiles` proto projde `state.json` a `*.state.json` v adresářích všech
+  uživatelů, jen běžné soubory s platným názvem profilu. Symlink, adresář, záloha `.corrupted.*` a podadresář, který by
+  sanitizace přejmenovala, se přeskočí. Selhání jednoho souboru nebo adresáře se zaloguje a ostatní pokračují.
+- **Jediný rozdíl pro jednu session bez gate (I1):** čistší hostitel. Soubor bez zbytků se nezapíše (`PersistState` bez
+  změn nepíše, test hlídá obsah i čas změny). Poškozený state soubor neaktivního profilu se teď přesune na
+  `.corrupted.*`, což dřív platilo jen pro aktivní.
+- **Slot 0 v `openSlots`:** jeden state soubor dá slot svému profilu, i když není aktivní. Více souborů dá slot aktivnímu
+  profilu, i když sám soubor nemá, protože ostatní start uklidí. Rozhoduje existence, ne obsah: úklid soubory nemaže,
+  takže pořadí `openSlots` a `restoreResidualAtStart` výsledek nemění.
+- **Klíč ze souboru nese sanitizované jméno uživatele,** protože jiné na disku není. Pro `first.last` vznikne `firstlast`
+  a vlastník slotu 0 z jediného cizího souboru by v `sessions.json` nesouhlasil se skutečným klíčem. Aktivní profil se
+  porovnává přes cestu, toho se to netýká. Není rozhodnuto, řešit v PR 13.
+- **`Login`:** `restoreOwnResidual` běží pod `Server.mutex`, kontrola a úklid jsou tak atomické vůči `Up` a MDM restartu.
+  Běh, který `Login` sám zrušil, se pozná podle `clientGiveUpChan` zachyceného před zrušením. Jiný kanál se stejným
+  profilem znamená nový běh a úklid se přeskočí. Zrušený běh ještě může dobíhat, souběh jeho teardownu s úklidem zůstává
+  jako dřív.
+- **MDM restart** čte config běžícího profilu přes `storedRunningConfig`, bez provisioningu. Smazaný profil se tak nevrátí
+  s novou identitou a výchozí Management URL. Selhání čtení (chybějící i nečitelný soubor) restart odmítne a běh označí
+  za ukončený, jinak by další změna politiky spustila aktivní profil. Bez živého běhu se dál spouští a provisionuje
+  aktivní profil. `RemoveProfile` dál hlídá jen aktivní profil, běžící lze smazat.
+- **Izolace v iptables:** `placeInterface` po jakékoli chybě `addToIfaceSet` odebere obě poloviny ze sady, protože člen se
+  eviduje až po obou a `removeMember` by první nenašel. Selže-li i tento rollback, záznam v sadě zůstane a chyba to
+  uvede; `Verify` pak nesouhlasí, dokud `Add` se stejným názvem neuspěje. Kernel neumí odmítnout jen druhou polovinu,
+  proto má test náhradu `isolationPlane.addIfaceEntry`.
+- **Neuklizený zbytek zůstává:** když `Cleanup` selže, stav v souboru zůstane a opakuje se při každém startu. S gate by
+  pozdější `Up` toho profilu přes `restoreOwnResidual` mohl sáhnout na výchozí názvy běžící session (I2). Není rozhodnuto.
 
 ## 3. Architektura: proč jeden daemon
 
