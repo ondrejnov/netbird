@@ -382,6 +382,7 @@ func dumpTableRules(t *testing.T, name string) []ruleDump {
 
 // TestCreateKeepsOpeningLookalikeTables pins that nothing changes until the session API is used:
 // without it a table that merely looks like a session table is a foreign table, as it is today.
+// The isolation table is the one exception: only the gate creates it.
 func TestCreateKeepsOpeningLookalikeTables(t *testing.T) {
 	lookalike := addHookedTable(t, "netbird-5")
 	isolation := addHookedTable(t, IsolationTableName)
@@ -392,7 +393,7 @@ func TestCreateKeepsOpeningLookalikeTables(t *testing.T) {
 	t.Cleanup(func() { assert.NoError(t, manager.Close(nil)) })
 
 	assert.Equal(t, sessionTagsSorted(""), lookalike.tags(t), "Create must treat netbird-5 as foreign")
-	assert.Equal(t, sessionTagsSorted(""), isolation.tags(t), "Create must treat every other table as foreign")
+	assert.Empty(t, isolation.tags(t), "the isolation table is never foreign, not even for Create")
 }
 
 // TestNameLimitsMatchTheKernel creates the longest name we accept and shows the kernel refuses one
