@@ -1,14 +1,17 @@
 package profilemanager
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -18,8 +21,12 @@ import (
 	"github.com/netbirdio/netbird/util"
 )
 
-// envStateFile overrides the state file path of every profile.
-const envStateFile = "NB_DNS_STATE_FILE"
+const (
+	// envStateFile overrides the state file path of every profile.
+	envStateFile = "NB_DNS_STATE_FILE"
+
+	stateFileSuffix = ".state.json"
+)
 
 var (
 	oldDefaultConfigPathDir = ""
@@ -497,7 +504,90 @@ func (s *ServiceManager) GetStatePathFor(key SessionKey) string {
 		return defaultStatePath()
 	}
 
-	return filepath.Join(configDir, key.Profile.String()+".state.json")
+	return filepath.Join(configDir, key.Profile.String()+stateFileSuffix)
+}
+
+// StateFileProfiles returns the profile of every state file on disk: state.json of the default
+// profile and the state files in the profile directories of all users. It does not read the
+// active profile. The username of a key is the name of its directory, which is the sanitized
+// one. On an error the result holds what could still be found.
+func (s *ServiceManager) StateFileProfiles() ([]SessionKey, error) {
+	var keys []SessionKey
+	var errs []error
+
+	switch _, err := os.Stat(defaultStatePath()); {
+	case err == nil:
+		keys = append(keys, SessionKey{Profile: defaultProfileName})
+	case !errors.Is(err, fs.ErrNotExist):
+		errs = append(errs, fmt.Errorf("check default state file: %w", err))
+	}
+
+	dirs, err := s.profileDirs()
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for username, dir := range dirs {
+		found, err := stateFileProfilesIn(dir, username)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		keys = append(keys, found...)
+	}
+
+	slices.SortFunc(keys, func(a, b SessionKey) int {
+		return cmp.Or(cmp.Compare(a.Username, b.Username), cmp.Compare(a.Profile, b.Profile))
+	})
+	return keys, errors.Join(errs...)
+}
+
+// profileDirs returns the directories holding profiles, by the username they belong to. An
+// override puts the profiles of all users in one directory.
+func (s *ServiceManager) profileDirs() (map[string]string, error) {
+	if s.profilesDir != "" {
+		return map[string]string{"": s.profilesDir}, nil
+	}
+	if ConfigDirOverride != "" {
+		return map[string]string{"": ConfigDirOverride}, nil
+	}
+
+	dirs := map[string]string{"": DefaultConfigPathDir}
+	entries, err := os.ReadDir(DefaultConfigPathDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return dirs, nil
+		}
+		return dirs, fmt.Errorf("read profile directory: %w", err)
+	}
+	for _, entry := range entries {
+		// A name that sanitizing changes is no user's directory: GetStatePathFor would not
+		// lead back to it.
+		if entry.IsDir() && sanitizeProfileName(entry.Name()) == entry.Name() {
+			dirs[entry.Name()] = filepath.Join(DefaultConfigPathDir, entry.Name())
+		}
+	}
+	return dirs, nil
+}
+
+func stateFileProfilesIn(dir, username string) ([]SessionKey, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read profile directory: %w", err)
+	}
+
+	var keys []SessionKey
+	for _, entry := range entries {
+		stem, isState := strings.CutSuffix(entry.Name(), stateFileSuffix)
+		if !isState || !entry.Type().IsRegular() {
+			continue
+		}
+		if id := ID(stem); IsValidProfileFilenameStem(id) && id != defaultProfileName {
+			keys = append(keys, SessionKey{Profile: id, Username: username})
+		}
+	}
+	return keys, nil
 }
 
 func defaultStatePath() string {

@@ -30,6 +30,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	sleephandler "github.com/netbirdio/netbird/client/internal/sleep/handler"
 	"github.com/netbirdio/netbird/client/mdm"
+	nbnet "github.com/netbirdio/netbird/client/net"
 	"github.com/netbirdio/netbird/client/system"
 	mgm "github.com/netbirdio/netbird/shared/management/client"
 	"github.com/netbirdio/netbird/shared/management/domain"
@@ -149,6 +150,10 @@ type Server struct {
 	loginAttemptFn func(ctx context.Context, setupKey, jwtToken string) (internal.StatusType, error)
 
 	isLoginRequiredFn func(ctx context.Context) (bool, error)
+
+	// flushRoutesFn stands in for flushing the marked routes, which does nothing on Linux.
+	// Tests set it to see when the flush runs; production leaves it nil.
+	flushRoutesFn func() error
 }
 
 type oauthAuthFlow struct {
@@ -222,8 +227,8 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	state := internal.CtxGetState(s.rootCtx)
-	// Every contextState.Set in the connect/login/server paths must push a
+	state := s.session.state
+	// Every ContextState.Set in the connect/login/server paths must push a
 	// SubscribeStatus snapshot, otherwise transitions that don't happen to
 	// be accompanied by a Mark{Management,Signal,...} call (e.g. plain
 	// StatusNeedsLogin after a PermissionDenied login, StatusLoginFailed
@@ -237,9 +242,12 @@ func (s *Server) Start() error {
 		log.Warnf("failed to redirect stderr: %v", err)
 	}
 
-	if err := RestoreResidualState(s.rootCtx, s.profileManager.GetStatePath()); err != nil {
+	if err := s.restoreResidualAtStart(s.rootCtx); err != nil {
 		log.Warnf(errRestoreResidualState, err)
 	}
+
+	// Sessions share the result, so it is settled here, before the first one can start.
+	nbnet.Init()
 
 	if s.updateManager == nil {
 		stateMgr := statemanager.New(s.profileManager.GetStatePath())
@@ -276,7 +284,7 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithCancel(s.rootCtx)
+	ctx, cancel := s.session.runContext(s.rootCtx)
 	s.session.setActCancel(cancel)
 
 	// copy old default config
@@ -296,7 +304,7 @@ func (s *Server) Start() error {
 
 		return err
 	}
-	s.session.setConfig(config)
+	s.session.setConfig(activeProf.SessionKey(), config)
 
 	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
@@ -318,7 +326,7 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	runningChan, giveUpChan := s.session.beginRun()
+	runningChan, giveUpChan := s.session.beginRun(activeProf.SessionKey())
 	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceStartup)
 	return nil
@@ -333,7 +341,8 @@ func (s *Server) Start() error {
 // DisableAutoConnect early-exit, backoff exhausted, ctx cancel) closes
 // it. Callers that need to observe "is the goroutine still alive?" use
 // session.connectionGoroutineRunning() which non-blockingly checks the close state
-// of clientGiveUpChan. The defer does NOT touch s.mutex; the daemon's
+// of clientGiveUpChan. This goroutine does NOT touch s.mutex, which an MDM
+// restart holds while it waits for the goroutine to end; the daemon's
 // "intent" (clientRunning) is maintained by the RPC handlers, not by this
 // goroutine.
 func (s *Server) connectWithRetryRuns(ctx context.Context, key profilemanager.SessionKey, profileConfig *profilemanager.Config, statusRecorder *peer.Status, runningChan chan struct{}, giveUpChan chan struct{}) {
@@ -661,7 +670,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 		return nil, err
 	}
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	status := state.CurrentStatus()
 	if status == internal.StatusConnected {
 		return &proto.LoginResponse{}, nil
@@ -703,7 +712,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 		return nil, fmt.Errorf("failed to get active profile config: %w", err)
 	}
 	s.mutex.Lock()
-	s.session.setConfig(config)
+	s.session.setConfig(activeProf.SessionKey(), config)
 	if switched {
 		s.session.jwtCache.clear()
 	}
@@ -878,7 +887,7 @@ func (s *Server) reuseOAuthFlow(ctx context.Context, oAuthFlow auth.OAuthFlow, s
 // State transitions on exit:
 //
 //	┌──────────────────────────────────────────┬──────────────────────────────────┐
-//	│ Outcome                                  │ contextState                     │
+//	│ Outcome                                  │ ContextState                     │
 //	├──────────────────────────────────────────┼──────────────────────────────────┤
 //	│ Success → loginAttempt ok                │ NeedsLogin held; the caller's Up │
 //	│                                          │   drives Connecting → Connected  │
@@ -907,10 +916,10 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 	ctx, cancel := context.WithCancel(s.rootCtx)
 
 	// Tie the in-flight browser wait to the caller. ctx stays rooted in
-	// rootCtx so CtxGetState resolves the daemon's contextState, but if the
-	// UI window or CLI that drove the login goes away mid-flow (restart,
-	// Ctrl+C) the gRPC callerCtx cancels and we cancel the wait instead of
-	// orphaning it on rootCtx until the OAuth device-code window expires.
+	// rootCtx, but if the UI window or CLI that drove the login goes away
+	// mid-flow (restart, Ctrl+C) the gRPC callerCtx cancels and we cancel the
+	// wait instead of orphaning it on rootCtx until the OAuth device-code
+	// window expires.
 	// The goroutine exits as soon as either context completes, so it can't
 	// outlive the RPC.
 	go func() {
@@ -945,7 +954,7 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 		return nil, gstatus.Errorf(codes.Internal, "oauth flow is not initialized")
 	}
 
-	state := internal.CtxGetState(ctx)
+	state := s.session.state
 	defer func() {
 		s, err := state.Status()
 		if err != nil || (s != internal.StatusNeedsLogin && s != internal.StatusLoginFailed) {
@@ -1063,7 +1072,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	// is up but the goroutine has given up (backoff exhausted) OR when
 	// intent is down, fall through to spawn a fresh retry loop.
 	if s.session.isClientRunning() && s.session.connectionGoroutineRunning() {
-		state := internal.CtxGetState(s.rootCtx)
+		state := s.session.state
 		status, err := state.Status()
 		if err != nil {
 			s.mutex.Unlock()
@@ -1076,11 +1085,8 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 
 		return s.waitForUp(callerCtx)
 	}
-	if err := RestoreResidualState(callerCtx, s.profileManager.GetStatePath()); err != nil {
-		log.Warnf(errRestoreResidualState, err)
-	}
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 
 	// if current state contains any error, return it
 	// in all other cases we can continue execution only if status is idle and up command was
@@ -1114,7 +1120,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 
 	// it should be nil here, but in case it isn't we cancel it.
 	s.session.cancelAct()
-	ctx, cancel := context.WithCancel(s.rootCtx)
+	ctx, cancel := s.session.runContext(s.rootCtx)
 	md, ok := metadata.FromIncomingContext(callerCtx)
 	if ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
@@ -1155,19 +1161,23 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 
 	log.Infof("active profile: %s for %s", activeProf.ID, activeProf.Username)
 
+	if err := s.restoreOwnResidual(callerCtx, activeProf.SessionKey()); err != nil {
+		log.Warnf(errRestoreResidualState, err)
+	}
+
 	config, _, err := s.getConfig(activeProf)
 	if err != nil {
 		s.mutex.Unlock()
 		log.Errorf("failed to get active profile config: %v", err)
 		return nil, fmt.Errorf("failed to get active profile config: %w", err)
 	}
-	s.session.setConfig(config)
+	s.session.setConfig(activeProf.SessionKey(), config)
 
 	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 	s.localMetrics.Reconcile(config.LocalMetricsEnabled, config.LocalMetricsAddress)
 
-	runningChan, giveUpChan := s.session.beginRun()
+	runningChan, giveUpChan := s.session.beginRun(activeProf.SessionKey())
 
 	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceUpRPC)
@@ -1367,7 +1377,7 @@ func (s *Server) SwitchProfile(callerCtx context.Context, msg *proto.SwitchProfi
 		return nil, fmt.Errorf("failed to get default profile config: %w", err)
 	}
 
-	s.session.setConfig(config)
+	s.session.setConfig(activeProf.SessionKey(), config)
 	s.localMetrics.Reconcile(config.LocalMetricsEnabled, config.LocalMetricsAddress)
 
 	s.dropPendingAuthFlows()
@@ -1415,7 +1425,7 @@ func (s *Server) Down(ctx context.Context, _ *proto.DownRequest) (*proto.DownRes
 	// Setting it earlier races with the goroutine's own Set(StatusConnecting)
 	// at the top of each retry attempt, which would leave the snapshot
 	// stuck at Connecting long after the user asked to disconnect.
-	internal.CtxGetState(s.rootCtx).Set(internal.StatusIdle)
+	s.session.state.Set(internal.StatusIdle)
 
 	// Clear stale management/signal errors so the next Up() (typically for a
 	// different profile) starts with a clean status snapshot. Without this,
@@ -1498,12 +1508,12 @@ func (s *Server) handleProfileLogout(ctx context.Context, msg *proto.LogoutReque
 		return nil, err
 	}
 
-	activeProf, err := s.profileManager.GetActiveProfileState()
+	current, err := s.runningOrActiveKey()
 	if err != nil {
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "failed to get active profile state: %v", err)
 	}
 
-	if err := s.validateProfileLogout(resolved.ID, isActiveProfile(activeProf, resolved.ID, username)); err != nil {
+	if err := s.validateProfileLogout(resolved.ID, isSessionProfile(current, resolved.ID, username)); err != nil {
 		return nil, err
 	}
 
@@ -1525,18 +1535,18 @@ func (s *Server) handleProfileLogout(ctx context.Context, msg *proto.LogoutReque
 
 // cleanupAfterProfileLogout tears the connection down and asks for a new login
 // when the profile that was just deregistered is the one the daemon is running.
-// The active profile is read again here rather than reused from the pre-flight
-// check: Login switches profiles under guardedConfigMu, which this path does not
-// hold, so a login that landed meanwhile must not have its fresh connection
-// dropped by a logout that targeted the profile it replaced.
+// The profile is read again here rather than reused from the pre-flight check:
+// Login switches profiles under guardedConfigMu, which this path does not hold,
+// so a login that landed meanwhile must not have its fresh connection dropped by
+// a logout that targeted the profile it replaced.
 func (s *Server) cleanupAfterProfileLogout(id profilemanager.ID, username string) {
-	activeProf, err := s.profileManager.GetActiveProfileState()
+	current, err := s.runningOrActiveKey()
 	if err != nil {
 		log.Errorf("failed to get active profile state after logout from profile %s: %v", id, err)
 		return
 	}
 
-	if !isActiveProfile(activeProf, id, username) {
+	if !isSessionProfile(current, id, username) {
 		return
 	}
 
@@ -1544,11 +1554,19 @@ func (s *Server) cleanupAfterProfileLogout(id profilemanager.ID, username string
 		log.Errorf("failed to cleanup connection: %v", err)
 	}
 	s.session.jwtCache.clear()
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	state.Set(internal.StatusNeedsLogin)
 }
 
 func (s *Server) handleActiveProfileLogout(ctx context.Context) (*proto.LogoutResponse, error) {
+	if runKey, running := s.session.runningKey(); running && !s.session.configBelongsTo(runKey) {
+		config, err := s.storedRunningConfig(runKey)
+		if err != nil {
+			return nil, gstatus.Errorf(codes.FailedPrecondition, "read the running profile config: %v", err)
+		}
+		return s.finishLogout(ctx, config)
+	}
+
 	if s.session.currentConfig() == nil {
 		activeProf, err := s.profileManager.GetActiveProfileState()
 		if err != nil {
@@ -1559,10 +1577,15 @@ func (s *Server) handleActiveProfileLogout(ctx context.Context) (*proto.LogoutRe
 		if err != nil {
 			return nil, gstatus.Errorf(codes.FailedPrecondition, "not logged in")
 		}
-		s.session.setConfig(config)
+		s.session.setConfig(activeProf.SessionKey(), config)
 	}
 
-	if err := s.sendLogoutRequest(ctx); err != nil {
+	return s.finishLogout(ctx, s.session.currentConfig())
+}
+
+// finishLogout deregisters the peer of config and tears down the connection.
+func (s *Server) finishLogout(ctx context.Context, config *profilemanager.Config) (*proto.LogoutResponse, error) {
+	if err := s.sendLogoutRequestWithConfig(ctx, config); err != nil {
 		log.Errorf("failed to send logout request: %v", err)
 		return nil, err
 	}
@@ -1574,7 +1597,7 @@ func (s *Server) handleActiveProfileLogout(ctx context.Context) (*proto.LogoutRe
 	}
 	s.session.jwtCache.clear()
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	state.Set(internal.StatusNeedsLogin)
 
 	return &proto.LogoutResponse{}, nil
@@ -1657,16 +1680,48 @@ func (s *Server) validateProfileLogout(id profilemanager.ID, isActive bool) erro
 	return nil
 }
 
-// isActiveProfile reports whether id is the profile the daemon runs for
-// username. The username is part of the comparison because legacy profile IDs
-// are display names, which two users can both hold; the default profile is
-// shared by every user and carries no username.
-func isActiveProfile(activeProf *profilemanager.ActiveProfileState, id profilemanager.ID, username string) bool {
-	if activeProf == nil || activeProf.ID != id {
-		return false
-	}
+// isSessionProfile reports whether id is the profile key names for username. The
+// username is part of the comparison because legacy profile IDs are display names,
+// which two users can both hold; the default profile is shared by every user and
+// carries no username.
+func isSessionProfile(key profilemanager.SessionKey, id profilemanager.ID, username string) bool {
+	return sameSessionProfile(key, profilemanager.SessionKey{Profile: id, Username: username})
+}
 
-	return id == profilemanager.DefaultProfileName || activeProf.Username == username
+// runningOrActiveKey returns the profile a logout decides about: the one the session
+// runs, and the active one when nothing runs. A profile selected without a Down is not
+// what the daemon is connected with.
+func (s *Server) runningOrActiveKey() (profilemanager.SessionKey, error) {
+	if key, running := s.session.runningKey(); running {
+		return key, nil
+	}
+	activeProf, err := s.profileManager.GetActiveProfileState()
+	if err != nil {
+		return profilemanager.SessionKey{}, err
+	}
+	return activeProf.SessionKey(), nil
+}
+
+// profileStateOf returns the state naming the profile of key, for the helpers that
+// resolve a profile from it. It is not the state of the active profile.
+func profileStateOf(key profilemanager.SessionKey) *profilemanager.ActiveProfileState {
+	return &profilemanager.ActiveProfileState{ID: key.Profile, Username: key.Username}
+}
+
+// storedRunningConfig reads the config of the running profile from disk, with the MDM
+// overrides a deregistration has to honour. It does not provision an identity: a profile
+// without one has nothing to deregister.
+func (s *Server) storedRunningConfig(key profilemanager.SessionKey) (*profilemanager.Config, error) {
+	cfgPath, err := profileStateOf(key).FilePath()
+	if err != nil {
+		return nil, fmt.Errorf("profile file path: %w", err)
+	}
+	config, err := profilemanager.GetExistingConfig(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("read profile config: %w", err)
+	}
+	config.ApplyMDMPolicy(s.mdmLoader.Load())
+	return config, nil
 }
 
 // logoutFromProfile deregisters profile, reusing the running config when
@@ -1674,10 +1729,11 @@ func isActiveProfile(activeProf *profilemanager.ActiveProfileState, id profilema
 // that decision for the same reason it does in the logout gate: a legacy
 // profile ID is a display name two users can share, and sending the running
 // config for a namesake would deregister the active peer instead of the
-// requested one.
+// requested one. The session config can belong to a profile selected since the
+// run started, and then only the stored config is the running profile's.
 func (s *Server) logoutFromProfile(ctx context.Context, profile *profilemanager.Profile, username string) error {
-	activeProf, err := s.profileManager.GetActiveProfileState()
-	if err == nil && isActiveProfile(activeProf, profile.ID, username) && s.session.client() != nil {
+	current, err := s.runningOrActiveKey()
+	if err == nil && isSessionProfile(current, profile.ID, username) && s.session.client() != nil && s.session.configBelongsTo(current) {
 		return s.sendLogoutRequest(ctx)
 	}
 
@@ -1767,7 +1823,7 @@ func (s *Server) Status(
 	s.mutex.Unlock()
 
 	if msg.WaitForReady != nil && *msg.WaitForReady && alive {
-		state := internal.CtxGetState(s.rootCtx)
+		state := s.session.state
 		status, err := state.Status()
 		if err != nil {
 			return nil, err
@@ -1812,7 +1868,7 @@ func (s *Server) Status(
 // stream so both paths return identical snapshots. ctx scopes the health
 // probe runProbes may trigger — a caller that disconnects cancels it.
 func (s *Server) buildStatusResponse(ctx context.Context, msg *proto.StatusRequest) (*proto.StatusResponse, error) {
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	status, err := state.Status()
 	if err != nil {
 		// state.Status() blanks the status when err is set (e.g. management
@@ -2094,7 +2150,7 @@ func (s *Server) WaitJWTToken(
 	}
 
 	s.mutex.Lock()
-	s.session.clearOAuthFlow()
+	s.session.clearOAuthFlowIf(oAuthFlow)
 	s.mutex.Unlock()
 	return &proto.WaitJWTTokenResponse{
 		Token:     tokenInfo.GetTokenToUse(),
@@ -2117,6 +2173,7 @@ func (s *Server) RequestExtendAuthSession(
 	s.mutex.Lock()
 	config := s.session.currentConfig()
 	connectClient := s.session.client()
+	configOfClient := s.session.configBelongsToRun()
 	s.mutex.Unlock()
 
 	if config == nil {
@@ -2124,6 +2181,10 @@ func (s *Server) RequestExtendAuthSession(
 	}
 	if connectClient == nil {
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "client is not running")
+	}
+	// The flow comes from the IdP of config and its token goes to the engine of the client.
+	if !configOfClient {
+		return nil, gstatus.Errorf(codes.FailedPrecondition, "the selected profile is not the one running, bring the connection down or select it again")
 	}
 	if connectClient.Engine() == nil {
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "session can no longer be extended, log in again to reconnect")
@@ -2134,7 +2195,7 @@ func (s *Server) RequestExtendAuthSession(
 		hint = *msg.Hint
 	}
 	if hint == "" {
-		hint = profilemanager.GetLoginHint()
+		hint = s.extendSessionLoginHint()
 	}
 
 	// the daemon has no graphical session of its own, only the caller can answer this
@@ -2157,6 +2218,21 @@ func (s *Server) RequestExtendAuthSession(
 		DeviceCode:              authInfo.DeviceCode,
 		ExpiresIn:               int64(authInfo.ExpiresIn),
 	}, nil
+}
+
+// extendSessionLoginHint returns the account to prefill for a session extend: the one of
+// the running profile, as the token goes to its engine.
+func (s *Server) extendSessionLoginHint() string {
+	key, running := s.session.runningKey()
+	if !running {
+		return profilemanager.GetLoginHint()
+	}
+	state, err := profilemanager.NewProfileManager().GetProfileState(key.Profile)
+	if err != nil {
+		log.Debugf("failed to get profile state for login hint: %v", err)
+		return ""
+	}
+	return state.Email
 }
 
 // WaitExtendAuthSession blocks until the user completes the SSO step
@@ -2667,9 +2743,7 @@ func (s *Server) connect(ctx context.Context, key profilemanager.SessionKey, con
 	client.SetUpdateManager(s.updateManager)
 	client.SetSyncResponsePersistence(s.persistSyncResponse)
 
-	s.mutex.Lock()
 	s.session.setClient(client)
-	s.mutex.Unlock()
 
 	if err := client.Run(runningChan, s.logFile); err != nil {
 		return err
@@ -2846,6 +2920,7 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 	}
 
 	s.mutex.Lock()
+	_, cancelledRun := s.session.runChans()
 	s.session.cancelAct()
 	ctx, cancel := context.WithCancel(callerCtx)
 	if md, ok := metadata.FromIncomingContext(callerCtx); ok {
@@ -2853,10 +2928,6 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 	}
 	s.session.setActCancel(cancel)
 	s.mutex.Unlock()
-
-	if err := RestoreResidualState(s.rootCtx, s.profileManager.GetStatePath()); err != nil {
-		log.Warnf(errRestoreResidualState, err)
-	}
 
 	switched := false
 	if msg.ProfileName != nil {
@@ -2874,6 +2945,13 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 	activeProf, err = s.profileManager.GetActiveProfileState()
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("active profile state: %w", err)
+	}
+
+	s.mutex.Lock()
+	err = s.restoreLoginResidual(s.rootCtx, activeProf.SessionKey(), cancelledRun)
+	s.mutex.Unlock()
+	if err != nil {
+		log.Warnf(errRestoreResidualState, err)
 	}
 
 	if err := persistLoginOverrides(activeProf, msg); err != nil {

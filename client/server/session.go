@@ -34,11 +34,22 @@ type session struct {
 
 	connectClient *internal.ConnectClient
 
+	// runKey is the profile the most recent run was started for. A profile switch does
+	// not touch it, and it outlives the run, so it still names the owner of a client that
+	// stays published after its goroutine gave up.
+	runKey profilemanager.SessionKey
+
 	config *profilemanager.Config
+	// configKey is the profile config was resolved for.
+	configKey profilemanager.SessionKey
 
 	// statusRecorder is set by newSession and never replaced, so reading it takes no
 	// lock. The recorder synchronizes itself.
 	statusRecorder *peer.Status
+
+	// state is the status of the connection. Set by newSession and never replaced; the
+	// state synchronizes itself.
+	state *internal.ContextState
 
 	oauthAuthFlow oauthAuthFlow
 
@@ -59,9 +70,16 @@ type session struct {
 func newSession() *session {
 	return &session{
 		statusRecorder:        peer.NewRecorder(""),
+		state:                 internal.NewContextState(),
 		extendAuthSessionFlow: auth.NewPendingFlow(),
 		jwtCache:              newJWTCache(),
 	}
+}
+
+// runContext returns the context of one attempt of this session, cancelled along with
+// parent. The connect client and the engine read the state of their session from it.
+func (ss *session) runContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(internal.CtxWithState(parent, ss.state))
 }
 
 // cancelAct cancels the current attempt, if there is one. The cancel runs after the
@@ -102,11 +120,12 @@ func (ss *session) markClientDown() {
 	ss.clientRunning = false
 }
 
-// beginRun records the intent to be connected and returns the channels for the
-// connectWithRetryRuns goroutine the caller is about to start.
-func (ss *session) beginRun() (running, giveUp chan struct{}) {
+// beginRun records the intent to be connected for the profile key and returns the
+// channels for the connectWithRetryRuns goroutine the caller is about to start.
+func (ss *session) beginRun(key profilemanager.SessionKey) (running, giveUp chan struct{}) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	ss.runKey = key
 	ss.clientRunning = true
 	ss.clientRunningChan = make(chan struct{})
 	ss.clientGiveUpChan = make(chan struct{})
@@ -128,7 +147,10 @@ func (ss *session) runChans() (running, giveUp <-chan struct{}) {
 func (ss *session) connectionGoroutineRunning() bool {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	return ss.goroutineAliveLocked()
+}
 
+func (ss *session) goroutineAliveLocked() bool {
 	if ss.clientGiveUpChan == nil {
 		return false
 	}
@@ -138,6 +160,18 @@ func (ss *session) connectionGoroutineRunning() bool {
 	default:
 		return true
 	}
+}
+
+// runningKey returns the profile the session is running. It reports false when nothing
+// runs: the daemon does not want to be connected, or the retry goroutine is gone, for
+// instance because a Login cancelled it to take over.
+func (ss *session) runningKey() (profilemanager.SessionKey, bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if !ss.clientRunning || !ss.goroutineAliveLocked() {
+		return profilemanager.SessionKey{}, false
+	}
+	return ss.runKey, true
 }
 
 func (ss *session) client() *internal.ConnectClient {
@@ -163,17 +197,44 @@ func (ss *session) clientConnectingOrConnected() bool {
 	return status == internal.StatusConnected || status == internal.StatusConnecting
 }
 
-// currentConfig returns the config the session runs with, nil until something resolved
-// one. A caller that uses it more than once takes one snapshot, so a concurrent swap
-// cannot mix the fields of two configs.
+// currentConfig returns the config of the profile last selected on the daemon, nil until
+// something resolved one. SwitchProfile and Login replace it without touching the running
+// client, so it can belong to another profile than the client: see configBelongsTo and
+// configBelongsToRun. A caller that uses it more than once takes one snapshot, so a
+// concurrent swap cannot mix the fields of two configs.
 func (ss *session) currentConfig() *profilemanager.Config {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	return ss.config
 }
 
-func (ss *session) setConfig(config *profilemanager.Config) {
+func (ss *session) setConfig(key profilemanager.SessionKey, config *profilemanager.Config) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	ss.configKey = key
 	ss.config = config
+}
+
+// configBelongsTo reports whether the current config is the one of the profile key.
+func (ss *session) configBelongsTo(key profilemanager.SessionKey) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return sameSessionProfile(ss.configKey, key)
+}
+
+// configBelongsToRun reports whether the current config is the one of the profile the
+// most recent run was started for, which is the profile the published client belongs to.
+func (ss *session) configBelongsToRun() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return sameSessionProfile(ss.configKey, ss.runKey)
+}
+
+// sameSessionProfile reports whether two keys name one profile. The default profile is
+// shared by every user: switching to it drops the username the active state held.
+func sameSessionProfile(a, b profilemanager.SessionKey) bool {
+	if a.Profile != b.Profile {
+		return false
+	}
+	return a.Profile == profilemanager.DefaultProfileName || a.Username == b.Username
 }
