@@ -16,6 +16,10 @@ import (
 // is slow the daemon drops extras (not blocks), and the next snapshot
 // the consumer pulls already reflects everything.
 func (s *Server) SubscribeStatus(req *proto.StatusRequest, stream proto.DaemonService_SubscribeStatusServer) error {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return err
+	}
+
 	ss := s.focusedSession()
 	subID, ch := ss.statusRecorder.SubscribeToStateChanges()
 	defer func() {

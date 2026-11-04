@@ -63,7 +63,7 @@ func TestServer_Up(t *testing.T) {
 	}
 
 	rootCtx, cancelRoot := context.WithCancel(ctx)
-	s := New(rootCtx, "console", "", false, false, false, false)
+	s := New(rootCtx, "console", "", false, false, false, false, false)
 	stopRunAtCleanup(t, s, cancelRoot)
 	err = s.Start()
 	require.NoError(t, err)
@@ -153,7 +153,7 @@ func TestServer_SubcribeEvents(t *testing.T) {
 	}
 
 	rootCtx, cancelRoot := context.WithCancel(ctx)
-	s := New(rootCtx, "console", "", false, false, false, false)
+	s := New(rootCtx, "console", "", false, false, false, false, false)
 	stopRunAtCleanup(t, s, cancelRoot)
 
 	err = s.Start()

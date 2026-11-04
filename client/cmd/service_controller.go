@@ -144,7 +144,7 @@ func (p *program) serve(daemonListener, jsonListener *socketListener) error {
 		return nil
 	}
 
-	serverInstance := server.New(p.ctx, util.FindFirstLogPath(logFiles), configPath, profilesDisabled, updateSettingsDisabled, captureEnabled, networksDisabled)
+	serverInstance := server.New(p.ctx, util.FindFirstLogPath(logFiles), configPath, profilesDisabled, updateSettingsDisabled, captureEnabled, networksDisabled, concurrentProfiles)
 	if err := serverInstance.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}
@@ -170,9 +170,7 @@ func (p *program) serve(daemonListener, jsonListener *socketListener) error {
 func (p *program) Stop(srv service.Service) error {
 	p.serverInstanceMu.Lock()
 	if p.serverInstance != nil {
-		in := new(proto.DownRequest)
-		_, err := p.serverInstance.Down(p.ctx, in)
-		if err != nil {
+		if err := p.serverInstance.StopSessions(p.ctx); err != nil {
 			log.Errorf("failed to stop daemon: %v", err)
 		}
 	}

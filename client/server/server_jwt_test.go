@@ -138,7 +138,7 @@ func TestCleanupConnection_KeepsJWTCache(t *testing.T) {
 	owner := unprivilegedIdentity()
 	s.focusedSession().jwtCache.store("token", owner, testTTL, s.focusedSession().jwtCache.currentGeneration())
 
-	require.NoError(t, s.cleanupConnection())
+	require.NoError(t, s.cleanupConnection(s.focusedSession()))
 
 	got, found := s.focusedSession().jwtCache.get(owner)
 	require.True(t, found, "going down must not drop the cached SSH JWT")

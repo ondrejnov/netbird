@@ -193,7 +193,7 @@ func TestMDMRestart_LoginDuringTheWaitKeepsTheSession(t *testing.T) {
 	active, err := s.profileManager.GetActiveProfileState()
 	require.NoError(t, err)
 	answersInTime(t, "Login", func() error {
-		_, _, _, err := s.authorizeAndPrepareLogin(p.f.ctx, &proto.LoginRequest{}, active)
+		_, _, _, err := s.authorizeAndPrepareLogin(p.f.ctx, s.focusedSession(), &proto.LoginRequest{}, active)
 		return err
 	})
 

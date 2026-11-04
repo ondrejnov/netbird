@@ -26,6 +26,10 @@ import (
 
 // DebugBundle creates a debug bundle and returns the location.
 func (s *Server) DebugBundle(callerCtx context.Context, req *proto.DebugBundleRequest) (resp *proto.DebugBundleResponse, err error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	if err := requirePrivilegeForUploadURL(callerCtx, req.GetUploadURL(), req.GetUploadInsecure()); err != nil {
 		return nil, err
 	}
@@ -223,6 +227,10 @@ func (s *Server) RegisterUILog(callerCtx context.Context, req *proto.RegisterUIL
 
 // SetSyncResponsePersistence sets the sync response persistence for the server.
 func (s *Server) SetSyncResponsePersistence(_ context.Context, req *proto.SetSyncResponsePersistenceRequest) (*proto.SetSyncResponsePersistenceResponse, error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

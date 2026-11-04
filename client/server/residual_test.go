@@ -291,7 +291,7 @@ func TestLogin_CleansOnlyTheStateFileOfItsProfile(t *testing.T) {
 	require.NoError(t, err)
 
 	name, username := f.other.Profile.String(), f.other.Username
-	_, resolved, switched, err := f.s.authorizeAndPrepareLogin(f.ctx, &proto.LoginRequest{ProfileName: &name, Username: &username}, active)
+	_, resolved, switched, err := f.s.authorizeAndPrepareLogin(f.ctx, f.s.focusedSession(), &proto.LoginRequest{ProfileName: &name, Username: &username}, active)
 	require.NoError(t, err)
 	require.True(t, switched, "the login should have switched the profile")
 	require.Equal(t, f.other, resolved.SessionKey(), "the login should target the other profile")
@@ -305,7 +305,7 @@ func (f *residualFixture) login(t *testing.T) {
 	t.Helper()
 	active, err := f.s.profileManager.GetActiveProfileState()
 	require.NoError(t, err)
-	_, _, _, err = f.s.authorizeAndPrepareLogin(f.ctx, &proto.LoginRequest{}, active)
+	_, _, _, err = f.s.authorizeAndPrepareLogin(f.ctx, f.s.focusedSession(), &proto.LoginRequest{}, active)
 	require.NoError(t, err)
 }
 

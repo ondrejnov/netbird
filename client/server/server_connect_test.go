@@ -90,7 +90,7 @@ func TestCleanupConnection_ClearsConnectClient(t *testing.T) {
 	s.focusedSession().connectClient = newDummyConnectClient(context.Background())
 	s.focusedSession().clientRunning = true
 
-	err := s.cleanupConnection()
+	err := s.cleanupConnection(s.focusedSession())
 	require.NoError(t, err)
 
 	assert.Nil(t, s.focusedSession().connectClient, "connectClient should be nil after cleanup")
@@ -141,9 +141,7 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 	// Simulate Down(): cleanupConnection sets connectClient = nil and
 	// flips clientRunning to false (intent = down). The connectionGoroutineRunning state
 	// remains independent of intent — derived from clientGiveUpChan.
-	s.mutex.Lock()
-	err := s.cleanupConnection()
-	s.mutex.Unlock()
+	err := s.cleanupConnection(s.focusedSession())
 	require.NoError(t, err)
 
 	// After cleanup: connectClient is nil, clientRunning is false (intent
@@ -160,7 +158,7 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 
 	waitDone := make(chan error, 1)
 	go func() {
-		_, err := s.waitForUp(ctx)
+		_, err := s.waitForUp(ctx, s.focusedSession())
 		waitDone <- err
 	}()
 
@@ -205,7 +203,7 @@ func TestConnect_DoesNotNeedServerMutex(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := s.connect(ctx, key, cfg, s.focusedSession().statusRecorder, make(chan struct{})); err != nil {
+		if err := s.connect(ctx, s.focusedSession(), key, cfg, make(chan struct{})); err != nil {
 			t.Logf("connect returned: %v", err)
 		}
 	}()

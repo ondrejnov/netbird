@@ -25,7 +25,11 @@ type selectRoute struct {
 }
 
 // ListNetworks returns a list of all available networks.
-func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*proto.ListNetworksResponse, error) {
+func (s *Server) ListNetworks(_ context.Context, req *proto.ListNetworksRequest) (*proto.ListNetworksResponse, error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -141,6 +145,10 @@ func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*pro
 
 // SelectNetworks selects specific networks based on the client request.
 func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -187,6 +195,10 @@ func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequ
 
 // DeselectNetworks deselects specific networks based on the client request.
 func (s *Server) DeselectNetworks(_ context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

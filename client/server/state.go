@@ -15,7 +15,11 @@ import (
 )
 
 // ListStates returns a list of all saved states
-func (s *Server) ListStates(_ context.Context, _ *proto.ListStatesRequest) (*proto.ListStatesResponse, error) {
+func (s *Server) ListStates(_ context.Context, req *proto.ListStatesRequest) (*proto.ListStatesResponse, error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	mgr := statemanager.New(s.profileManager.GetStatePath())
 
 	stateNames, err := mgr.GetSavedStateNames()
@@ -37,9 +41,19 @@ func (s *Server) ListStates(_ context.Context, _ *proto.ListStatesRequest) (*pro
 
 // CleanState handles cleaning of states (performing cleanup operations)
 func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (*proto.CleanStateResponse, error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	if s.focusedSession().clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
+
+	release, err := s.claimHostAlone(ctx, s.focusedSession())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	statePath := s.profileManager.GetStatePath()
 
@@ -80,6 +94,10 @@ func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (
 
 // DeleteState handles deletion of states without cleanup
 func (s *Server) DeleteState(ctx context.Context, req *proto.DeleteStateRequest) (*proto.DeleteStateResponse, error) {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return nil, err
+	}
+
 	if s.focusedSession().clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}

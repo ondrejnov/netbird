@@ -71,16 +71,22 @@ func (s *Server) residualStatePaths(records []hostcoord.SlotRecord, onDisk []pro
 // belong to a running session, and so may the marked routes, which carry no owner: they are only
 // flushed when no other session runs.
 func (s *Server) restoreOwnResidual(ctx context.Context, key profilemanager.SessionKey) error {
+	if s.otherSessionRunning(key) {
+		return cleanStateFile(ctx, s.profileManager.GetStatePathFor(key))
+	}
+	return s.restoreResidualAlone(ctx, key)
+}
+
+// restoreResidualAlone undoes the residual state of key and the marked routes, for a caller
+// that knows no other session runs.
+func (s *Server) restoreResidualAlone(ctx context.Context, key profilemanager.SessionKey) error {
 	var merr *multierror.Error
 
 	if err := cleanStateFile(ctx, s.profileManager.GetStatePathFor(key)); err != nil {
 		merr = multierror.Append(merr, err)
 	}
-
-	if !s.otherSessionRunning(key) {
-		if err := s.flushMarkedRoutes(); err != nil {
-			merr = multierror.Append(merr, err)
-		}
+	if err := s.flushMarkedRoutes(); err != nil {
+		merr = multierror.Append(merr, err)
 	}
 
 	return nberrors.FormatErrorOrNil(merr)
@@ -89,8 +95,7 @@ func (s *Server) restoreOwnResidual(ctx context.Context, key profilemanager.Sess
 // restoreLoginResidual is restoreOwnResidual for a Login, which gave up the server mutex after
 // cancelling the run identified by cancelled. A run of key started since then owns the state
 // file and the routes, so there is nothing to clean. The caller holds the server mutex.
-func (s *Server) restoreLoginResidual(ctx context.Context, key profilemanager.SessionKey, cancelled <-chan struct{}) error {
-	ss := s.focusedSession()
+func (s *Server) restoreLoginResidual(ctx context.Context, ss *session, key profilemanager.SessionKey, cancelled <-chan struct{}) error {
 	running, ok := ss.runningKey()
 	if _, giveUp := ss.runChans(); ok && giveUp != cancelled && sameSessionProfile(running, key) {
 		return nil

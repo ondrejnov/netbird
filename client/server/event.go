@@ -9,6 +9,10 @@ import (
 )
 
 func (s *Server) SubscribeEvents(req *proto.SubscribeRequest, stream proto.DaemonService_SubscribeEventsServer) error {
+	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+		return err
+	}
+
 	ss := s.focusedSession()
 	subscription := ss.statusRecorder.SubscribeToEvents()
 	defer func() {

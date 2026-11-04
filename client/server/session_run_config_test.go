@@ -273,11 +273,11 @@ func TestSessionExpire_ReadsTheSettingOfTheRun(t *testing.T) {
 	notify, silent := false, true
 	r.run.DisableNotifications = &notify
 	r.selected.DisableNotifications = &silent
-	assert.True(t, r.s.sessionExpireNotifies(), "the running profile asked for notifications")
+	assert.True(t, r.s.sessionExpireNotifies(r.s.focusedSession()), "the running profile asked for notifications")
 
 	r.run.DisableNotifications = &silent
 	r.selected.DisableNotifications = &notify
-	assert.False(t, r.s.sessionExpireNotifies(), "the running profile turned notifications off")
+	assert.False(t, r.s.sessionExpireNotifies(r.s.focusedSession()), "the running profile turned notifications off")
 }
 
 // A switch landing inside a Login must not send the peer key of one profile to the Management

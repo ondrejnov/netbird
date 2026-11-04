@@ -306,7 +306,7 @@ func TestExtendSessionLoginHint_FollowsRunningProfile(t *testing.T) {
 // The daemon's root context carries no connection state: it belongs to the session. Every
 // handler that reports or changes the status has to find it there.
 func TestServerHandlers_WorkWithoutStateInRootContext(t *testing.T) {
-	s := New(context.Background(), "console", "", false, false, false, false)
+	s := New(context.Background(), "console", "", false, false, false, false, false)
 	managementURL, err := url.Parse("https://management.example.com")
 	require.NoError(t, err)
 	s.focusedSession().setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: managementURL})
@@ -317,7 +317,7 @@ func TestServerHandlers_WorkWithoutStateInRootContext(t *testing.T) {
 		assert.Equal(t, string(internal.StatusIdle), resp.GetStatus(), "a new session should report idle")
 	}, "the status must not depend on the root context")
 
-	agent := &serverAgent{s}
+	agent := &serverAgent{s: s}
 	require.NotPanics(t, func() {
 		status, err := agent.Status()
 		require.NoError(t, err)

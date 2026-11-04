@@ -119,7 +119,7 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 		t.Fatalf("failed to set active profile state: %v", err)
 	}
 
-	s := New(ctx, "debug", "", false, false, false, false)
+	s := New(ctx, "debug", "", false, false, false, false, false)
 
 	s.focusedSession().setConfig(profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}, config)
 
@@ -132,7 +132,7 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 	key := profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}
 	runCtx, cancelRun := s.focusedSession().runContext(ctx)
 	defer cancelRun()
-	s.connectWithRetryRuns(runCtx, key, config, s.focusedSession().statusRecorder, nil, nil)
+	s.connectWithRetryRuns(runCtx, s.focusedSession(), key, config, nil, nil)
 	if counter != 1 {
 		t.Fatalf("expected exactly 1 login attempt (PermissionDenied must stop the retry loop), got %d", counter)
 	}
