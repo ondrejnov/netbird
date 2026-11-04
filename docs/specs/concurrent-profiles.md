@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R5 jsou rozhodnutá, R6 čeká na potvrzení (viz 2.2). Probíhá F1 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R5 jsou rozhodnutá, R6 čeká na potvrzení (viz 2.2). F1: PR 1, 2, 3, 4, 6 a 8 jsou otevřené ve forku, zbývají PR 5 a 7 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -84,6 +84,29 @@ R6 nevzniká, dokud ho vlastník nepotvrdí.
 | R4 | Odchod vlastníka exit nodu | Žádné automatické předání, provoz jde fyzickým defaultem a session dostane varování v `SystemEvent` | PR 2, 15 |
 | R5 | openresolv a přepínač `-x` | `-x` zůstává, hostitelský DNS má jeden vlastník a první vyhrává | PR 6 |
 | R6 | Distribuce forku (platformy, název balíčku, dotaz na `pkgs.netbird.io`) | **Čeká na potvrzení.** Návrh: ve v1 jen Linux (D3), balíček `netbird-multiprofile`, který koliduje s `netbird`, a dotaz na `pkgs.netbird.io` vypnutý | PR 18 |
+
+### 2.3 Otázky z implementace F1
+
+Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změnit.
+
+| # | Otázka | Zvolená varianta | PR |
+|---|---|---|---|
+| Q1 | Selhání předání routy dalšímu vlastníkovi | Zůstává ve frontě, opakuje se při další operaci nebo přes `RetryHandovers`, bez časovače | 2 |
+| Q2 | Identifikace vlastního `accept` v iptables | `-m comment --comment netbird-N` jen pro slot N | 4 |
+| Q3 | Kam patří `ShutdownState` session | Slot nese state, klíč v souboru se nemění. Dva sloty ve sdíleném state manageru by si ho přepsaly, proto má každá session vlastní state soubor (PR 9, 11) | 4, 6 |
+| Q4 | Předání uvolněného DNS | Bez aktivního předání, další update se stejnou konfigurací zkusí claim znovu | 6 |
+| Q5 | Debian `resolvconf` | Výhradní backend jako openresolv, bez ověření | 6 |
+| Q6 | Kolize DNS domény (sekce 6) | Neimplementováno, rozhraní pro zjištění kolize není známé | 6 |
+| Q7 | Prefixové porovnání v ICE blacklistu | `wt1` vyloučí i `wt10`, chyba na straně vyloučení | 8 |
+| Q8 | Ověření DNS na reálném resolved a NM | Harness je Alpine bez systemd, testy běží proti falešným službám na D-Bus | 6 |
+
+**Nový nález, globální stav v závislosti:** `allocSetID` v `github.com/google/nftables@v0.3.0/set.go:48,505` je
+nesynchronizovaný čítač procesu. Na `origin/main` ho shodí `TestEngine_MultiplePeers` pod `-race` (1 ze 4 běhů).
+Souběžné session ho budou spouštět běžně, takže před PR 13 je nutné serializovat `AddSet` napříč managery v procesu,
+nebo přiřazovat `Set.ID` ze sdíleného atomického čítače. Závislost se bez souhlasu nezvedá.
+
+**Ověřování:** testy klienta se na hostiteli s běžícím daemonem nespouštějí. `TestLogin` bez `--daemon-addr` mluví se
+skutečným socketem a přepíše jeho config. Privilegovaný harness se při ověřování oprav spouští s `-count=1`.
 
 ## 3. Architektura: proč jeden daemon
 
