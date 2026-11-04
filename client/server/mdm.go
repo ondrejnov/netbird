@@ -140,7 +140,7 @@ func (s *Server) restartEngineForMDMLocked() error {
 	s.clientRunningChan = make(chan struct{})
 	s.clientGiveUpChan = make(chan struct{})
 	log.Info("MDM restart: spawning connectWithRetryRuns with re-resolved config")
-	go s.connectWithRetryRuns(ctx, config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
 }

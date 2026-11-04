@@ -346,7 +346,7 @@ func (s *Server) Start() error {
 	s.clientRunning = true
 	s.clientRunningChan = make(chan struct{})
 	s.clientGiveUpChan = make(chan struct{})
-	go s.connectWithRetryRuns(ctx, config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceStartup)
 	return nil
 }
@@ -363,7 +363,7 @@ func (s *Server) Start() error {
 // of clientGiveUpChan. The defer does NOT touch s.mutex; the daemon's
 // "intent" (clientRunning) is maintained by the RPC handlers, not by this
 // goroutine.
-func (s *Server) connectWithRetryRuns(ctx context.Context, profileConfig *profilemanager.Config, statusRecorder *peer.Status, runningChan chan struct{}, giveUpChan chan struct{}) {
+func (s *Server) connectWithRetryRuns(ctx context.Context, key profilemanager.SessionKey, profileConfig *profilemanager.Config, statusRecorder *peer.Status, runningChan chan struct{}, giveUpChan chan struct{}) {
 	// close(giveUpChan) MUST run on every exit path (DisableAutoConnect
 	// return, backoff.Retry return, panic) — Down() blocks for up to 5s
 	// waiting on this signal before flipping the state to Idle, and a
@@ -374,8 +374,8 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, profileConfig *profil
 		}
 	}()
 
-	if s.config.DisableAutoConnect {
-		if err := s.connect(ctx, s.config, s.statusRecorder, runningChan); err != nil {
+	if profileConfig.DisableAutoConnect {
+		if err := s.connect(ctx, key, profileConfig, statusRecorder, runningChan); err != nil {
 			log.Debugf("run client connection exited with error: %v", err)
 		}
 		log.Tracef("client connection exited")
@@ -404,7 +404,7 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, profileConfig *profil
 	}()
 
 	runOperation := func() error {
-		err := s.connect(ctx, profileConfig, statusRecorder, runningChan)
+		err := s.connect(ctx, key, profileConfig, statusRecorder, runningChan)
 		if err != nil {
 			// PermissionDenied means the daemon transitioned to NeedsLogin
 			// inside connect(). Without backoff.Permanent the outer retry
@@ -1228,7 +1228,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	s.clientRunningChan = make(chan struct{})
 	s.clientGiveUpChan = make(chan struct{})
 
-	go s.connectWithRetryRuns(ctx, s.config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), s.config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceUpRPC)
 
 	s.mutex.Unlock()
@@ -2712,23 +2712,9 @@ func (s *Server) checkDisableAdvancedView() *bool {
 	return nil
 }
 
-// profileOwnerOption passes the OS account of the active profile to the connect client,
-// which reads that account's certificate store for user certificate posture checks.
-func (s *Server) profileOwnerOption() []internal.ConnectClientOption {
-	if s.profileManager == nil {
-		return nil
-	}
-	activeProf, err := s.profileManager.GetActiveProfileState()
-	if err != nil {
-		log.Warnf("failed to read the active profile owner, no user certificate store is used for certificate posture: %v", err)
-		return []internal.ConnectClientOption{internal.WithUnknownProfileOwner()}
-	}
-	return []internal.ConnectClientOption{internal.WithProfileOwner(activeProf.Username)}
-}
-
-func (s *Server) connect(ctx context.Context, config *profilemanager.Config, statusRecorder *peer.Status, runningChan chan struct{}) error {
+func (s *Server) connect(ctx context.Context, key profilemanager.SessionKey, config *profilemanager.Config, statusRecorder *peer.Status, runningChan chan struct{}) error {
 	log.Tracef("running client connection")
-	client := internal.NewConnectClient(ctx, config, statusRecorder, s.profileOwnerOption()...)
+	client := internal.NewConnectClient(ctx, config, statusRecorder, internal.WithSessionKey(key))
 	client.SetUpdateManager(s.updateManager)
 	client.SetSyncResponsePersistence(s.persistSyncResponse)
 

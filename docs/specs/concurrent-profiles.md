@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. Další krok je F2, před ním rozhodnout 2.3 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem) je hotové, viz 2.4. Další krok je PR 10 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -127,6 +127,26 @@ při residual cleanupu, a `RetryHandovers` při obnově interface.
 
 **Ověřování:** testy klienta se na hostiteli s běžícím daemonem nespouštějí. `TestLogin` bez `--daemon-addr` mluví se
 skutečným socketem a přepíše jeho config. Privilegovaný harness se při ověřování oprav spouští s `-count=1`.
+
+### 2.4 Poznatky z implementace F2
+
+**PR 9, identita parametrem:**
+
+- `SessionKey` je v `profilemanager`, protože `GetStatePathFor(key)` patří tam a `hostcoord` tento balíček importuje.
+  `hostcoord.SessionKey` je alias na stejný typ.
+- Daemon předává klíč spolu s configem do `connectWithRetryRuns` a `connect`. `ConnectClient` bere state soubor i
+  vlastníka úložiště certifikátů z `WithSessionKey`. Klient bez identity (foreground, embed) dostane cestu jednou při
+  vytvoření přes `WithStatePath`. Diskový klient bez cesty se odmítne spustit, na aktivní profil se nevrací.
+- **Závod z tabulky v sekci 4 je užší, než vypadal.** Vnitřní smyčka `Run` drží cestu po celou dobu běhu, takže
+  `ErrResetConnection` se ho netýká. Vnější retry v `connectWithRetryRuns` nastane jen po chybě před spuštěním smyčky
+  (nepoužitelný klíč v configu) nebo po vyčerpání tříměsíčního backoffu. Druhé okno je mezi spuštěním gorutiny v `Up`
+  a začátkem `Run`. Regresní test proto vyvolá retry nepoužitelným klíčem, který opraví v mezeře mezi pokusy.
+- Větev `DisableAutoConnect` četla `s.config` v gorutině bez zámku a mohla spojit config nového profilu s klíčem
+  starého. Teď používá parametry.
+- `NB_DNS_STATE_FILE` přebíjí state soubor všech profilů, takže se session v F3 o jeden soubor dělí (Q3). Není
+  rozhodnuto.
+- Aktivní profil dál čtou jen RPC na úrovni daemonu: residual restore v `Start`, `Up`, `Login` (PR 11), `ListStates`,
+  `CleanState`, `DeleteState`, debug bundle (5.4 bod 6) a state manager `updateManager` (5.4 bod 5).
 
 ## 3. Architektura: proč jeden daemon
 

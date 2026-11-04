@@ -18,6 +18,9 @@ import (
 	"github.com/netbirdio/netbird/util"
 )
 
+// envStateFile overrides the state file path of every profile.
+const envStateFile = "NB_DNS_STATE_FILE"
+
 var (
 	oldDefaultConfigPathDir = ""
 	oldDefaultConfigPath    = ""
@@ -451,14 +454,13 @@ func (s *ServiceManager) ListProfiles(username string) ([]Profile, error) {
 	return s.loadAllProfiles(username)
 }
 
-// GetStatePath returns the path to the state file based on the operating system
-// It returns an empty string if the path cannot be determined.
+// GetStatePath returns the path to the state file of the active profile, or the
+// default path if the active profile cannot be determined. Code that runs a session
+// must use GetStatePathFor, because the active profile can change underneath it.
 func (s *ServiceManager) GetStatePath() string {
-	if path := os.Getenv("NB_DNS_STATE_FILE"); path != "" {
+	if path := os.Getenv(envStateFile); path != "" {
 		return path
 	}
-
-	defaultStatePath := filepath.Join(DefaultConfigPathDir, "state.json")
 
 	activeProf, err := s.GetActiveProfileState()
 	if err != nil {
@@ -467,28 +469,41 @@ func (s *ServiceManager) GetStatePath() string {
 		} else {
 			log.Warnf("failed to get active profile state: %v", err)
 		}
-		return defaultStatePath
+		return defaultStatePath()
 	}
 
-	if activeProf.ID == defaultProfileName {
-		return defaultStatePath
-	}
-
-	if !IsValidProfileFilenameStem(activeProf.ID) {
-		log.Warnf("invalid active profile ID %q, using default state path", activeProf.ID)
-		return defaultStatePath
-	}
-
-	configDir, err := s.getConfigDir(activeProf.Username)
-	if err != nil {
-		log.Warnf("failed to get config directory for user %s: %v", activeProf.Username, err)
-		return defaultStatePath
-	}
-
-	return filepath.Join(configDir, activeProf.ID.String()+".state.json")
+	return s.GetStatePathFor(activeProf.SessionKey())
 }
 
-// getConfigDir returns the profiles directory, using profilesDir if set, otherwise getConfigDirForUser
+// GetStatePathFor returns the path to the state file of the given profile. It does
+// not read the active profile.
+func (s *ServiceManager) GetStatePathFor(key SessionKey) string {
+	if path := os.Getenv(envStateFile); path != "" {
+		return path
+	}
+
+	if key.Profile == defaultProfileName {
+		return defaultStatePath()
+	}
+
+	if !IsValidProfileFilenameStem(key.Profile) {
+		log.Warnf("invalid profile ID %q, using default state path", key.Profile)
+		return defaultStatePath()
+	}
+
+	configDir, err := s.getConfigDir(key.Username)
+	if err != nil {
+		log.Warnf("failed to get config directory for user %s: %v", key.Username, err)
+		return defaultStatePath()
+	}
+
+	return filepath.Join(configDir, key.Profile.String()+".state.json")
+}
+
+func defaultStatePath() string {
+	return filepath.Join(DefaultConfigPathDir, "state.json")
+}
+
 func (s *ServiceManager) getConfigDir(username string) (string, error) {
 	if s.profilesDir != "" {
 		return s.profilesDir, nil
