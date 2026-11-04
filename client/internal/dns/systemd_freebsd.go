@@ -7,7 +7,7 @@ import (
 
 var errNotImplemented = errors.New("not implemented")
 
-func newSystemdDbusConfigurator(string) (restoreHostManager, error) {
+func newSystemdDbusConfigurator(string, hostInterfaceSet) (restoreHostManager, error) {
 	return nil, fmt.Errorf("systemd dns management: %w on freebsd", errNotImplemented)
 }
 

@@ -89,7 +89,7 @@ func (s networkManagerConnSettings) cleanDeprecatedSettings() {
 	}
 }
 
-func newNetworkManagerDbusConfigurator(wgInterface string) (*networkManagerDbusConfigurator, error) {
+func newNetworkManagerDbusConfigurator(wgInterface string, netbirdIfaces hostInterfaceSet) (*networkManagerDbusConfigurator, error) {
 	obj, closeConn, err := getDbusObject(networkManagerDest, networkManagerDbusObjectNode)
 	if err != nil {
 		return nil, fmt.Errorf("get nm dbus: %w", err)
@@ -108,7 +108,7 @@ func newNetworkManagerDbusConfigurator(wgInterface string) (*networkManagerDbusC
 		ifaceName:      wgInterface,
 	}
 
-	origNameservers, err := c.captureOriginalNameservers()
+	origNameservers, err := c.captureOriginalNameservers(netbirdIfaces)
 	switch {
 	case err != nil:
 		log.Warnf("capture original nameservers from NetworkManager: %v", err)
@@ -122,8 +122,8 @@ func newNetworkManagerDbusConfigurator(wgInterface string) (*networkManagerDbusC
 }
 
 // captureOriginalNameservers reads DNS servers from every NM device's
-// IP4Config / IP6Config except our WG device.
-func (n *networkManagerDbusConfigurator) captureOriginalNameservers() ([]netip.Addr, error) {
+// IP4Config / IP6Config except our WG device and netbirdIfaces.
+func (n *networkManagerDbusConfigurator) captureOriginalNameservers(netbirdIfaces hostInterfaceSet) ([]netip.Addr, error) {
 	devices, err := networkManagerListDevices()
 	if err != nil {
 		return nil, fmt.Errorf("list devices: %w", err)
@@ -136,6 +136,9 @@ func (n *networkManagerDbusConfigurator) captureOriginalNameservers() ([]netip.A
 			continue
 		}
 		ifaceName := readNetworkManagerDeviceInterface(dev)
+		if netbirdIfaces.contains(ifaceName) {
+			continue
+		}
 		for _, addr := range readNetworkManagerDeviceDNS(dev) {
 			addr = addr.Unmap()
 			if !addr.IsValid() || addr.IsUnspecified() {

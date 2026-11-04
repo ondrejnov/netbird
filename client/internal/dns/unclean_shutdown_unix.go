@@ -22,7 +22,7 @@ func (s *ShutdownState) Name() string {
 }
 
 func (s *ShutdownState) Cleanup() error {
-	manager, err := newHostManagerFromType(s.WgIface, s.ManagerType)
+	manager, err := newHostManagerFromType(s.WgIface, s.ManagerType, nil)
 	if err != nil {
 		return fmt.Errorf("create previous host manager: %w", err)
 	}

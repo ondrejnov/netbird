@@ -40,6 +40,8 @@ const (
 	dnsSecDisabled = "no"
 )
 
+var errDomainsNotSet = errors.New("set domains for interface")
+
 type systemdDbusConfigurator struct {
 	dbusLinkObject  dbus.ObjectPath
 	ifaceName       string
@@ -67,7 +69,7 @@ type systemdDbusLinkDomainsInput struct {
 	MatchOnly bool
 }
 
-func newSystemdDbusConfigurator(wgInterface string) (*systemdDbusConfigurator, error) {
+func newSystemdDbusConfigurator(wgInterface string, netbirdIfaces hostInterfaceSet) (*systemdDbusConfigurator, error) {
 	iface, err := net.InterfaceByName(wgInterface)
 	if err != nil {
 		return nil, fmt.Errorf("get interface: %w", err)
@@ -93,7 +95,7 @@ func newSystemdDbusConfigurator(wgInterface string) (*systemdDbusConfigurator, e
 		wgIndex:        iface.Index,
 	}
 
-	origNameservers, err := c.captureOriginalNameservers()
+	origNameservers, err := c.captureOriginalNameservers(netbirdIfaces)
 	switch {
 	case err != nil:
 		log.Warnf("capture original nameservers from systemd-resolved: %v", err)
@@ -107,10 +109,10 @@ func newSystemdDbusConfigurator(wgInterface string) (*systemdDbusConfigurator, e
 }
 
 // captureOriginalNameservers reads per-link DNS from systemd-resolved for
-// every default-route link except our own WG link. Non-default-route links
-// (VPNs, docker bridges) are skipped because their upstreams wouldn't
-// actually serve host queries.
-func (s *systemdDbusConfigurator) captureOriginalNameservers() ([]netip.Addr, error) {
+// every default-route link except our own WG link and netbirdIfaces.
+// Non-default-route links (VPNs, docker bridges) are skipped because their
+// upstreams wouldn't actually serve host queries.
+func (s *systemdDbusConfigurator) captureOriginalNameservers(netbirdIfaces hostInterfaceSet) ([]netip.Addr, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, fmt.Errorf("list interfaces: %w", err)
@@ -119,7 +121,7 @@ func (s *systemdDbusConfigurator) captureOriginalNameservers() ([]netip.Addr, er
 	seen := make(map[netip.Addr]struct{})
 	var out []netip.Addr
 	for _, iface := range ifaces {
-		if !s.isCandidateLink(iface) {
+		if !s.isCandidateLink(iface) || netbirdIfaces.contains(iface.Name) {
 			continue
 		}
 		linkPath, err := getSystemdLinkPath(iface.Index)
@@ -233,6 +235,17 @@ func (s *systemdDbusConfigurator) supportCustomPort() bool {
 }
 
 func (s *systemdDbusConfigurator) applyDNSConfig(config HostDNSConfig, stateManager *statemanager.Manager) error {
+	err := s.applyDNSConfigStrict(config, stateManager)
+	if errors.Is(err, errDomainsNotSet) {
+		log.Errorf("failed to apply DNS config: %v", err)
+		return nil
+	}
+	return err
+}
+
+// applyDNSConfigStrict is applyDNSConfig that also returns a failure to set the domains,
+// after which the link keeps its previous domains.
+func (s *systemdDbusConfigurator) applyDNSConfigStrict(config HostDNSConfig, stateManager *statemanager.Manager) error {
 	family := int32(unix.AF_INET)
 	if config.ServerIP.Is6() {
 		family = unix.AF_INET6
@@ -300,14 +313,15 @@ func (s *systemdDbusConfigurator) applyDNSConfig(config HostDNSConfig, stateMana
 	}
 
 	log.Infof("adding %d search domains and %d match domains. Search list: %s , Match list: %s", len(searchDomains), len(matchDomains), searchDomains, matchDomains)
-	if err := s.setDomainsForInterface(domainsInput); err != nil {
-		log.Error("failed to set domains for interface: ", err)
-	}
+	domainsErr := s.setDomainsForInterface(domainsInput)
 
 	if err := s.flushDNSCache(); err != nil {
 		log.Errorf("failed to flush DNS cache: %v", err)
 	}
 
+	if domainsErr != nil {
+		return fmt.Errorf("%w: %w", errDomainsNotSet, domainsErr)
+	}
 	return nil
 }
 
