@@ -34,9 +34,9 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	// wait + re-spawn). Any concurrent Up/Down/Status arriving while
 	// MDM is restarting blocks on the Lock until we are done — they
 	// then observe the post-restart state coherently. This is safe
-	// because the connectWithRetryRuns goroutine no longer acquires
-	// s.mutex in its defer (intent vs. goroutine-alive concerns are
-	// fully separated; see the connectionGoroutineRunning helper).
+	// because the connectWithRetryRuns goroutine never acquires s.mutex
+	// (intent vs. goroutine-alive concerns are fully separated; see the
+	// connectionGoroutineRunning helper).
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 

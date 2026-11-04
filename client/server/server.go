@@ -341,7 +341,8 @@ func (s *Server) Start() error {
 // DisableAutoConnect early-exit, backoff exhausted, ctx cancel) closes
 // it. Callers that need to observe "is the goroutine still alive?" use
 // session.connectionGoroutineRunning() which non-blockingly checks the close state
-// of clientGiveUpChan. The defer does NOT touch s.mutex; the daemon's
+// of clientGiveUpChan. This goroutine does NOT touch s.mutex, which an MDM
+// restart holds while it waits for the goroutine to end; the daemon's
 // "intent" (clientRunning) is maintained by the RPC handlers, not by this
 // goroutine.
 func (s *Server) connectWithRetryRuns(ctx context.Context, key profilemanager.SessionKey, profileConfig *profilemanager.Config, statusRecorder *peer.Status, runningChan chan struct{}, giveUpChan chan struct{}) {
@@ -2742,9 +2743,7 @@ func (s *Server) connect(ctx context.Context, key profilemanager.SessionKey, con
 	client.SetUpdateManager(s.updateManager)
 	client.SetSyncResponsePersistence(s.persistSyncResponse)
 
-	s.mutex.Lock()
 	s.session.setClient(client)
-	s.mutex.Unlock()
 
 	if err := client.Run(runningChan, s.logFile); err != nil {
 		return err

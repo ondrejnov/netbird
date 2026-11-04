@@ -194,6 +194,8 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   v produkci zatím nemá volajícího: PR 13 ho zavolá při zapnuté gate před `restoreResidualAtStart`.
 - **Rozhodnutí vlastníka:** `ListStates`, `CleanState` a `DeleteState` v F3 cílí na `focused` session, v F2 se nemění.
   `NB_DNS_STATE_FILE` se v F2 nemění, v F3 ho gate odmítne.
+- Retry gorutina `s.mutex` nepotřebuje. `connect` ho bral kolem `setClient`, zatímco MDM restart ho drží po dobu čekání na
+  konec gorutiny, takže restart vypršel a RPC stála. Zápis chrání `session.mu`.
 - `TestUpDaemon` nikdy neověřoval stav: daemon testu zůstává v `NeedsLogin`, stará podmínka padala jen na chybě, která
   nepřišla. Teď se ptá přes RPC a odmítá `LoginFailed`.
 
