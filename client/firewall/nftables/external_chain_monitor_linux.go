@@ -32,6 +32,8 @@ type externalChainReconciler interface {
 // reconnect.
 type externalChainMonitor struct {
 	reconciler externalChainReconciler
+	// scope is set before start and read-only afterwards.
+	scope *sessionScope
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -130,7 +132,7 @@ func (m *externalChainMonitor) watch(ctx context.Context) error {
 			if ev.Error != nil {
 				return fmt.Errorf("monitor event: %w", ev.Error)
 			}
-			if !isRelevantMonitorEvent(ev) {
+			if !m.isRelevant(ev) {
 				continue
 			}
 			resetDebounce(debounce, pending)
@@ -168,6 +170,26 @@ func (m *externalChainMonitor) reconcile() {
 	if err := m.reconciler.reconcileExternalChains(); err != nil {
 		log.Warnf("reconcile external chain rules: %v", err)
 	}
+}
+
+// isRelevant additionally ignores tables that are never opened, so sessions coming and
+// going do not reconcile every other session.
+func (m *externalChainMonitor) isRelevant(ev *nftables.MonitorEvent) bool {
+	if !isRelevantMonitorEvent(ev) {
+		return false
+	}
+	return !m.scope.ownsTable(monitorEventTableName(ev))
+}
+
+// monitorEventTableName expects an event accepted by isRelevantMonitorEvent.
+func monitorEventTableName(ev *nftables.MonitorEvent) string {
+	switch data := ev.Data.(type) {
+	case *nftables.Chain:
+		return data.Table.Name
+	case *nftables.Table:
+		return data.Name
+	}
+	return ""
 }
 
 // isRelevantMonitorEvent returns true for table/chain creation events on
