@@ -341,8 +341,7 @@ func (s *Server) Start() error {
 // DisableAutoConnect early-exit, backoff exhausted, ctx cancel) closes
 // it. Callers that need to observe "is the goroutine still alive?" use
 // session.connectionGoroutineRunning() which non-blockingly checks the close state
-// of clientGiveUpChan. This goroutine does NOT touch s.mutex, which an MDM
-// restart holds while it waits for the goroutine to end; the daemon's
+// of clientGiveUpChan. This goroutine does NOT touch s.mutex; the daemon's
 // "intent" (clientRunning) is maintained by the RPC handlers, not by this
 // goroutine.
 func (s *Server) connectWithRetryRuns(ctx context.Context, key profilemanager.SessionKey, profileConfig *profilemanager.Config, statusRecorder *peer.Status, runningChan chan struct{}, giveUpChan chan struct{}) {
@@ -1064,7 +1063,9 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 // Up starts engine work in the daemon.
 func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpResponse, error) {
 	log.Infof("up request received")
-	s.mutex.Lock()
+	if err := s.lockAfterRestart(callerCtx); err != nil {
+		return nil, err
+	}
 	// clientRunning is the daemon-intent flag (set by previous Up/Start, cleared
 	// by Down). connectionGoroutineRunning() reports whether the previous retry-loop
 	// goroutine is still trying. When intent is up AND goroutine is alive,
@@ -1814,6 +1815,13 @@ func (s *Server) Status(
 	ctx context.Context,
 	msg *proto.StatusRequest,
 ) (*proto.StatusResponse, error) {
+	waitForReady := msg.WaitForReady != nil && *msg.WaitForReady
+	if waitForReady {
+		if err := s.session.awaitRestart(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	s.mutex.Lock()
 	// Only wait if the retry-loop goroutine is alive and making
 	// progress. clientRunning=true with connectionGoroutineRunning=false means the
@@ -1822,7 +1830,7 @@ func (s *Server) Status(
 	alive := s.session.connectionGoroutineRunning()
 	s.mutex.Unlock()
 
-	if msg.WaitForReady != nil && *msg.WaitForReady && alive {
+	if waitForReady && alive {
 		state := s.session.state
 		status, err := state.Status()
 		if err != nil {

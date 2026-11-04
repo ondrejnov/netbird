@@ -22,6 +22,9 @@ type session struct {
 	mu sync.Mutex
 
 	actCancel context.CancelFunc
+	// actGeneration counts the replacements of actCancel, so that a restart can tell
+	// whether someone took the session over while it waited with no lock held.
+	actGeneration uint64
 
 	// clientRunning tracks "the daemon wants to be connected": set by Start and Up,
 	// cleared by Down and Logout. It persists across retry loops, signal disconnects
@@ -31,6 +34,9 @@ type session struct {
 	clientRunning     bool
 	clientRunningChan chan struct{}
 	clientGiveUpChan  chan struct{} // closed when connectWithRetryRuns goroutine exits
+
+	// restartDone is non-nil while an MDM restart is in progress, and closed when it ends.
+	restartDone chan struct{}
 
 	connectClient *internal.ConnectClient
 
@@ -98,6 +104,7 @@ func (ss *session) setActCancel(cancel context.CancelFunc) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.actCancel = cancel
+	ss.actGeneration++
 }
 
 func (ss *session) hasActCancel() bool {
@@ -164,14 +171,87 @@ func (ss *session) goroutineAliveLocked() bool {
 
 // runningKey returns the profile the session is running. It reports false when nothing
 // runs: the daemon does not want to be connected, or the retry goroutine is gone, for
-// instance because a Login cancelled it to take over.
+// instance because a Login cancelled it to take over. A run an MDM restart is replacing
+// still counts, as its goroutine ends only on the way to the next one.
 func (ss *session) runningKey() (profilemanager.SessionKey, bool) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if !ss.clientRunning || !ss.goroutineAliveLocked() {
+	if !ss.clientRunning || (!ss.goroutineAliveLocked() && ss.restartDone == nil) {
 		return profilemanager.SessionKey{}, false
 	}
 	return ss.runKey, true
+}
+
+// runRestart is what an MDM restart copied from the session before releasing the locks
+// to wait for the run to end.
+type runRestart struct {
+	// key is the profile to bring back. running is false when no run was alive, and the
+	// restart then starts the active profile.
+	key     profilemanager.SessionKey
+	running bool
+	giveUp  <-chan struct{}
+
+	actGeneration uint64
+}
+
+// beginRestart marks an MDM restart as in progress, for the waiters of awaitRestart, and
+// reports false, changing nothing, when there is nothing to restart or one is in progress.
+// A successful call has to be paired with endRestart.
+func (ss *session) beginRestart() (runRestart, bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if !ss.clientRunning || ss.restartDone != nil {
+		return runRestart{}, false
+	}
+
+	restart := runRestart{giveUp: ss.clientGiveUpChan, actGeneration: ss.actGeneration}
+	if ss.goroutineAliveLocked() {
+		restart.key, restart.running = ss.runKey, true
+	}
+	ss.restartDone = make(chan struct{})
+	return restart, true
+}
+
+func (ss *session) endRestart() {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.restartDone != nil {
+		close(ss.restartDone)
+		ss.restartDone = nil
+	}
+}
+
+// restartStillWanted reports whether the session is as restart left it: a Down or a Logout
+// asked to stay down, and an Up, a Login or a WaitSSOLogin replaced the attempt with its own.
+func (ss *session) restartStillWanted(restart runRestart) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.clientRunning && ss.actGeneration == restart.actGeneration
+}
+
+func (ss *session) restarting() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.restartDone != nil
+}
+
+// awaitRestart waits until no MDM restart is in progress. The caller must not hold
+// Server.mutex, which the restart needs in order to finish.
+func (ss *session) awaitRestart(ctx context.Context) error {
+	for {
+		ss.mu.Lock()
+		done := ss.restartDone
+		ss.mu.Unlock()
+		if done == nil {
+			return nil
+		}
+
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func (ss *session) client() *internal.ConnectClient {

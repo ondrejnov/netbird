@@ -117,7 +117,7 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu | 11 |
 | Q26 | `RemoveProfile` běžícího profilu | Projde, běh skončí až při MDM restartu. `profile remove` má podle 5.7 vracet chybu, řešit v PR 16 | 11, 16 |
 | Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
-| Q28 | `onMDMPolicyChange` čeká na `giveUpChan` pod `Server.mutex` | Vada z upstreamu, stále se týká RPC po dobu čekání. Řešit před F3 | 13 |
+| Q28 | `onMDMPolicyChange` čeká na `giveUpChan` pod `Server.mutex` | **Rozhodnuto a opraveno** ve `f3/mdm-wait`: čekání běží bez zámku, viz 2.4 | 13 |
 | Q29 | Config běhu proti configu vybraného profilu v `Status`, debug bundlu a kill switchích | Neřešeno, PR 13 je přepne na config běhu nebo oddělí | 13 |
 
 **Nový nález, globální stav v závislosti:** `allocSetID` v `github.com/google/nftables@v0.3.0/set.go:48,505` je
@@ -730,3 +730,18 @@ ve forku běží; co neběží, uveď v PR výslovně.
 | Panic shodí všechny sítě | Střední | Nelze plně zabránit (viz 5.4); residual cleanup a obnovení session ze `sessions.json` po restartu služby |
 | Sdílená DNS doména omezí UX | Nízký | Self-hosted správce nastaví vlastní doménu (D7), varování, případný fan-out resolver později |
 | Dlouhá řada PR a konflikty v `server.go` | Střední | Malé PR, slití upstreamu těsně před F2, F2 co nejrychleji za sebou |
+
+**`f3/mdm-wait`, Q28:**
+
+- `onMDMPolicyChange` pod `Server.mutex` jen zkopíruje `runRestart` (klíč běhu, `giveUp`, generaci `actCancel`), zruší běh a
+  zámek pustí. Po čekání zámek znovu vezme a restart provede, jen když `restartStillWanted`: `clientRunning` platí a
+  nikdo mezitím nevyměnil `actCancel`. Jinak skončí bez chyby a bez události `policy_applied`, novou politiku načte
+  další `Up`.
+- **Kdo v okně čekání co vidí:** `Down` a `Logout` projdou hned a restart se neprovede. `Login` a `WaitSSOLogin` projdou
+  hned, převezmou session a restart se neprovede. `Up` a `Status` s `WaitForReady` počkají na konec restartu kanálem, s
+  kontextem volajícího, takže se připojí k novému běhu. Ostatní RPC odpovídají ze stavu rušeného běhu.
+- `runningKey` po dobu restartu hlásí běh i po konci jeho gorutiny, jinak by `Logout` a residual cleanup rozhodovaly v
+  mezeře mezi starým a novým během o aktivním profilu.
+- Druhý souběžný restart `beginRestart` odmítne. Ticker běží v jedné gorutině, takže v provozu nenastává.
+- **Beze změny:** vypršení 10 s vrátí chybu a nový běh se nespustí. `Status` s `WaitForReady`, který už čeká, když restart
+  začne, skončí se starým `giveUp` jako dřív.

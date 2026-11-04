@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -30,24 +31,19 @@ import (
 func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	log.Warn("MDM policy changed; restarting engine to apply new configuration")
 
-	// Hold s.mutex for the entire restart sequence (cancel + quiescence
-	// wait + re-spawn). Any concurrent Up/Down/Status arriving while
-	// MDM is restarting blocks on the Lock until we are done — they
-	// then observe the post-restart state coherently. This is safe
-	// because the connectWithRetryRuns goroutine never acquires s.mutex
-	// (intent vs. goroutine-alive concerns are fully separated; see the
-	// connectionGoroutineRunning helper).
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if !s.session.isClientRunning() {
+	// Read before the cancel: the restart itself ends the run it has to bring back.
+	restart, ok := s.session.beginRestart()
+	if !ok {
+		s.mutex.Unlock()
 		// The client is not running, so there's no engine to restart.
 		return nil
 	}
-
-	// Read before the cancel: the restart itself ends the run it has to bring back.
-	runKey, running := s.session.runningKey()
 	s.session.cancelAct()
+	s.mutex.Unlock()
+
+	// After the final unlock below, so an Up that wakes up here finds the new run.
+	defer s.session.endRestart()
 
 	// Wait for previous connectWithRetryRuns to exit so we don't end up
 	// with two goroutines fighting over the same status recorder + engine.
@@ -55,16 +51,26 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	// signal handler, route manager, ...). close(clientGiveUpChan)
 	// happens in the function-scope defer of connectWithRetryRuns, on
 	// every exit path (ctx cancel, backoff exhausted, panic) — see the
-	// defer in server.go.
-	if _, giveUpChan := s.session.runChans(); giveUpChan != nil {
+	// defer in server.go. No lock is held here: the teardown can take
+	// the full timeout, and the RPCs have to keep answering meanwhile.
+	if restart.giveUp != nil {
 		select {
-		case <-giveUpChan:
+		case <-restart.giveUp:
 		case <-time.After(10 * time.Second):
 			return fmt.Errorf("failed to restart the engine due to timeout")
 		}
 	}
 
-	if err := s.restartEngineForMDMLocked(runKey, running); err != nil {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// The lock was free during the wait, so the session may have moved on.
+	if !s.session.restartStillWanted(restart) {
+		log.Info("MDM restart: the session was taken down or over during the wait, not restarting")
+		return nil
+	}
+
+	if err := s.restartEngineForMDMLocked(restart.key, restart.running); err != nil {
 		log.Errorf("MDM restart failed: %v", err)
 		return err
 	}
@@ -122,10 +128,8 @@ func (s *Server) publishConfigChangedEvent(source string) {
 // stored, without provisioning: it can have been removed since it started,
 // and a new identity would bring it back. The run then stays ended.
 //
-// MUST be called with s.mutex held — onMDMPolicyChange holds the lock
-// for the entire restart sequence (cancel + quiescence wait + re-spawn)
-// so concurrent Up/Down/Status RPCs observe a coherent post-restart
-// state.
+// MUST be called with s.mutex held, so that the re-spawn is one step for
+// the RPCs that decide on the run.
 func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, running bool) error {
 	key, config, err := s.mdmRestartConfig(runKey, running)
 	if err != nil {
@@ -143,6 +147,21 @@ func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, run
 	go s.connectWithRetryRuns(ctx, key, config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
+}
+
+// lockAfterRestart takes s.mutex for an RPC that needs the outcome of an MDM restart in
+// progress, instead of the run that restart is taking down. It gives up with ctx.
+func (s *Server) lockAfterRestart(ctx context.Context) error {
+	for {
+		if err := s.session.awaitRestart(ctx); err != nil {
+			return err
+		}
+		s.mutex.Lock()
+		if !s.session.restarting() {
+			return nil
+		}
+		s.mutex.Unlock()
+	}
 }
 
 func (s *Server) mdmRestartConfig(runKey profilemanager.SessionKey, running bool) (profilemanager.SessionKey, *profilemanager.Config, error) {
