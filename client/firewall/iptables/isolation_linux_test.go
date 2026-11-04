@@ -3,6 +3,7 @@
 package iptables
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -622,6 +623,68 @@ func TestIsolationAddFailsClosed(t *testing.T) {
 	})
 }
 
+// failIfaceEntries makes the plane refuse entries for one set from the given attempt on, counting
+// from 1, and passes everything else on to the kernel.
+func failIfaceEntries(t *testing.T, plane *isolationPlane, setName string, from int, refusal error) {
+	t.Helper()
+	next := plane.addIfaceEntry
+	t.Cleanup(func() { plane.addIfaceEntry = next })
+	attempt := 0
+	plane.addIfaceEntry = func(name string, entry *ipset.Entry) error {
+		if name != setName {
+			return next(name, entry)
+		}
+		attempt++
+		if attempt >= from {
+			return refusal
+		}
+		return next(name, entry)
+	}
+}
+
+// An interface takes two entries, and the member is recorded only after both. A session that
+// did not start must not leave the first one behind: the next Verify would find the set
+// different from what it expects and would take the running sessions down.
+func TestIsolationFailedAddLeavesNoHalfMember(t *testing.T) {
+	refused := errors.New("refused by the test")
+
+	t.Run("set the interface does not fit in", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-0", 2, refused)
+
+		assert.ErrorIs(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)), refused)
+
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-0"), "only the running session may stay in the set")
+		assert.NoError(t, isolation.Verify(), "the failed session must not disturb the running one")
+	})
+
+	t.Run("set created for the interface", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-0", 1, errIPSetHashFull)
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-1", 2, refused)
+
+		assert.ErrorIs(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)), refused)
+
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-0"), "only the running session may stay in the first set")
+		assert.Equal(t, 0, isoEntryCount(t, isoSetIfaces+"-1"), "the new set must stay empty")
+		assert.NoError(t, isolation.Verify(), "the failed session must not disturb the running one")
+	})
+
+	t.Run("full set still moves on to the next", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-0", 2, errIPSetHashFull)
+
+		require.NoError(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)))
+
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-0"), "the full set must keep only the first session")
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-1"), "the second session must be in the next set")
+		assert.NoError(t, isolation.Verify())
+	})
+}
+
 // TestIsolationIPv6IsSoft shows a session without IPv6, or one whose v6 cannot be used, keeps the
 // isolation of v4 working.
 func TestIsolationIPv6IsSoft(t *testing.T) {
@@ -685,7 +748,7 @@ func TestIsolationIPv6IsSoft(t *testing.T) {
 		assert.Equal(t, 4, isoEntryCount(t, isoSetIfaces+isoSetV6Suffix+"-0"), "both interfaces must be in the v6 set")
 	})
 
-	t.Run("v6 half refuses a new session", func(t *testing.T) {
+	t.Run("v6 half cannot take a new session", func(t *testing.T) {
 		isolation := newTestIsolation(t)
 		withV6 := func(index int) wgaddr.Address {
 			addr := isoFakeAddress(index)
@@ -699,19 +762,17 @@ func TestIsolationIPv6IsSoft(t *testing.T) {
 
 		removeIsolationSet(t, isolation.plane6, isoSetOwn)
 		disabled, err := addReportingIPv6(isolation, "wt3", withV6(3))
-		require.NoError(t, err, "the v6 set to change is gone, v4 is fine")
-		assert.True(t, disabled)
-		assert.NoError(t, verifySetEntries(isoSetOwn, append(prefixEntries("wt1", first.Network),
-			append(prefixEntries("wt2", second.Network), prefixEntries("wt3", withV6(3).Network)...)...)),
-			"v4 of the session must be isolated")
+		require.Error(t, err, "the plane is installed and cannot take the session, which would pass v6 between interfaces")
+		assert.False(t, disabled)
+		assert.NotContains(t, isolation.members, IfaceName("wt3"))
+		assert.NoError(t, verifySetEntries(isoSetOwn, append(prefixEntries("wt1", first.Network), prefixEntries("wt2", second.Network)...)),
+			"v4 of the refused session must be rolled back")
 		assert.NoError(t, verifySetEntries(isoSetIfaces+isoSetV6Suffix+"-0", ifaceHalves6("wt1", "wt2")),
 			"the session must not be left in the v6 interface set")
 
 		restoreIsolationSet(t, isolation.plane6, isoSetOwn, ipset.TypeHashNetIface,
 			prefixEntry(first.IPv6Net, "wt1"), prefixEntry(second.IPv6Net, "wt2"))
 		assert.NoError(t, isolation.Verify(), "kernel and members must agree once the host is repaired")
-		require.NoError(t, isolation.Remove("wt3"))
-		assert.NoError(t, isolation.Verify())
 	})
 
 	t.Run("v6 installed late covers running sessions", func(t *testing.T) {
@@ -1064,5 +1125,119 @@ func TestIsolationAddReportsDisabledIPv6(t *testing.T) {
 		disabled, err := addReportingIPv6(isolation, "wt2", withV6(1, "fd00:aa::2/64"))
 		assert.ErrorIs(t, err, ErrOverlayOverlap)
 		assert.False(t, disabled, "a session that must not run has nothing to honor")
+	})
+}
+
+// breakForwardChain6 removes the chain the forward rules of the v6 plane live in, so the kernel
+// refuses the rule of every session that joins the plane afterwards.
+func breakForwardChain6(t *testing.T, isolation *Isolation) {
+	t.Helper()
+	client := isolation.plane6.client
+	require.NoError(t, client.Delete(tableMangle, chainForward, "-j", isoChainForward))
+	require.NoError(t, client.ClearAndDeleteChain(tableMangle, isoChainForward))
+}
+
+// TestIsolationRefusesSessionThePlane6CannotTake: once the v6 plane is installed, a session that
+// cannot join it has no forward rule there, and a v6 packet routed between its interface and
+// another session's would pass. Add must fail for it, whether or not it has a v6 overlay.
+func TestIsolationRefusesSessionThePlane6CannotTake(t *testing.T) {
+	withV6 := isoFakeAddress(3)
+	withV6.IPv6, withV6.IPv6Net = netip.MustParseAddr("fd00:3::1"), netip.MustParsePrefix("fd00:3::/64")
+
+	for _, tc := range []struct {
+		name string
+		addr wgaddr.Address
+	}{
+		{"session without v6", isoFakeAddress(3)},
+		{"session with v6", withV6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolation := newTestIsolation(t)
+			require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+			require.NoError(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)))
+			breakForwardChain6(t, isolation)
+
+			disabled, err := addReportingIPv6(isolation, "wt3", tc.addr)
+			require.Error(t, err, "a session outside the installed v6 plane must not run")
+			assert.False(t, disabled, "a refused session has nothing to honor")
+			assert.NotContains(t, isolation.members, IfaceName("wt3"))
+			assert.Equal(t, 2, isoRuleCount(t, isoChainForward), "the v4 half of the refused session must be rolled back")
+			assert.Equal(t, 4, isoEntryCount(t, isoSetIfaces+"-0"), "only the running sessions may stay in the v4 set")
+		})
+	}
+}
+
+// TestIsolationRemoveCleansPlane6OfSessionMarkedNo6 covers what a failed attempt to join the plane
+// can leave behind: Remove has to look for it whatever the session is marked with.
+func TestIsolationRemoveCleansPlane6OfSessionMarkedNo6(t *testing.T) {
+	isolation := newTestIsolation(t)
+	require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+	require.NoError(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)))
+
+	member := isolation.members["wt2"]
+	member.no6 = true
+	isolation.members["wt2"] = member
+
+	require.NoError(t, isolation.Remove("wt2"))
+	assert.NoError(t, isolation.Verify(), "nothing of the session may stay in the v6 plane")
+}
+
+// TestIsolationKeepsStale6 covers the prefix of a failed update that the kernel still holds. It
+// stays occupied until it is taken out, whichever way the next update of the v6 overlay ends.
+func TestIsolationKeepsStale6(t *testing.T) {
+	stale := netip.MustParsePrefix("fd00:9::/64")
+	withV6 := func(index int, overlay6 string) wgaddr.Address {
+		prefix := netip.MustParsePrefix(overlay6)
+		addr := isoFakeAddress(index)
+		addr.IPv6, addr.IPv6Net = prefix.Addr(), prefix.Masked()
+		return addr
+	}
+
+	// staleSession is a running session whose last update left stale in the v6 sets.
+	staleSession := func(t *testing.T) (*Isolation, isolationMember) {
+		t.Helper()
+		isolation := newTestIsolation(t)
+		require.NoError(t, addToIsolation(isolation, "wt1", withV6(1, "fd00:1::1/64")))
+		require.NoError(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)))
+		require.NoError(t, isolation.plane6.addOverlay("wt1", stale))
+
+		previous := isolation.members["wt1"]
+		previous.stale6 = stale
+		isolation.members["wt1"] = previous
+		return isolation, previous
+	}
+	next := func(previous isolationMember, overlay6 string) isolationMember {
+		member := previous
+		member.stale6 = netip.Prefix{}
+		member.overlay6 = netip.MustParsePrefix(overlay6)
+		return member
+	}
+
+	// Nothing can be recorded next to a stale prefix, so a replacement that fails on top of it
+	// would lose one of the two. The overlay therefore waits until the stale prefix is gone.
+	t.Run("v6 overlay waits while a stale prefix is out", func(t *testing.T) {
+		isolation, previous := staleSession(t)
+		got := isolation.replaceOverlay6("wt1", previous, next(previous, "fd00:2::/64"))
+		assert.Equal(t, previous.overlay6, got.overlay6, "one failed rollback more could not be recorded, so nothing is changed")
+		assert.Equal(t, stale, got.stale6, "the prefix still in the kernel must stay known")
+		assert.Equal(t, 2, isoEntryCount(t, isoSetOwn+isoSetV6Suffix), "only the overlay and the stale prefix may be in the kernel")
+	})
+
+	t.Run("session joining the plane again", func(t *testing.T) {
+		isolation, previous := staleSession(t)
+		require.NoError(t, isolation.plane6.removeMember("wt1", previous.overlay6))
+		previous.no6, previous.overlay6 = true, netip.Prefix{}
+
+		got, err := isolation.applyPlane6("wt1", previous, true, next(previous, "fd00:2::/64"))
+		require.NoError(t, err)
+		assert.False(t, got.no6, "the session joined the plane")
+		assert.Equal(t, stale, got.stale6, "the prefix still in the kernel must stay known")
+	})
+
+	t.Run("stale prefix is the new overlay", func(t *testing.T) {
+		isolation, previous := staleSession(t)
+		got := isolation.replaceOverlay6("wt1", previous, next(previous, stale.String()))
+		assert.Equal(t, stale, got.overlay6)
+		assert.False(t, got.stale6.IsValid(), "a prefix in use is not stale: a later cleanup would take it from the session")
 	})
 }

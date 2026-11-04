@@ -106,8 +106,8 @@ func NewIsolation() *Isolation {
 // Add isolates the session on the given interface from all others, or updates its overlays
 // when it is already known. A session must not run when Add fails: nothing is changed then.
 // An overlapping IPv4 overlay fails with ErrOverlayOverlap. An overlapping IPv6 overlay, and a
-// kernel that refuses the IPv6 part, make the session continue without v6, which the result
-// reports.
+// kernel that refuses the IPv6 part, make the session continue without the new v6 overlay,
+// which the result reports. A known session keeps the one it had.
 func (i *Isolation) Add(name IfaceName, addr wgaddr.Address) (AddResult, error) {
 	if err := name.validate(); err != nil {
 		return AddResult{}, err
@@ -131,11 +131,13 @@ func (i *Isolation) Add(name IfaceName, addr wgaddr.Address) (AddResult, error) 
 	}
 
 	if err := i.applyMember(name, previous, member, known); err != nil {
-		if !member.overlay6.IsValid() {
+		// Only a v6 overlay that changes can be what the kernel refused. A known session keeps
+		// the one it has: its elements are in the sets, and a transient error must not take them.
+		if !member.overlay6.IsValid() || member.overlay6 == previous.overlay6 {
 			return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
 		}
-		log.Debugf("session %s continues without IPv6 isolation: %v", name, err)
-		member.overlay6 = netip.Prefix{}
+		log.Warnf("session %s continues without its new IPv6 isolation: %v", name, err)
+		member.overlay6 = previous.overlay6
 		if previous == member {
 			return ipv6Result(requested, member), nil
 		}

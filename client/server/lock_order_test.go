@@ -116,7 +116,7 @@ func requireWaitsOnSessionMu(t *testing.T, s *Server, rpc func() error, held ...
 
 func TestDown_TakesServerMutexBeforeSessionMu(t *testing.T) {
 	s := newTestServer()
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	s.session.actCancel = cancel
@@ -179,7 +179,7 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.setActCancel(func() {})
 		ss.hasActCancel()
 		ss.cancelAct()
-		ss.beginRun()
+		ss.beginRun(profilemanager.SessionKey{})
 		ss.runChans()
 		ss.isClientRunning()
 		ss.connectionGoroutineRunning()
@@ -187,8 +187,11 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.setClient(newDummyConnectClient(internal.CtxInitState(context.Background())))
 		ss.client()
 		ss.clientConnectingOrConnected()
-		ss.setConfig(&profilemanager.Config{})
+		ss.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{})
 		ss.currentConfig()
+		ss.runningKey()
+		ss.configBelongsTo(profilemanager.SessionKey{})
+		ss.configBelongsToRun()
 		ss.oauthFlow()
 		ss.swapOAuthFlow(oauthAuthFlow{})
 		ss.clearOAuthFlow()

@@ -21,7 +21,7 @@ import (
 // because Management happened to be restarting when the daemon dialed it.
 func TestLogin_ManagementUnreachableIsReturnedInsteadOfDemandingSSO(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	unreachable := errors.New("create connection: dial context: context deadline exceeded")
 	attempts := 0
@@ -37,7 +37,7 @@ func TestLogin_ManagementUnreachableIsReturnedInsteadOfDemandingSSO(t *testing.T
 	require.Equal(t, 1, attempts)
 	require.Nil(t, s.session.oauthAuthFlow.flow, "the daemon started an SSO flow for a peer whose login was never decided")
 
-	status, err := internal.CtxGetState(s.rootCtx).Status()
+	status, err := s.session.state.Status()
 	require.NoError(t, err)
 	require.Equal(t, internal.StatusLoginFailed, status,
 		"a peer that could not reach Management is not waiting on a login")
@@ -50,7 +50,7 @@ func TestLogin_ManagementUnreachableIsReturnedInsteadOfDemandingSSO(t *testing.T
 // back out.
 func TestLogin_AuthRefusalStartsSSOFlow(t *testing.T) {
 	s, _, _, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	breakProfilePrivateKey(t, cfgPath)
 
 	s.isLoginRequiredFn = func(context.Context) (bool, error) {
@@ -60,7 +60,7 @@ func TestLogin_AuthRefusalStartsSSOFlow(t *testing.T) {
 	_, err := s.Login(userCtx(), &proto.LoginRequest{Username: &username})
 	require.Error(t, err)
 
-	status, stateErr := internal.CtxGetState(s.rootCtx).Status()
+	status, stateErr := s.session.state.Status()
 	require.NoError(t, stateErr)
 	require.Equal(t, internal.StatusLoginFailed, status,
 		"the SSO flow setup was never reached with the broken key")
@@ -68,7 +68,7 @@ func TestLogin_AuthRefusalStartsSSOFlow(t *testing.T) {
 
 func TestLogin_SetupKeyStillRunsWhenPeerNeedsLogin(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 
 	s.isLoginRequiredFn = func(context.Context) (bool, error) {
 		return true, nil
@@ -87,7 +87,7 @@ func TestLogin_SetupKeyStillRunsWhenPeerNeedsLogin(t *testing.T) {
 	require.Equal(t, []string{setupKey}, keysTried, "the setup key never reached the login attempt")
 	require.Nil(t, s.session.oauthAuthFlow.flow, "a setup-key login started an SSO flow")
 
-	status, err := internal.CtxGetState(s.rootCtx).Status()
+	status, err := s.session.state.Status()
 	require.NoError(t, err)
 	require.Equal(t, internal.StatusIdle, status)
 }
