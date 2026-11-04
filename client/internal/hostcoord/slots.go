@@ -309,8 +309,23 @@ func (s *Slots) Records() []SlotRecord {
 	s.bringUpMu.Lock()
 	defer s.bringUpMu.Unlock()
 
-	out := make([]SlotRecord, 0, len(s.records))
-	for key, state := range s.records {
+	return sortedRecords(s.records)
+}
+
+// StoredRecords returns the sessions stored in base ordered by slot, for a reader that
+// does not own the file. It takes no lock and creates nothing, so an installation that
+// has no sessions file keeps having none. A missing file gives no sessions.
+func StoredRecords(base string) ([]SlotRecord, error) {
+	records, _, err := newSessionStore(base).load()
+	if err != nil {
+		return nil, err
+	}
+	return sortedRecords(records), nil
+}
+
+func sortedRecords(records map[SessionKey]slotState) []SlotRecord {
+	out := make([]SlotRecord, 0, len(records))
+	for key, state := range records {
 		out = append(out, SlotRecord{Key: key, Slot: state.slot, Desired: state.desired})
 	}
 	slices.SortFunc(out, func(a, b SlotRecord) int {

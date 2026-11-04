@@ -33,11 +33,12 @@ func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*pro
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
-	if s.connectClient == nil {
+	connectClient := s.session.client()
+	if connectClient == nil {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	engine := s.connectClient.Engine()
+	engine := connectClient.Engine()
 	if engine == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -93,7 +94,7 @@ func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*pro
 		return iPrefix < jPrefix
 	})
 
-	resolvedDomains := s.statusRecorder.GetResolvedDomainsStates()
+	resolvedDomains := s.session.statusRecorder.GetResolvedDomainsStates()
 	var pbRoutes []*proto.Network
 	for _, route := range routes {
 		rangeStr := route.Network.String()
@@ -146,11 +147,12 @@ func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequ
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
-	if s.connectClient == nil {
+	connectClient := s.session.client()
+	if connectClient == nil {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	engine := s.connectClient.Engine()
+	engine := connectClient.Engine()
 	if engine == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -166,7 +168,7 @@ func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequ
 		return nil, err
 	}
 
-	s.statusRecorder.PublishEvent(
+	s.session.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"Network selection changed",
@@ -190,11 +192,12 @@ func (s *Server) DeselectNetworks(_ context.Context, req *proto.SelectNetworksRe
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
-	if s.connectClient == nil {
+	connectClient := s.session.client()
+	if connectClient == nil {
 		return nil, fmt.Errorf("not connected")
 	}
 
-	engine := s.connectClient.Engine()
+	engine := connectClient.Engine()
 	if engine == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -210,7 +213,7 @@ func (s *Server) DeselectNetworks(_ context.Context, req *proto.SelectNetworksRe
 		return nil, err
 	}
 
-	s.statusRecorder.PublishEvent(
+	s.session.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"Network deselection changed",

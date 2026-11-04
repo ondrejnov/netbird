@@ -88,6 +88,8 @@ type ConnectClient struct {
 	statePath           string
 	profileOwner        string
 	profileOwnerUnknown bool
+	// daemonSession marks a client whose daemon already probed the routing support.
+	daemonSession bool
 }
 
 // ConnectClientOption configures optional ConnectClient behavior.
@@ -113,11 +115,13 @@ func WithStatePath(path string) ConnectClientOption {
 // whose certificate store answers user certificate posture checks both come from
 // the key and never from the active profile, which can change while the client runs.
 // An empty key leaves the owner unknown, so that no user's store answers those checks.
+// Only the daemon runs clients with a key, and it probes the routing support at startup.
 func WithSessionKey(key profilemanager.SessionKey) ConnectClientOption {
 	return func(c *ConnectClient) {
 		c.statePath = profilemanager.NewServiceManager("").GetStatePathFor(key)
 		c.profileOwner = key.Username
 		c.profileOwnerUnknown = key.Profile == ""
+		c.daemonSession = true
 	}
 }
 
@@ -238,7 +242,9 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 
 	log.Infof("starting NetBird client version %s on %s/%s", version.NetbirdVersion(), runtime.GOOS, runtime.GOARCH)
 
-	nbnet.Init()
+	if !c.daemonSession {
+		nbnet.Init()
+	}
 
 	// Initialize metrics once at startup (always active for debug bundles)
 	if c.clientMetrics == nil {

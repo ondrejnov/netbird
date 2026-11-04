@@ -16,9 +16,9 @@ import (
 // is slow the daemon drops extras (not blocks), and the next snapshot
 // the consumer pulls already reflects everything.
 func (s *Server) SubscribeStatus(req *proto.StatusRequest, stream proto.DaemonService_SubscribeStatusServer) error {
-	subID, ch := s.statusRecorder.SubscribeToStateChanges()
+	subID, ch := s.session.statusRecorder.SubscribeToStateChanges()
 	defer func() {
-		s.statusRecorder.UnsubscribeFromStateChanges(subID)
+		s.session.statusRecorder.UnsubscribeFromStateChanges(subID)
 		log.Debug("client unsubscribed from status updates")
 	}()
 

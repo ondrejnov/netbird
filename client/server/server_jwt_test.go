@@ -22,7 +22,7 @@ import (
 func TestCachedJWT_ServesTheOwner(t *testing.T) {
 	s := newTestServer()
 	owner := unprivilegedIdentity()
-	s.jwtCache.store("token", owner, testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", owner, testTTL, s.session.jwtCache.currentGeneration())
 
 	got, found := s.cachedJWT(ctxWithIdentity(owner))
 
@@ -32,7 +32,7 @@ func TestCachedJWT_ServesTheOwner(t *testing.T) {
 
 func TestCachedJWT_RefusesAnotherCaller(t *testing.T) {
 	s := newTestServer()
-	s.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.session.jwtCache.currentGeneration())
 
 	got, found := s.cachedJWT(ctxWithIdentity(privilegedIdentity()))
 
@@ -45,7 +45,7 @@ func TestCachedJWT_RefusesAnotherCaller(t *testing.T) {
 // another, so cachedJWT must fail closed there.
 func TestCachedJWT_WithoutCallerIdentity(t *testing.T) {
 	s := newTestServer()
-	s.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.session.jwtCache.currentGeneration())
 
 	got, found := s.cachedJWT(context.Background())
 
@@ -96,7 +96,7 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 
 	s := newTestServer()
 	s.profileManager = profilemanager.NewServiceManager(defaultConfig)
-	s.localMetrics = localmetrics.NewManager(ctx, s.statusRecorder, nil)
+	s.localMetrics = localmetrics.NewManager(ctx, s.session.statusRecorder, nil)
 
 	// A second profile to move to, so the request goes through
 	// switchProfileIfNeeded rather than the no-op path a nil request takes.
@@ -109,7 +109,7 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 	require.NoError(t, err)
 
 	owner := unprivilegedIdentity()
-	s.jwtCache.store("token", owner, testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", owner, testTTL, s.session.jwtCache.currentGeneration())
 
 	name := target
 	_, err = s.SwitchProfile(ctx, &proto.SwitchProfileRequest{ProfileName: &name, Username: &username})
@@ -119,7 +119,7 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, profilemanager.ID(target), active.ID, "the profile must actually have changed")
 
-	_, found := s.jwtCache.get(owner)
+	_, found := s.session.jwtCache.get(owner)
 	assert.False(t, found, "switching profile must drop the cached SSH JWT")
 }
 
@@ -133,14 +133,14 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 func TestCleanupConnection_KeepsJWTCache(t *testing.T) {
 	s := newTestServer()
 	_, cancel := context.WithCancel(context.Background())
-	s.actCancel = cancel
+	s.session.actCancel = cancel
 
 	owner := unprivilegedIdentity()
-	s.jwtCache.store("token", owner, testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", owner, testTTL, s.session.jwtCache.currentGeneration())
 
 	require.NoError(t, s.cleanupConnection())
 
-	got, found := s.jwtCache.get(owner)
+	got, found := s.session.jwtCache.get(owner)
 	require.True(t, found, "going down must not drop the cached SSH JWT")
 	assert.Equal(t, "token", got)
 }
@@ -162,7 +162,7 @@ func (f *fakeOAuthFlow) WaitToken(context.Context, auth.AuthFlowInfo) (auth.Toke
 func (f *fakeOAuthFlow) GetClientID(context.Context) string { return "client-id" }
 
 // The flow outlives a profile switch, because SwitchProfile does not reset
-// s.oauthAuthFlow. A switch between RequestJWTAuth and the IdP answering must
+// the flow record. A switch between RequestJWTAuth and the IdP answering must
 // still keep the token out of the cache the new profile uses, and the
 // generation the flow carries is what decides it: reading the cache's own
 // generation at store time would already be the new one.
@@ -170,19 +170,72 @@ func TestWaitJWTToken_DropsTokenFromASessionThatEndedBeforeTheWait(t *testing.T)
 	s := newTestServer()
 	owner := unprivilegedIdentity()
 	ttl := int(testTTL.Seconds())
-	s.config = &profilemanager.Config{SSHJWTCacheTTL: &ttl}
+	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{SSHJWTCacheTTL: &ttl})
 
 	// RequestJWTAuth ran under the previous session and recorded its generation.
-	s.oauthAuthFlow.flow = &fakeOAuthFlow{token: "token-from-the-old-session"}
-	s.oauthAuthFlow.info = auth.AuthFlowInfo{DeviceCode: "device-code"}
-	s.oauthAuthFlow.cacheGeneration = s.jwtCache.currentGeneration()
+	s.session.oauthAuthFlow.flow = &fakeOAuthFlow{token: "token-from-the-old-session"}
+	s.session.oauthAuthFlow.info = auth.AuthFlowInfo{DeviceCode: "device-code"}
+	s.session.oauthAuthFlow.cacheGeneration = s.session.jwtCache.currentGeneration()
 
 	// A profile switch or a logout lands before the caller reaches WaitJWTToken.
-	s.jwtCache.clear()
+	s.session.jwtCache.clear()
 
 	_, err := s.WaitJWTToken(ctxWithIdentity(owner), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
 	require.NoError(t, err)
 
-	_, found := s.jwtCache.get(owner)
+	_, found := s.session.jwtCache.get(owner)
 	assert.False(t, found, "a token whose flow started under the previous session must not be cached")
+}
+
+// replacingOAuthFlow stands for a flow whose record is replaced while the IdP is polled.
+type replacingOAuthFlow struct {
+	fakeOAuthFlow
+	onWait func()
+}
+
+func (f *replacingOAuthFlow) WaitToken(ctx context.Context, info auth.AuthFlowInfo) (auth.TokenInfo, error) {
+	f.onWait()
+	return f.fakeOAuthFlow.WaitToken(ctx, info)
+}
+
+// A login that starts during the SSH JWT polling installs its own flow, and the polling
+// ending later must not take it away from the WaitSSOLogin that is about to claim it.
+func TestWaitJWTToken_KeepsAFlowInstalledDuringTheWait(t *testing.T) {
+	s := newTestServer()
+	newer := &fakeOAuthFlow{token: "login-token"}
+	cancelled := false
+
+	polling := &replacingOAuthFlow{fakeOAuthFlow: fakeOAuthFlow{token: "ssh-token"}}
+	polling.onWait = func() {
+		s.session.swapOAuthFlow(oauthAuthFlow{
+			flow:       newer,
+			info:       auth.AuthFlowInfo{DeviceCode: "login-device-code"},
+			waitCancel: func() { cancelled = true },
+		})
+	}
+	s.session.swapOAuthFlow(oauthAuthFlow{flow: polling, info: auth.AuthFlowInfo{DeviceCode: "device-code"}})
+
+	resp, err := s.WaitJWTToken(context.Background(), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
+	require.NoError(t, err)
+	assert.Equal(t, "ssh-token", resp.Token, "the polling itself still returns its token")
+
+	pending := s.session.oauthFlow()
+	assert.Same(t, newer, pending.flow, "the flow installed during the wait must stay pending")
+	require.NotNil(t, pending.waitCancel, "the wait of the newer flow must stay cancellable")
+	pending.waitCancel()
+	assert.True(t, cancelled, "the kept cancel must be the one of the newer flow")
+}
+
+// With nothing newer installed the finished flow is done and its record goes away.
+func TestWaitJWTToken_ClearsItsOwnFlow(t *testing.T) {
+	s := newTestServer()
+	s.session.swapOAuthFlow(oauthAuthFlow{
+		flow: &fakeOAuthFlow{token: "ssh-token"},
+		info: auth.AuthFlowInfo{DeviceCode: "device-code"},
+	})
+
+	_, err := s.WaitJWTToken(context.Background(), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
+	require.NoError(t, err)
+
+	assert.Nil(t, s.session.oauthFlow().flow, "the finished flow must be cleared")
 }
