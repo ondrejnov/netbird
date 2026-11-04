@@ -62,7 +62,7 @@ func TestWaitSSOLogin_WrongAccountArmsPromptAndFails(t *testing.T) {
 	require.Nil(t, resp)
 	require.Equal(t, 0, attempts, "the wrong account's token reached the management login")
 	require.True(t, s.forceAccountPrompt, "the next login was not armed to ask for the account")
-	require.Nil(t, s.oauthAuthFlow.flow, "the mismatched flow stayed cached for reuse")
+	require.Nil(t, s.session.oauthAuthFlow.flow, "the mismatched flow stayed cached for reuse")
 
 	status, stateErr := internal.CtxGetState(s.rootCtx).Status()
 	require.NoError(t, stateErr)
@@ -118,25 +118,25 @@ func TestSwitchProfile_DropsAccountPromptAndPendingFlow(t *testing.T) {
 	s, ctx, _, _, _ := setupServerWithProfile(t)
 	s.forceAccountPrompt = true
 	cancelled := false
-	s.oauthAuthFlow = oauthAuthFlow{
+	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:       &stubOAuthFlow{},
 		hint:       "user@example.com",
 		waitCancel: func() { cancelled = true },
 	}
 
 	extendCancelled := false
-	s.extendAuthSessionFlow.Set(&stubOAuthFlow{}, auth.AuthFlowInfo{DeviceCode: "device"})
-	s.extendAuthSessionFlow.SetWaitCancel(func() { extendCancelled = true })
+	s.session.extendAuthSessionFlow.Set(&stubOAuthFlow{}, auth.AuthFlowInfo{DeviceCode: "device"})
+	s.session.extendAuthSessionFlow.SetWaitCancel(func() { extendCancelled = true })
 
 	_, err := s.SwitchProfile(ctx, nil)
 	require.NoError(t, err)
 	require.False(t, s.forceAccountPrompt, "the prompt flag leaked across a profile switch")
-	require.Nil(t, s.oauthAuthFlow.flow, "the previous profile's flow leaked across a profile switch")
-	require.Empty(t, s.oauthAuthFlow.hint)
+	require.Nil(t, s.session.oauthAuthFlow.flow, "the previous profile's flow leaked across a profile switch")
+	require.Empty(t, s.session.oauthAuthFlow.hint)
 	require.True(t, cancelled, "the pending wait was not cancelled")
 
 	require.True(t, extendCancelled, "the pending extend wait was not cancelled")
-	_, _, pending := s.extendAuthSessionFlow.Get()
+	_, _, pending := s.session.extendAuthSessionFlow.Get()
 	require.False(t, pending, "the previous profile's extend flow leaked across a profile switch")
 }
 
@@ -158,17 +158,17 @@ func TestLogin_ProfileSwitchDropsAccountPromptAndPendingFlow(t *testing.T) {
 
 	s.forceAccountPrompt = true
 	cancelled := false
-	s.oauthAuthFlow = oauthAuthFlow{
+	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:       &stubOAuthFlow{},
 		hint:       "user@example.com",
 		waitCancel: func() { cancelled = true },
 	}
 
 	extendCancelled := false
-	s.extendAuthSessionFlow.Set(&stubOAuthFlow{}, auth.AuthFlowInfo{DeviceCode: "device"})
-	s.extendAuthSessionFlow.SetWaitCancel(func() { extendCancelled = true })
+	s.session.extendAuthSessionFlow.Set(&stubOAuthFlow{}, auth.AuthFlowInfo{DeviceCode: "device"})
+	s.session.extendAuthSessionFlow.SetWaitCancel(func() { extendCancelled = true })
 
-	generation := s.jwtCache.currentGeneration()
+	generation := s.session.jwtCache.currentGeneration()
 
 	_, err = s.Login(userCtx(), &proto.LoginRequest{ProfileName: &other, Username: &username})
 	require.Error(t, err, "the broken key must stop the login before a flow is built")
@@ -178,15 +178,15 @@ func TestLogin_ProfileSwitchDropsAccountPromptAndPendingFlow(t *testing.T) {
 	require.Equal(t, profilemanager.ID(other), active.ID, "the login did not switch the profile")
 
 	require.False(t, s.forceAccountPrompt, "the prompt flag leaked across a login-driven profile switch")
-	require.Nil(t, s.oauthAuthFlow.flow, "the previous profile's flow leaked across a login-driven profile switch")
-	require.Empty(t, s.oauthAuthFlow.hint)
+	require.Nil(t, s.session.oauthAuthFlow.flow, "the previous profile's flow leaked across a login-driven profile switch")
+	require.Empty(t, s.session.oauthAuthFlow.hint)
 	require.True(t, cancelled, "the pending wait was not cancelled")
 
 	require.True(t, extendCancelled, "the pending extend wait was not cancelled")
-	_, _, pending := s.extendAuthSessionFlow.Get()
+	_, _, pending := s.session.extendAuthSessionFlow.Get()
 	require.False(t, pending, "the previous profile's extend flow leaked across a login-driven profile switch")
 
-	require.Greater(t, s.jwtCache.currentGeneration(), generation, "the previous profile's JWT cache survived a login-driven profile switch")
+	require.Greater(t, s.session.jwtCache.currentGeneration(), generation, "the previous profile's JWT cache survived a login-driven profile switch")
 }
 
 func TestLogin_ProfileSwitchRejectsJWTObtainedUnderPreviousConfig(t *testing.T) {
@@ -205,18 +205,18 @@ func TestLogin_ProfileSwitchRejectsJWTObtainedUnderPreviousConfig(t *testing.T) 
 
 	// getConfig loads the MDM policy right before Login swaps the config, so the
 	// fetcher runs where a RequestJWTAuth racing the login would land: after the
-	// switch dropped the previous profile's state, while the session's config still belongs
-	// to the previous profile. It caches a token under the generation current at
-	// that point, as WaitJWTToken would.
-	generation := s.jwtCache.currentGeneration()
-	fetcher := &jwtStoringMDMFetcher{cache: s.jwtCache, caller: unprivilegedIdentity()}
+	// switch dropped the previous profile's state, while the session's config still
+	// belongs to the previous profile. It caches a token under the generation current
+	// at that point, as WaitJWTToken would.
+	generation := s.session.jwtCache.currentGeneration()
+	fetcher := &jwtStoringMDMFetcher{cache: s.session.jwtCache, caller: unprivilegedIdentity()}
 	s.mdmLoader = mdm.NewLoader(fetcher)
 
 	_, err = s.Login(userCtx(), &proto.LoginRequest{ProfileName: &other, Username: &username})
 	require.Error(t, err)
 
 	require.Greater(t, fetcher.generation, generation, "the token was not cached after the switch dropped the previous profile's state")
-	_, found := s.jwtCache.get(fetcher.caller)
+	_, found := s.session.jwtCache.get(fetcher.caller)
 	require.False(t, found, "a JWT obtained under the previous profile's config survived the login-driven switch")
 }
 
@@ -230,7 +230,7 @@ func TestLogin_SameProfileKeepsPendingFlow(t *testing.T) {
 
 	cancelled := false
 	flow := &stubOAuthFlow{}
-	s.oauthAuthFlow = oauthAuthFlow{
+	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:       flow,
 		hint:       "user@example.com",
 		waitCancel: func() { cancelled = true },
@@ -239,8 +239,8 @@ func TestLogin_SameProfileKeepsPendingFlow(t *testing.T) {
 	_, err := s.Login(userCtx(), &proto.LoginRequest{ProfileName: &profName, Username: &username})
 	require.Error(t, err, "the broken key must stop the login before a flow is built")
 
-	require.Equal(t, flow, s.oauthAuthFlow.flow, "a login on the same profile dropped the flow a second client could join")
-	require.Equal(t, "user@example.com", s.oauthAuthFlow.hint)
+	require.Equal(t, flow, s.session.oauthAuthFlow.flow, "a login on the same profile dropped the flow a second client could join")
+	require.Equal(t, "user@example.com", s.session.oauthAuthFlow.hint)
 	require.False(t, cancelled, "a login on the same profile cancelled the pending wait")
 }
 
@@ -252,11 +252,11 @@ func TestWaitSSOLogin_JudgesTheFlowThatProducedTheToken(t *testing.T) {
 		return "", nil
 	}
 
-	flow := s.oauthAuthFlow.flow.(*stubOAuthFlow)
+	flow := s.session.oauthAuthFlow.flow.(*stubOAuthFlow)
 	flow.onWait = func() {
-		s.mutex.Lock()
-		defer s.mutex.Unlock()
-		s.oauthAuthFlow.hint = "someone-else@example.com"
+		s.session.mu.Lock()
+		defer s.session.mu.Unlock()
+		s.session.oauthAuthFlow.hint = "someone-else@example.com"
 	}
 
 	resp, err := s.WaitSSOLogin(callerCtx(t), &proto.WaitSSOLoginRequest{UserCode: "code"})
@@ -269,7 +269,7 @@ func TestWaitSSOLogin_JudgesTheFlowThatProducedTheToken(t *testing.T) {
 func TestReuseOAuthFlow_ForcedPromptRefusesTheCachedFlow(t *testing.T) {
 	s := New(internal.CtxInitState(context.Background()), "console", "", false, false, false, false)
 	cancelled := false
-	s.oauthAuthFlow = oauthAuthFlow{
+	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:       &stubOAuthFlow{},
 		info:       auth.AuthFlowInfo{UserCode: "code"},
 		expiresAt:  time.Now().Add(time.Hour),
@@ -289,7 +289,7 @@ func TestReuseOAuthFlow_ForcedPromptRefusesTheCachedFlow(t *testing.T) {
 func TestReplaceOAuthFlow_CancelsTheDisplacedWait(t *testing.T) {
 	s := New(internal.CtxInitState(context.Background()), "console", "", false, false, false, false)
 	cancelled := false
-	s.oauthAuthFlow = oauthAuthFlow{
+	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:            &stubOAuthFlow{},
 		info:            auth.AuthFlowInfo{UserCode: "code"},
 		expiresAt:       time.Now().Add(time.Hour),
@@ -302,17 +302,17 @@ func TestReplaceOAuthFlow_CancelsTheDisplacedWait(t *testing.T) {
 	s.replaceOAuthFlow(oauthAuthFlow{flow: next, info: auth.AuthFlowInfo{UserCode: "next"}})
 
 	require.True(t, cancelled, "the displaced wait was left without an owner")
-	require.Equal(t, next, s.oauthAuthFlow.flow)
-	require.Equal(t, "next", s.oauthAuthFlow.info.UserCode)
-	require.Empty(t, s.oauthAuthFlow.hint, "the previous flow's hint survived the replacement")
-	require.False(t, s.oauthAuthFlow.accountPrompted)
-	require.Nil(t, s.oauthAuthFlow.waitCancel, "the consumed cancel stayed on the record")
+	require.Equal(t, next, s.session.oauthAuthFlow.flow)
+	require.Equal(t, "next", s.session.oauthAuthFlow.info.UserCode)
+	require.Empty(t, s.session.oauthAuthFlow.hint, "the previous flow's hint survived the replacement")
+	require.False(t, s.session.oauthAuthFlow.accountPrompted)
+	require.Nil(t, s.session.oauthAuthFlow.waitCancel, "the consumed cancel stayed on the record")
 }
 
 func newSSOTestServer(t *testing.T, hint string, accountPrompted bool, tokenEmail string) *Server {
 	t.Helper()
 	s := New(internal.CtxInitState(context.Background()), "console", "", false, false, false, false)
-	s.oauthAuthFlow = oauthAuthFlow{
+	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:            &stubOAuthFlow{token: auth.TokenInfo{Email: tokenEmail, EmailClaim: tokenEmail}},
 		info:            auth.AuthFlowInfo{UserCode: "code"},
 		expiresAt:       time.Now().Add(time.Minute),

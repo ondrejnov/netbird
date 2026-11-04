@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem) je hotové, viz 2.4. Další krok je PR 10 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem) a PR 10 (extrakce `session`) jsou hotové, viz 2.4. Další krok je PR 11 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -147,6 +147,23 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   rozhodnuto.
 - Aktivní profil dál čtou jen RPC na úrovni daemonu: residual restore v `Start`, `Up`, `Login` (PR 11), `ListStates`,
   `CleanState`, `DeleteState`, debug bundle (5.4 bod 6) a state manager `updateManager` (5.4 bod 5).
+
+**PR 10, extrakce `session`:**
+
+- Rozděleno na tři větve podle skupin polí: `f2/session-lifecycle`, `f2/session-state`, `f2/session-auth`. `Server` drží
+  jednu session v poli `session` nastaveném v `New`, slot zatím není potřeba.
+- `session.mu` je list: chrání jednotlivá čtení a zápisy polí, nedrží se přes volání ven a `session` nemá odkaz na
+  `Server`. Sekvence „zkontroluj a proveď" zůstávají pod `Server.mutex` jako dřív, takže atomické jsou jen díky němu.
+  Přechod na více session je musí přesunout, až přestane stačit globální zámek.
+- `statusRecorder`, `jwtCache` a `extendAuthSessionFlow` se po `newSession` nemění a synchronizují se samy, zámek nemají.
+- Čtení bez zámku v `Status`, `waitForUp`, `runProbes`, `CleanState`, `DeleteState`, přihlášení a kontrolách politik byla
+  datový závod, teď jsou seřazená přes `session.mu`. Čekání v `Status` čte kanály běhu v každé iteraci, aby sledovalo
+  restart z MDM.
+- Na `Server` zůstává `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`, `bundleCapture`, `persistSyncResponse` a
+  `probeThrottle`. Zadání je neřadí k žádné skupině, jejich přesun rozhodne PR 13.
+- **Nepřesunutá závada z PR 9:** sekce 8 řadí `nbnet.Init` do PR 9, ale `advancedRoutingSupported` je dál procesová
+  proměnná bez synchronizace. `TestServer_SubcribeEvents` na ní pod `-race` občas selže, i na `f2/identity` (3 ze 6 běhů).
+  `TestLogin` v `client/cmd` pod `-race` selhává i bez PR 10, závod je v logování v `util/log.go`.
 
 ## 3. Architektura: proč jeden daemon
 

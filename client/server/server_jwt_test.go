@@ -22,7 +22,7 @@ import (
 func TestCachedJWT_ServesTheOwner(t *testing.T) {
 	s := newTestServer()
 	owner := unprivilegedIdentity()
-	s.jwtCache.store("token", owner, testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", owner, testTTL, s.session.jwtCache.currentGeneration())
 
 	got, found := s.cachedJWT(ctxWithIdentity(owner))
 
@@ -32,7 +32,7 @@ func TestCachedJWT_ServesTheOwner(t *testing.T) {
 
 func TestCachedJWT_RefusesAnotherCaller(t *testing.T) {
 	s := newTestServer()
-	s.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.session.jwtCache.currentGeneration())
 
 	got, found := s.cachedJWT(ctxWithIdentity(privilegedIdentity()))
 
@@ -45,7 +45,7 @@ func TestCachedJWT_RefusesAnotherCaller(t *testing.T) {
 // another, so cachedJWT must fail closed there.
 func TestCachedJWT_WithoutCallerIdentity(t *testing.T) {
 	s := newTestServer()
-	s.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", unprivilegedIdentity(), testTTL, s.session.jwtCache.currentGeneration())
 
 	got, found := s.cachedJWT(context.Background())
 
@@ -109,7 +109,7 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 	require.NoError(t, err)
 
 	owner := unprivilegedIdentity()
-	s.jwtCache.store("token", owner, testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", owner, testTTL, s.session.jwtCache.currentGeneration())
 
 	name := target
 	_, err = s.SwitchProfile(ctx, &proto.SwitchProfileRequest{ProfileName: &name, Username: &username})
@@ -119,7 +119,7 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, profilemanager.ID(target), active.ID, "the profile must actually have changed")
 
-	_, found := s.jwtCache.get(owner)
+	_, found := s.session.jwtCache.get(owner)
 	assert.False(t, found, "switching profile must drop the cached SSH JWT")
 }
 
@@ -136,11 +136,11 @@ func TestCleanupConnection_KeepsJWTCache(t *testing.T) {
 	s.session.actCancel = cancel
 
 	owner := unprivilegedIdentity()
-	s.jwtCache.store("token", owner, testTTL, s.jwtCache.currentGeneration())
+	s.session.jwtCache.store("token", owner, testTTL, s.session.jwtCache.currentGeneration())
 
 	require.NoError(t, s.cleanupConnection())
 
-	got, found := s.jwtCache.get(owner)
+	got, found := s.session.jwtCache.get(owner)
 	require.True(t, found, "going down must not drop the cached SSH JWT")
 	assert.Equal(t, "token", got)
 }
@@ -162,7 +162,7 @@ func (f *fakeOAuthFlow) WaitToken(context.Context, auth.AuthFlowInfo) (auth.Toke
 func (f *fakeOAuthFlow) GetClientID(context.Context) string { return "client-id" }
 
 // The flow outlives a profile switch, because SwitchProfile does not reset
-// s.oauthAuthFlow. A switch between RequestJWTAuth and the IdP answering must
+// the flow record. A switch between RequestJWTAuth and the IdP answering must
 // still keep the token out of the cache the new profile uses, and the
 // generation the flow carries is what decides it: reading the cache's own
 // generation at store time would already be the new one.
@@ -173,16 +173,16 @@ func TestWaitJWTToken_DropsTokenFromASessionThatEndedBeforeTheWait(t *testing.T)
 	s.session.setConfig(&profilemanager.Config{SSHJWTCacheTTL: &ttl})
 
 	// RequestJWTAuth ran under the previous session and recorded its generation.
-	s.oauthAuthFlow.flow = &fakeOAuthFlow{token: "token-from-the-old-session"}
-	s.oauthAuthFlow.info = auth.AuthFlowInfo{DeviceCode: "device-code"}
-	s.oauthAuthFlow.cacheGeneration = s.jwtCache.currentGeneration()
+	s.session.oauthAuthFlow.flow = &fakeOAuthFlow{token: "token-from-the-old-session"}
+	s.session.oauthAuthFlow.info = auth.AuthFlowInfo{DeviceCode: "device-code"}
+	s.session.oauthAuthFlow.cacheGeneration = s.session.jwtCache.currentGeneration()
 
 	// A profile switch or a logout lands before the caller reaches WaitJWTToken.
-	s.jwtCache.clear()
+	s.session.jwtCache.clear()
 
 	_, err := s.WaitJWTToken(ctxWithIdentity(owner), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
 	require.NoError(t, err)
 
-	_, found := s.jwtCache.get(owner)
+	_, found := s.session.jwtCache.get(owner)
 	assert.False(t, found, "a token whose flow started under the previous session must not be cached")
 }

@@ -40,7 +40,6 @@ import (
 	"github.com/netbirdio/netbird/client/internal/updater"
 	"github.com/netbirdio/netbird/client/proto"
 	"github.com/netbirdio/netbird/util"
-	"github.com/netbirdio/netbird/util/capture"
 	"github.com/netbirdio/netbird/version"
 )
 
@@ -93,19 +92,12 @@ type Server struct {
 	// or a root-only file through it.
 	uiLogPath string
 
-	oauthAuthFlow oauthAuthFlow
 	// forceAccountPrompt makes the next startSSOLogin build its flow with a
 	// forced account prompt. Armed when a login came back for an account other
 	// than the hinted one: that flow's browser is gone, so the correction has to
 	// ride on the user's next connect. Guarded by mutex; deliberately not
 	// persisted — a lost flag only costs one more mismatch round.
 	forceAccountPrompt bool
-	// extendAuthSessionFlow holds the pending PKCE flow created by
-	// RequestExtendAuthSession until WaitExtendAuthSession resolves it.
-	// Kept separate from oauthAuthFlow (which is reserved for the SSH
-	// JWT path) so a concurrent SSH auth doesn't clobber the session
-	// extend flow or vice versa.
-	extendAuthSessionFlow *auth.PendingFlow
 
 	// guardedConfigMu serializes a privilege check against the write it
 	// authorizes. Without it the two are separate steps over the same file, and a
@@ -131,9 +123,7 @@ type Server struct {
 	updateSettingsDisabled bool
 	captureEnabled         bool
 	bundleCapture          *bundleCapture
-	// activeCapture is the session currently installed on the engine; guarded by s.mutex.
-	activeCapture    *capture.Session
-	networksDisabled bool
+	networksDisabled       bool
 
 	sleepHandler *sleephandler.SleepHandler
 
@@ -152,8 +142,6 @@ type Server struct {
 	mdmLoader *mdm.Loader
 
 	updateManager *updater.Manager
-
-	jwtCache *jwtCache
 
 	// loginAttemptFn stands in for the Management login round trip. Tests set
 	// it to drive the login outcomes that need a server on the other end;
@@ -198,8 +186,6 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 		updateSettingsDisabled: updateSettingsDisabled,
 		captureEnabled:         captureEnabled,
 		networksDisabled:       networksDisabled,
-		jwtCache:               newJWTCache(),
-		extendAuthSessionFlow:  auth.NewPendingFlow(),
 		probeThrottle:          newProbeThrottle(probeThreshold),
 	}
 	agent := &serverAgent{s}
@@ -719,7 +705,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	s.mutex.Lock()
 	s.session.setConfig(config)
 	if switched {
-		s.jwtCache.clear()
+		s.session.jwtCache.clear()
 	}
 	s.mutex.Unlock()
 
@@ -821,8 +807,7 @@ func (s *Server) startSSOLogin(ctx context.Context, msg *proto.LoginRequest, con
 // cancel runs after the unlock — the displaced wait takes s.mutex as it unwinds.
 func (s *Server) replaceOAuthFlow(next oauthAuthFlow) {
 	s.mutex.Lock()
-	staleCancel := s.oauthAuthFlow.waitCancel
-	s.oauthAuthFlow = next
+	staleCancel := s.session.swapOAuthFlow(next)
 	s.mutex.Unlock()
 
 	if staleCancel != nil {
@@ -832,9 +817,7 @@ func (s *Server) replaceOAuthFlow(next oauthAuthFlow) {
 
 func (s *Server) expireOAuthFlow(flow auth.OAuthFlow) {
 	s.mutex.Lock()
-	if s.oauthAuthFlow.flow == flow {
-		s.oauthAuthFlow.expiresAt = time.Now()
-	}
+	s.session.expireOAuthFlow(flow)
 	s.mutex.Unlock()
 }
 
@@ -856,7 +839,7 @@ func (s *Server) expireOAuthFlow(flow auth.OAuthFlow) {
 // WaitSSOLogin takes s.mutex on the way out.
 func (s *Server) reuseOAuthFlow(ctx context.Context, oAuthFlow auth.OAuthFlow, state statusSetter, promptForAccount bool) *proto.LoginResponse {
 	s.mutex.Lock()
-	current := s.oauthAuthFlow
+	current := s.session.oauthFlow()
 	s.mutex.Unlock()
 
 	if current.flow == nil || current.flow.GetClientID(ctx) != oAuthFlow.GetClientID(ctx) {
@@ -952,9 +935,9 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 	// One snapshot of the flow this wait belongs to. hint and accountPrompted
 	// are judged against the token that comes back below, and WaitToken blocks
 	// for the whole browser leg: a concurrent Login or RequestJWTAuth replaces
-	// s.oauthAuthFlow meanwhile, so re-reading them after the wait would judge
+	// the flow record meanwhile, so re-reading them after the wait would judge
 	// this flow's token against another flow's account.
-	pending := s.oauthAuthFlow
+	pending := s.session.oauthFlow()
 	flow := pending.flow
 	s.mutex.Unlock()
 
@@ -991,13 +974,11 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 	// the same predecessor and leave one wait uncancelled. Cancelling happens
 	// after the unlock: the displaced wait takes s.mutex as it unwinds.
 	s.mutex.Lock()
-	if s.oauthAuthFlow.flow != flow {
-		s.mutex.Unlock()
+	staleCancel, claimed := s.session.claimOAuthWait(flow, cancel)
+	s.mutex.Unlock()
+	if !claimed {
 		return nil, gstatus.Errorf(codes.Canceled, "sso login was replaced by a newer login")
 	}
-	staleCancel := s.oauthAuthFlow.waitCancel
-	s.oauthAuthFlow.waitCancel = cancel
-	s.mutex.Unlock()
 
 	if staleCancel != nil {
 		staleCancel()
@@ -1018,9 +999,7 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 			// the new owner — don't clobber it.
 			if callerCtx.Err() != nil {
 				s.mutex.Lock()
-				if s.oauthAuthFlow.flow == flow {
-					s.oauthAuthFlow = oauthAuthFlow{}
-				}
+				s.session.clearOAuthFlowIf(flow)
 				s.mutex.Unlock()
 			}
 		case errors.Is(err, context.DeadlineExceeded):
@@ -1048,8 +1027,7 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 			// register the peer under the wrong account.
 			log.Warnf("login returned an account other than the one this profile is bound to; the next connect will ask the IdP to choose")
 			s.mutex.Lock()
-			if s.oauthAuthFlow.flow == flow {
-				s.oauthAuthFlow = oauthAuthFlow{}
+			if s.session.clearOAuthFlowIf(flow) {
 				s.forceAccountPrompt = true
 			}
 			s.mutex.Unlock()
@@ -1347,19 +1325,18 @@ func (s *Server) dropPendingAuthFlows() {
 	// profile's login; carried across a switch they would judge the new
 	// profile's token against the old profile's account. CancelFunc is
 	// non-blocking, so calling it under the mutex is safe.
-	if cancel := s.oauthAuthFlow.waitCancel; cancel != nil {
+	if cancel := s.session.swapOAuthFlow(oauthAuthFlow{}); cancel != nil {
 		cancel()
 	}
-	s.oauthAuthFlow = oauthAuthFlow{}
 	s.forceAccountPrompt = false
 
 	// A pending session extend belongs to the previous profile too: its device
 	// code was issued by that profile's IdP client, and WaitExtendAuthSession
 	// would submit the resulting token against the new profile's engine.
-	s.extendAuthSessionFlow.CancelWait()
-	s.extendAuthSessionFlow.Clear()
+	s.session.extendAuthSessionFlow.CancelWait()
+	s.session.extendAuthSessionFlow.Clear()
 
-	s.jwtCache.clear()
+	s.session.jwtCache.clear()
 }
 
 // SwitchProfile switches the active profile in the daemon.
@@ -1453,7 +1430,7 @@ func (s *Server) Down(ctx context.Context, _ *proto.DownRequest) (*proto.DownRes
 }
 
 func (s *Server) cleanupConnection() error {
-	s.oauthAuthFlow = oauthAuthFlow{}
+	s.session.clearOAuthFlow()
 
 	if !s.session.hasActCancel() {
 		return ErrServiceNotUp
@@ -1566,7 +1543,7 @@ func (s *Server) cleanupAfterProfileLogout(id profilemanager.ID, username string
 	if err := s.cleanupConnection(); err != nil && !errors.Is(err, ErrServiceNotUp) {
 		log.Errorf("failed to cleanup connection: %v", err)
 	}
-	s.jwtCache.clear()
+	s.session.jwtCache.clear()
 	state := internal.CtxGetState(s.rootCtx)
 	state.Set(internal.StatusNeedsLogin)
 }
@@ -1595,7 +1572,7 @@ func (s *Server) handleActiveProfileLogout(ctx context.Context) (*proto.LogoutRe
 		log.Errorf("failed to cleanup connection: %v", err)
 		return nil, err
 	}
-	s.jwtCache.clear()
+	s.session.jwtCache.clear()
 
 	state := internal.CtxGetState(s.rootCtx)
 	state.Set(internal.StatusNeedsLogin)
@@ -1993,7 +1970,7 @@ func (s *Server) cachedJWT(ctx context.Context) (string, bool) {
 		log.Debug("not serving the cached SSH JWT: the caller's identity cannot be verified on this control channel")
 		return "", false
 	}
-	return s.jwtCache.get(caller)
+	return s.session.jwtCache.get(caller)
 }
 
 // RequestJWTAuth initiates JWT authentication flow for SSH
@@ -2012,7 +1989,7 @@ func (s *Server) RequestJWTAuth(
 	// s.mutex across its own clear(), so the pair cannot be torn.
 	s.mutex.Lock()
 	config := s.session.currentConfig()
-	cacheGeneration := s.jwtCache.currentGeneration()
+	cacheGeneration := s.session.jwtCache.currentGeneration()
 	s.mutex.Unlock()
 
 	if config == nil {
@@ -2081,13 +2058,15 @@ func (s *Server) WaitJWTToken(
 	}
 
 	s.mutex.Lock()
-	oAuthFlow := s.oauthAuthFlow.flow
-	authInfo := s.oauthAuthFlow.info
+	pending := s.session.oauthFlow()
+	s.mutex.Unlock()
+
+	oAuthFlow := pending.flow
+	authInfo := pending.info
 	// Recorded when the flow was created, not read here: the flow survives a
 	// profile switch, and everything from RequestJWTAuth to the IdP answering
 	// has to count as the same session for the cache.
-	generation := s.oauthAuthFlow.cacheGeneration
-	s.mutex.Unlock()
+	generation := pending.cacheGeneration
 
 	if oAuthFlow == nil || authInfo.DeviceCode != req.DeviceCode {
 		return nil, gstatus.Errorf(codes.InvalidArgument, "invalid device code or no active auth flow")
@@ -2107,7 +2086,7 @@ func (s *Server) WaitJWTToken(
 	case !ok:
 		log.Debug("not caching the SSH JWT: the caller's identity cannot be verified on this control channel")
 	default:
-		if s.jwtCache.store(token, caller, jwtCacheTTL, generation) {
+		if s.session.jwtCache.store(token, caller, jwtCacheTTL, generation) {
 			log.Debugf("JWT token cached for SSH authentication, TTL: %v", jwtCacheTTL)
 		} else {
 			log.Debug("not caching the SSH JWT: the session it was obtained under ended while the IdP was polled")
@@ -2115,7 +2094,7 @@ func (s *Server) WaitJWTToken(
 	}
 
 	s.mutex.Lock()
-	s.oauthAuthFlow = oauthAuthFlow{}
+	s.session.clearOAuthFlow()
 	s.mutex.Unlock()
 	return &proto.WaitJWTTokenResponse{
 		Token:     tokenInfo.GetTokenToUse(),
@@ -2126,7 +2105,7 @@ func (s *Server) WaitJWTToken(
 
 // RequestExtendAuthSession initiates the SSO session-extension flow and
 // returns the verification URI the UI should open. The flow state is held
-// in s.extendAuthSessionFlow until WaitExtendAuthSession resolves it.
+// in the session's extendAuthSessionFlow until WaitExtendAuthSession resolves it.
 func (s *Server) RequestExtendAuthSession(
 	ctx context.Context,
 	msg *proto.RequestExtendAuthSessionRequest,
@@ -2169,7 +2148,7 @@ func (s *Server) RequestExtendAuthSession(
 		return nil, gstatus.Errorf(codes.Internal, "failed to request auth info: %v", err)
 	}
 
-	s.extendAuthSessionFlow.Set(oAuthFlow, authInfo)
+	s.session.extendAuthSessionFlow.Set(oAuthFlow, authInfo)
 
 	return &proto.RequestExtendAuthSessionResponse{
 		VerificationURI:         authInfo.VerificationURI,
@@ -2193,7 +2172,7 @@ func (s *Server) WaitExtendAuthSession(
 		return nil, ctx.Err()
 	}
 
-	oAuthFlow, authInfo, ok := s.extendAuthSessionFlow.Get()
+	oAuthFlow, authInfo, ok := s.session.extendAuthSessionFlow.Get()
 
 	s.mutex.Lock()
 	connectClient := s.session.client()
@@ -2207,11 +2186,11 @@ func (s *Server) WaitExtendAuthSession(
 	// notification and the about-to-expire dialog both start a flow on
 	// the same deadline). The older waiter exits via context.Canceled;
 	// the new one takes over the IdP poll.
-	s.extendAuthSessionFlow.CancelWait()
+	s.session.extendAuthSessionFlow.CancelWait()
 
 	waitCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s.extendAuthSessionFlow.SetWaitCancel(cancel)
+	s.session.extendAuthSessionFlow.SetWaitCancel(cancel)
 
 	tokenInfo, err := oAuthFlow.WaitToken(waitCtx, authInfo)
 	if err != nil {
@@ -2222,7 +2201,7 @@ func (s *Server) WaitExtendAuthSession(
 	}
 
 	// Clear pending flow before talking to mgm so a retry can re-initiate.
-	s.extendAuthSessionFlow.Clear()
+	s.session.extendAuthSessionFlow.Clear()
 
 	if connectClient == nil {
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "client is not running")

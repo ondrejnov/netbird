@@ -141,6 +141,24 @@ func TestSetConfig_TakesOuterLocksBeforeSessionMu(t *testing.T) {
 	}, &s.guardedConfigMu, &s.mutex)
 }
 
+func TestWaitJWTToken_TakesServerMutexBeforeSessionMu(t *testing.T) {
+	s := newTestServer()
+
+	requireWaitsOnSessionMu(t, s, func() error {
+		_, err := s.WaitJWTToken(context.Background(), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
+		return err
+	}, &s.mutex)
+}
+
+func TestStartBundleCapture_TakesServerMutexBeforeSessionMu(t *testing.T) {
+	s := newTestServer()
+
+	requireWaitsOnSessionMu(t, s, func() error {
+		_, err := s.StartBundleCapture(context.Background(), &proto.StartBundleCaptureRequest{})
+		return err
+	}, &s.mutex)
+}
+
 // The other half of the order: nothing that holds session.mu may wait for an outer
 // lock. RPCs hold Server.mutex across slow work such as stopping an engine, so a session
 // method waiting for it would freeze every reader of the session, including the ones
@@ -171,12 +189,44 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.clientConnectingOrConnected()
 		ss.setConfig(&profilemanager.Config{})
 		ss.currentConfig()
+		ss.oauthFlow()
+		ss.swapOAuthFlow(oauthAuthFlow{})
+		ss.clearOAuthFlow()
+		ss.clearOAuthFlowIf(nil)
+		ss.expireOAuthFlow(nil)
+		ss.claimOAuthWait(nil, func() {})
+		ss.setCapture(nil)
+		ss.currentCapture()
 	}()
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("a session method waited for an outer lock")
+	}
+}
+
+// dropPendingAuthFlows cancels a parked WaitSSOLogin, which reads the flow record on the
+// way out, so the cancel has to run outside the critical section that took it.
+func TestDropPendingAuthFlows_CancelsOutsideSessionMu(t *testing.T) {
+	s := newTestServer()
+	s.session.oauthAuthFlow = oauthAuthFlow{
+		flow:       &stubOAuthFlow{},
+		waitCancel: func() { s.session.oauthFlow() },
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.mutex.Lock()
+		defer s.mutex.Unlock()
+		s.dropPendingAuthFlows()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dropPendingAuthFlows held session.mu across the cancel")
 	}
 }
 

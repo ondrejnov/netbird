@@ -5,8 +5,10 @@ import (
 	"sync"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/auth"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
+	"github.com/netbirdio/netbird/util/capture"
 )
 
 // session is the state of one connection the daemon runs. The daemon still runs a
@@ -37,10 +39,29 @@ type session struct {
 	// statusRecorder is set by newSession and never replaced, so reading it takes no
 	// lock. The recorder synchronizes itself.
 	statusRecorder *peer.Status
+
+	oauthAuthFlow oauthAuthFlow
+
+	// extendAuthSessionFlow holds the pending PKCE flow created by
+	// RequestExtendAuthSession until WaitExtendAuthSession resolves it. It is separate
+	// from oauthAuthFlow, which is reserved for the SSH JWT path, so a concurrent SSH
+	// auth does not clobber the session extend flow or vice versa. Set by newSession and
+	// never replaced; the flow synchronizes itself.
+	extendAuthSessionFlow *auth.PendingFlow
+
+	// jwtCache is set by newSession and never replaced; the cache synchronizes itself.
+	jwtCache *jwtCache
+
+	// activeCapture is the packet capture currently installed on the engine.
+	activeCapture *capture.Session
 }
 
 func newSession() *session {
-	return &session{statusRecorder: peer.NewRecorder("")}
+	return &session{
+		statusRecorder:        peer.NewRecorder(""),
+		extendAuthSessionFlow: auth.NewPendingFlow(),
+		jwtCache:              newJWTCache(),
+	}
 }
 
 // cancelAct cancels the current attempt, if there is one. The cancel runs after the

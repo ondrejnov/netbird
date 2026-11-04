@@ -35,7 +35,7 @@ func TestLogin_ManagementUnreachableIsReturnedInsteadOfDemandingSSO(t *testing.T
 	require.ErrorIs(t, err, unreachable, "the transport failure was replaced by something else")
 	require.Nil(t, resp, "a failed login must not answer with a login response")
 	require.Equal(t, 1, attempts)
-	require.Nil(t, s.oauthAuthFlow.flow, "the daemon started an SSO flow for a peer whose login was never decided")
+	require.Nil(t, s.session.oauthAuthFlow.flow, "the daemon started an SSO flow for a peer whose login was never decided")
 
 	status, err := internal.CtxGetState(s.rootCtx).Status()
 	require.NoError(t, err)
@@ -85,7 +85,7 @@ func TestLogin_SetupKeyStillRunsWhenPeerNeedsLogin(t *testing.T) {
 	require.NoError(t, err, "the probe's outcome leaked out as the login result")
 	require.NotNil(t, resp)
 	require.Equal(t, []string{setupKey}, keysTried, "the setup key never reached the login attempt")
-	require.Nil(t, s.oauthAuthFlow.flow, "a setup-key login started an SSO flow")
+	require.Nil(t, s.session.oauthAuthFlow.flow, "a setup-key login started an SSO flow")
 
 	status, err := internal.CtxGetState(s.rootCtx).Status()
 	require.NoError(t, err)
