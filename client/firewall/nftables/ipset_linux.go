@@ -46,7 +46,7 @@ func (r *family) createIpSet(setName string, input setInput) (*nftables.Set, err
 	maxElements := maxPrefixesSet * 2
 	initialElements := elements[:min(maxElements, nElements)]
 
-	if err := r.conn.AddSet(nfset, initialElements); err != nil {
+	if err := addSet(r.conn, nfset, initialElements); err != nil {
 		return nil, fmt.Errorf("error adding set %s: %w", setName, err)
 	}
 	if err := r.conn.Flush(); err != nil {

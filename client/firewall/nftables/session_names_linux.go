@@ -103,7 +103,8 @@ func isDecimal(s string) bool {
 }
 
 // sessionScope is what distinguishes a manager built for a session. A nil scope means one
-// built without it: the historic tags, and every other table counts as foreign.
+// built without it: the historic tags, and every other table but the isolation table counts
+// as foreign.
 type sessionScope struct {
 	names SessionNames
 	base  string
@@ -117,12 +118,16 @@ func newSessionScope(names SessionNames) (*sessionScope, error) {
 }
 
 // ownsTable reports whether the table belongs to NetBird itself. Opening such a table for
-// an interface would let it past another session's drop or past the isolation rules.
+// an interface would let it past another session's drop or past the isolation rules. Slot 0
+// runs with a nil scope next to the isolation, so that table is never foreign.
 func (s *sessionScope) ownsTable(name string) bool {
+	if name == IsolationTableName {
+		return true
+	}
 	if s == nil {
 		return false
 	}
-	if name == IsolationTableName || name == s.base {
+	if name == s.base {
 		return true
 	}
 	number, ok := strings.CutPrefix(name, s.base+slotSeparator)

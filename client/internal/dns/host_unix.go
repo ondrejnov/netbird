@@ -52,7 +52,7 @@ func newHostManager(wgInterface string) (hostManager, error) {
 	}
 
 	log.Infof("System DNS manager discovered: %s (%s)", osManager, reason)
-	mgr, err := newHostManagerFromType(wgInterface, osManager)
+	mgr, err := newHostManagerFromType(wgInterface, osManager, nil)
 	// need to explicitly return nil mgr on error to avoid returning a non-nil interface containing a nil value
 	if err != nil {
 		return nil, fmt.Errorf("create host manager: %w", err)
@@ -61,12 +61,12 @@ func newHostManager(wgInterface string) (hostManager, error) {
 	return mgr, nil
 }
 
-func newHostManagerFromType(wgInterface string, osManager osManagerType) (restoreHostManager, error) {
+func newHostManagerFromType(wgInterface string, osManager osManagerType, netbirdIfaces hostInterfaceSet) (restoreHostManager, error) {
 	switch osManager {
 	case networkManager:
-		return newNetworkManagerDbusConfigurator(wgInterface)
+		return newNetworkManagerDbusConfigurator(wgInterface, netbirdIfaces)
 	case systemdManager:
-		return newSystemdDbusConfigurator(wgInterface)
+		return newSystemdDbusConfigurator(wgInterface, netbirdIfaces)
 	case resolvConfManager:
 		return newResolvConfConfigurator(wgInterface)
 	default:

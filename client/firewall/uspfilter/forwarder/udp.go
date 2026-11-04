@@ -162,7 +162,15 @@ func (f *Forwarder) handleUDP(r *udp.ForwarderRequest) bool {
 		}
 	}()
 
-	dstAddr := net.JoinHostPort(f.determineDialAddr(id.LocalAddress).String(), strconv.Itoa(int(id.LocalPort)))
+	dialIP := f.determineDialAddr(id.LocalAddress)
+	if f.isolationRefuses(dialIP) {
+		// The drop event replaces the end event.
+		success = true
+		f.sendUDPEvent(nftypes.TypeDrop, flowID, id, 0, 0, 0, 0)
+		return false
+	}
+
+	dstAddr := net.JoinHostPort(dialIP.String(), strconv.Itoa(int(id.LocalPort)))
 	outConn, err := (&net.Dialer{}).DialContext(f.ctx, "udp", dstAddr)
 	if err != nil {
 		f.logger.Debug2("forwarder: UDP dial error for %v: %v", epID(id), err)

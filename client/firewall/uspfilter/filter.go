@@ -149,6 +149,10 @@ type Config struct {
 	DisableServerRoutes bool
 	FlowLogger          nftypes.FlowLogger
 	MTU                 uint16
+	// Isolation tells the filter which interfaces and overlay prefixes other sessions of the
+	// same daemon own, so a peer of this network cannot reach them. Nil keeps the behavior of
+	// a host with a single session.
+	Isolation common.IsolationSource
 }
 
 // Manager userspace firewall manager
@@ -205,6 +209,8 @@ type Manager struct {
 
 	netstackServices     map[serviceKey]struct{}
 	netstackServiceMutex sync.RWMutex
+
+	isolation common.IsolationSource
 
 	mtu               uint16
 	mssClampValueIPv4 uint16
@@ -351,6 +357,7 @@ func Create(cfg Config) (_ *Manager, err error) {
 		portDNATRules:       []portDNATRule{},
 		netstackServices:    make(map[serviceKey]struct{}),
 		mtu:                 cfg.MTU,
+		isolation:           cfg.Isolation,
 	}
 	m.routingEnabled.Store(false)
 
@@ -578,6 +585,7 @@ func (m *Manager) initForwarder() error {
 		return fmt.Errorf("create forwarder: %w", err)
 	}
 
+	forwarder.SetIsolation(m.isolation)
 	m.forwarder.Store(forwarder)
 
 	// Re-load after store: a concurrent SetPacketCapture may have seen forwarder as nil and only updated pendingCapture.
@@ -1202,6 +1210,10 @@ func (m *Manager) filterInbound(packetData []byte, size int) bool {
 	srcIP, dstIP := m.extractIPs(d)
 	if !srcIP.IsValid() {
 		m.logger.Error1("Unknown network layer: %v", d.decoded[0])
+		return true
+	}
+
+	if m.dropIsolated(srcIP, dstIP) {
 		return true
 	}
 

@@ -35,11 +35,35 @@ type Coordinator struct {
 	holders  map[SessionKey]struct{}
 	base     RoutingBase
 	teardown TeardownFunc
+
+	routes   *Routes
+	dns      *DNSOwners
+	sessions *Sessions
 }
 
 // New returns a Coordinator with no holders.
 func New() *Coordinator {
-	return &Coordinator{holders: make(map[SessionKey]struct{})}
+	return &Coordinator{
+		holders:  make(map[SessionKey]struct{}),
+		routes:   NewRoutes(),
+		dns:      NewDNSOwners(),
+		sessions: NewSessions(),
+	}
+}
+
+// Routes returns the owners of the prefixes in the shared routing table.
+func (c *Coordinator) Routes() *Routes {
+	return c.routes
+}
+
+// DNSOwners returns the owners of the host DNS and the catch-all.
+func (c *Coordinator) DNSOwners() *DNSOwners {
+	return c.dns
+}
+
+// Sessions returns the interfaces and overlay prefixes of the running sessions.
+func (c *Coordinator) Sessions() *Sessions {
+	return c.sessions
 }
 
 // AcquireRoutingBase adds key to the routing base holders. Only the first holder

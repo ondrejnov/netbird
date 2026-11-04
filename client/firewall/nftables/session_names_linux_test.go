@@ -180,14 +180,15 @@ func TestIsExternalChainFollowsTheBaseFromEnv(t *testing.T) {
 	assert.True(t, r.isExternalChain(externalChainFixture("netbird-7", nftables.TableFamilyIPv4)), "another base is foreign")
 }
 
-// Without a session scope only the own table is excluded, exactly as before sessions existed.
+// Without a session scope the other session tables stay foreign, as they were before sessions
+// existed. The isolation table is closed regardless: no client without the gate creates it.
 func TestIsExternalChainWithoutSession(t *testing.T) {
 	t.Setenv(envTableName, "")
 	r := &family{workTable: &nftables.Table{Name: "netbird"}}
 
 	assert.False(t, r.isExternalChain(externalChainFixture("netbird", nftables.TableFamilyIPv4)), "own table")
 	assert.True(t, r.isExternalChain(externalChainFixture("netbird-1", nftables.TableFamilyIPv4)), "lookalike")
-	assert.True(t, r.isExternalChain(externalChainFixture(IsolationTableName, nftables.TableFamilyINet)), "isolation name")
+	assert.False(t, r.isExternalChain(externalChainFixture(IsolationTableName, nftables.TableFamilyINet)), "isolation table")
 }
 
 func TestAcceptTags(t *testing.T) {
@@ -235,9 +236,13 @@ func TestMonitorIgnoresSessionTablesOnlyInSession(t *testing.T) {
 	for _, table := range []string{"netbird", "netbird-1", "netbird-99", IsolationTableName} {
 		assert.False(t, session.isRelevant(newChain(table)), "new chain in %s", table)
 		assert.False(t, session.isRelevant(newTable(table)), "new table %s", table)
+	}
+	for _, table := range []string{"netbird", "netbird-1", "netbird-99"} {
 		assert.True(t, plain.isRelevant(newChain(table)), "without a session, new chain in %s", table)
 		assert.True(t, plain.isRelevant(newTable(table)), "without a session, new table %s", table)
 	}
+	assert.False(t, plain.isRelevant(newChain(IsolationTableName)), "without a session, new chain in the isolation table")
+	assert.False(t, plain.isRelevant(newTable(IsolationTableName)), "without a session, the isolation table itself")
 	assert.True(t, session.isRelevant(newChain("firewalld")), "firewalld reload must still reconcile")
 	assert.True(t, session.isRelevant(newTable("user_table")), "a foreign table must still reconcile")
 	assert.False(t, session.isRelevant(&nftables.MonitorEvent{Type: nftables.MonitorEventTypeNewChain}), "no data")

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -63,6 +64,7 @@ type Forwarder struct {
 	hasRawICMPAccess   bool
 	hasRawICMPv6Access bool
 	pingSemaphore      chan struct{}
+	isolation          atomic.Pointer[isolationHolder]
 }
 
 func New(iface IFace, logger *nblog.Logger, flowLogger nftypes.FlowLogger, netstack bool, mtu uint16) (*Forwarder, error) {
@@ -408,6 +410,11 @@ func (f *Forwarder) determineDialAddr(addr tcpip.Address) netip.Addr {
 // this peer is itself a client of. Forwarded flows are host sockets, so such a flow would leave with our
 // overlay address and be granted our access by the next routing peer instead of the original sender's.
 func (f *Forwarder) egressesOverlay(dst netip.Addr) bool {
+	// Another session's overlay is refused wherever the flow would be dialed from.
+	if f.isolationRefuses(dst) {
+		return true
+	}
+
 	// Without a kernel interface the host routing table has no overlay routes.
 	if f.netstack {
 		return false
@@ -433,10 +440,10 @@ func (f *Forwarder) egressesOverlay(dst netip.Addr) bool {
 func (f *Forwarder) isOverlayAddr(local net.Addr) bool {
 	udpAddr, ok := local.(*net.UDPAddr)
 	if !ok {
-		return false
+		return f.isOtherSessionAddr(local)
 	}
 	addr := addrFromNetipAddr(udpAddr.AddrPort().Addr().Unmap())
-	return f.ip.Equal(addr) || f.ipv6.Equal(addr)
+	return f.ip.Equal(addr) || f.ipv6.Equal(addr) || f.isOtherSessionAddr(local)
 }
 
 func (f *Forwarder) RegisterRuleID(srcIP, dstIP netip.Addr, srcPort, dstPort uint16, ruleID []byte) {
