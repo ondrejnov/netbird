@@ -353,8 +353,8 @@ func TestLogin_RunStartedAfterTheCancel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newResidualFixture(t)
-			f.s.session.beginRun(f.active)
-			f.s.session.setActCancel(func() { f.s.session.beginRun(tt.newRun(f)) })
+			f.s.session.beginRun(f.active, nil)
+			f.s.session.setActCancel(func() { f.s.session.beginRun(tt.newRun(f), nil) })
 
 			f.login(t)
 
@@ -368,7 +368,7 @@ func TestLogin_RunStartedAfterTheCancel(t *testing.T) {
 // leaves in the file is what Login is there to clean.
 func TestLogin_CleansAfterItsOwnCancelledRun(t *testing.T) {
 	f := newResidualFixture(t)
-	f.s.session.beginRun(f.active)
+	f.s.session.beginRun(f.active, nil)
 	f.s.session.setActCancel(func() {})
 
 	f.login(t)
@@ -391,7 +391,7 @@ func TestMDMRestart_RunningProfileWithoutConfigEndsTheRun(t *testing.T) {
 	f.s.rootCtx = rootCtx
 	stopRunAtCleanup(t, f.s, cancel)
 
-	_, giveUp := f.s.session.beginRun(removed)
+	_, giveUp := f.s.session.beginRun(removed, nil)
 	f.s.session.setActCancel(func() { close(giveUp) })
 
 	assert.Error(t, f.s.onMDMPolicyChange(nil, nil), "the restart should be refused")
@@ -416,21 +416,21 @@ func TestRestoreOwnResidual_Flush(t *testing.T) {
 		{
 			name: "own session is the one running",
 			setup: func(f *residualFixture) {
-				f.s.session.beginRun(f.active)
+				f.s.session.beginRun(f.active, nil)
 			},
 			want: 1,
 		},
 		{
 			name: "another session runs",
 			setup: func(f *residualFixture) {
-				f.s.session.beginRun(f.other)
+				f.s.session.beginRun(f.other, nil)
 			},
 			want: 0,
 		},
 		{
 			name: "another session wants to run but its goroutine is gone",
 			setup: func(f *residualFixture) {
-				_, giveUp := f.s.session.beginRun(f.other)
+				_, giveUp := f.s.session.beginRun(f.other, nil)
 				close(giveUp)
 			},
 			want: 1,
@@ -438,7 +438,7 @@ func TestRestoreOwnResidual_Flush(t *testing.T) {
 		{
 			name: "another session was brought down",
 			setup: func(f *residualFixture) {
-				f.s.session.beginRun(f.other)
+				f.s.session.beginRun(f.other, nil)
 				f.s.session.markClientDown()
 			},
 			want: 1,

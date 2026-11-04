@@ -40,7 +40,7 @@ func startParkedRestart(t *testing.T) *parkedRestart {
 	config, err := f.s.storedRunningConfig(f.active)
 	require.NoError(t, err)
 	f.s.session.setConfig(f.active, config)
-	_, giveUp := f.s.session.beginRun(f.active)
+	_, giveUp := f.s.session.beginRun(f.active, nil)
 
 	cancelled := make(chan struct{})
 	f.s.session.setActCancel(sync.OnceFunc(func() { close(cancelled) }))
@@ -268,7 +268,7 @@ func TestMDMRestart_StatusWaitForReadyFollowsTheRestart(t *testing.T) {
 func TestMDMRestart_RunCountsAsRunningAfterItsGoroutineEnded(t *testing.T) {
 	ss := newSession()
 	key := profilemanager.SessionKey{Profile: "work", Username: "user"}
-	_, giveUp := ss.beginRun(key)
+	_, giveUp := ss.beginRun(key, nil)
 
 	restart, ok := ss.beginRestart()
 	require.True(t, ok, "a running session should be restartable")
@@ -296,7 +296,7 @@ func TestMDMRestart_DoesNotKeepARunThatIsNotComingBack(t *testing.T) {
 
 	t.Run("the run had already given up", func(t *testing.T) {
 		ss := newSession()
-		_, giveUp := ss.beginRun(key)
+		_, giveUp := ss.beginRun(key, nil)
 		close(giveUp)
 
 		restart, ok := ss.beginRestart()
@@ -310,7 +310,7 @@ func TestMDMRestart_DoesNotKeepARunThatIsNotComingBack(t *testing.T) {
 
 	t.Run("a Login took the session over", func(t *testing.T) {
 		ss := newSession()
-		_, giveUp := ss.beginRun(key)
+		_, giveUp := ss.beginRun(key, nil)
 
 		_, ok := ss.beginRestart()
 		require.True(t, ok)
@@ -342,14 +342,14 @@ func TestRestartStillWanted(t *testing.T) {
 		{name: "Login or WaitSSOLogin", step: func(ss *session) { ss.setActCancel(func() {}) }, want: false},
 		{name: "Up", step: func(ss *session) {
 			ss.setActCancel(func() {})
-			ss.beginRun(key)
+			ss.beginRun(key, nil)
 		}, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ss := newSession()
-			ss.beginRun(key)
+			ss.beginRun(key, nil)
 			ss.setActCancel(func() {})
 
 			restart, ok := ss.beginRestart()
@@ -368,7 +368,7 @@ func TestAwaitRestart_EndsWithContextAndRestart(t *testing.T) {
 	ss := newSession()
 	require.NoError(t, ss.awaitRestart(context.Background()), "with no restart there is nothing to wait for")
 
-	ss.beginRun(profilemanager.SessionKey{})
+	ss.beginRun(profilemanager.SessionKey{}, nil)
 	_, ok := ss.beginRestart()
 	require.True(t, ok)
 

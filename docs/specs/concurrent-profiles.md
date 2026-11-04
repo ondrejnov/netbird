@@ -115,10 +115,10 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q23 | Selhání v6 části izolace u session s v6 v nainstalované rovině iptables | Add vrací chybu, pokus bez overlaye nejde v harnessu otestovat | 5 |
 | Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. S gate může `Up` téhož profilu sáhnout na výchozí názvy běžící session (I2), řešit v PR 13 | 11, 13 |
 | Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu | 11 |
-| Q26 | `RemoveProfile` běžícího profilu | Projde, běh skončí až při MDM restartu. `profile remove` má podle 5.7 vracet chybu, řešit v PR 16 | 11, 16 |
+| Q26 | `RemoveProfile` běžícího profilu | **Rozhodnuto a opraveno** ve `f3/run-config`: `FailedPrecondition` před deregistrací. `logout` podle 5.7 zůstává na PR 16 | 11, 16 |
 | Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
 | Q28 | `onMDMPolicyChange` čeká na `giveUpChan` pod `Server.mutex` | **Rozhodnuto a opraveno** ve `f3/mdm-wait`: čekání běží bez zámku, viz 2.4 | 13 |
-| Q29 | Config běhu proti configu vybraného profilu v `Status`, debug bundlu a kill switchích | Neřešeno, PR 13 je přepne na config běhu nebo oddělí | 13 |
+| Q29 | Config běhu proti configu vybraného profilu v `Status`, debug bundlu a kill switchích | **Rozhodnuto a opraveno** ve `f3/run-config`: oddělené configy, viz 2.4 | 13 |
 
 **Nový nález, globální stav v závislosti:** `allocSetID` v `github.com/google/nftables@v0.3.0/set.go:48,505` je
 nesynchronizovaný čítač procesu. Na `origin/main` ho shodí `TestEngine_MultiplePeers` pod `-race` (1 ze 4 běhů).
@@ -230,7 +230,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **MDM restart** čte config běžícího profilu přes `storedRunningConfig`, bez provisioningu. Smazaný profil se tak nevrátí
   s novou identitou a výchozí Management URL. Selhání čtení (chybějící i nečitelný soubor) restart odmítne a běh označí
   za ukončený, jinak by další změna politiky spustila aktivní profil. Bez živého běhu se dál spouští a provisionuje
-  aktivní profil. `RemoveProfile` dál hlídá jen aktivní profil, běžící lze smazat.
+  aktivní profil. Běžící profil přes `RemoveProfile` smazat nejde (`f3/run-config`), config ale může zmizet i jinak.
 - **Izolace v iptables:** `placeInterface` po jakékoli chybě `addToIfaceSet` odebere obě poloviny ze sady, protože člen se
   eviduje až po obou a `removeMember` by první nenašel. Selže-li i tento rollback, záznam v sadě zůstane a chyba to
   uvede; `Verify` pak nesouhlasí, dokud `Add` se stejným názvem neuspěje. Kernel neumí odmítnout jen druhou polovinu,
@@ -256,6 +256,39 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Beze změny z upstreamu:** vypršení 10 s nebo nečitelný config běhu vrátí chybu, nový běh se nespustí a config se
   neobnoví. `Up` ve `waitForUp` a `Status` s `WaitForReady`, které už čekají, když restart začne, skončí se starým `giveUp`
   jako dřív: `Up` chybou `client gave up to connect`, `Status` odpovědí.
+
+**`f3/run-config`, Q29:**
+
+- `session.runConfig` nastavuje `beginRun` spolu s `runKey`, `session.config` zůstává config vybraného profilu.
+  `connectionConfig` vrátí config běhu, jen když běh nebo publikovaný klient patří jinému profilu než výběr. Bez přepnutí
+  za běhu je to tedy vždy `currentConfig`, včetně novějšího configu z `Login`.
+
+| Místo | Config | Proč |
+|---|---|---|
+| `Status`, `SubscribeStatus` (`buildStatusResponse`) | `connectionConfig` | Recorder popisuje spojení |
+| Debug bundle: config a URL pro upload | `connectionConfig` | Status, sync response a metriky jsou z běhu |
+| Debug bundle: state soubor a jeho `.corrupted.*` | Běhu přes `StatePath`, jen při běhu jiného profilu | Bez přepnutí zůstává cesta aktivního profilu |
+| `checkNetworksDisabled` | `connectionConfig` | Sítě jsou sítěmi běžícího enginu |
+| `checkProfilesDisabled`, `checkUpdateSettingsDisabled`, `checkDisableAdvancedView` | Vybraný | Správa profilů a nastavení míří na výběr |
+| `onSessionExpire` | `connectionConfig` | Vypršela session spojení |
+| `isLoginRequired`, `attemptLogin` z `Login` | Config vyřešený tímto `Login` | Přepnutí uvnitř `Login` nesmí poslat klíč na jiný Management |
+| `attemptLogin` z `WaitSSOLogin` | `configOfFlow`: aktuální téhož profilu, jinak config flow | Token patří IdP flow. Bez přepnutí je to aktuální config jako dřív |
+| `RequestJWTAuth` | Vybraný, odmítnutý při běhu jiného profilu | Flow z IdP výběru by šel na peery běhu |
+
+- **`RequestJWTAuth`** přebírá z `RequestExtendAuthSession` kontrolu shody profilu, ne požadavek na běžící klient a engine.
+  Dnes jde token získat i bez běhu a bez přepnutí se chování nemění. Hláška je společná konstanta.
+- **MDM restart výběr nemění.** Dřív přepsal `session.config` configem běhu, takže `RequestExtendAuthSession` po restartu
+  prošel a `configKey` neodpovídal výběru. Nově zůstává výběr i odmítnutí, dokud se výběr nevrátí nebo nepřijde `Down`.
+  Vybraný config se obnoví přes `refreshSelectedConfig` kvůli politice, se stejným pravidlem pro nečitelný soubor.
+- **`RemoveProfile`** se rozhoduje podle `runningKey`, tedy i během MDM restartu. Běh, který vzdal, nebo klient po něm
+  odstranění nebrání. **Změna i bez přepnutí:** smazání aktivního běžícího profilu vracelo chybu až po deregistraci, nově
+  `FailedPrecondition` před ní a peer zůstává registrovaný. Aktivní nebo výchozí profil, který neběží, se dál nejdřív
+  deregistruje a pak odmítne, to je chování upstreamu.
+- **Kill switche a neúplná obnova:** `refreshSelectedConfig` obnovuje jen vybraný config. Když restart přeskočí `Login`
+  a klient jiného profilu zůstane publikovaný, `checkNetworksDisabled` čte starou politiku z configu běhu do dalšího `Up`.
+  Engine je v tu chvíli zrušený, takže RPC sítí stejně neprojdou.
+- **Neřešeno, není v zadání:** `SwitchProfile` a `Login` volají `localMetrics.Reconcile` s configem výběru, i když běží jiný
+  profil (PR 17). Hlavička `status.txt` v bundlu bere název z aktivního profilu (`client/internal/debug/debug.go:559`), PR 17.
 
 ## 3. Architektura: proč jeden daemon
 

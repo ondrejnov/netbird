@@ -47,6 +47,11 @@ type session struct {
 	// stays published after its goroutine gave up.
 	runKey profilemanager.SessionKey
 
+	// runConfig is the config the most recent run was started with, set along with runKey.
+	// It stays when another profile gets selected, see connectionConfig.
+	runConfig *profilemanager.Config
+
+	// config is the config of the profile selected on the daemon, see currentConfig.
 	config *profilemanager.Config
 	// configKey is the profile config was resolved for.
 	configKey profilemanager.SessionKey
@@ -129,12 +134,13 @@ func (ss *session) markClientDown() {
 	ss.clientRunning = false
 }
 
-// beginRun records the intent to be connected for the profile key and returns the
-// channels for the connectWithRetryRuns goroutine the caller is about to start.
-func (ss *session) beginRun(key profilemanager.SessionKey) (running, giveUp chan struct{}) {
+// beginRun records the intent to be connected for the profile key with config and returns
+// the channels for the connectWithRetryRuns goroutine the caller is about to start.
+func (ss *session) beginRun(key profilemanager.SessionKey, config *profilemanager.Config) (running, giveUp chan struct{}) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.runKey = key
+	ss.runConfig = config
 	ss.clientRunning = true
 	ss.clientRunningChan = make(chan struct{})
 	ss.clientGiveUpChan = make(chan struct{})
@@ -287,9 +293,9 @@ func (ss *session) clientConnectingOrConnected() bool {
 
 // currentConfig returns the config of the profile last selected on the daemon, nil until
 // something resolved one. SwitchProfile and Login replace it without touching the running
-// client, so it can belong to another profile than the client: see configBelongsTo and
-// configBelongsToRun. A caller that uses it more than once takes one snapshot, so a
-// concurrent swap cannot mix the fields of two configs.
+// client, so it can belong to another profile than the client: an operation on the
+// connection uses connectionConfig instead. A caller that uses it more than once takes one
+// snapshot, so a concurrent swap cannot mix the fields of two configs.
 func (ss *session) currentConfig() *profilemanager.Config {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
@@ -308,6 +314,46 @@ func (ss *session) setConfig(key profilemanager.SessionKey, config *profilemanag
 	defer ss.mu.Unlock()
 	ss.configKey = key
 	ss.config = config
+}
+
+// connectionConfig returns the config of what the status recorder and the published client
+// describe: the run, when another profile than the selected one has one, and the selected
+// config otherwise. Without a switch during a run it is always currentConfig.
+func (ss *session) connectionConfig() *profilemanager.Config {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.runConfig != nil && ss.otherProfileRunsLocked() {
+		return ss.runConfig
+	}
+	return ss.config
+}
+
+// otherProfileRunKey returns the profile of a run or a published client, if that is another
+// one than the selected profile. A flow from the selected config would then hand its token
+// to the wrong engine.
+func (ss *session) otherProfileRunKey() (profilemanager.SessionKey, bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.runKey, ss.otherProfileRunsLocked()
+}
+
+func (ss *session) otherProfileRunsLocked() bool {
+	if sameSessionProfile(ss.configKey, ss.runKey) {
+		return false
+	}
+	// A client stays published after its goroutine gave up, until a Down clears it.
+	return ss.connectClient != nil || (ss.clientRunning && (ss.goroutineAliveLocked() || ss.restartKeepsRunLocked()))
+}
+
+// configOfFlow returns the config a login with the token of flow belongs to: the flow's, if
+// the selection moved away from its profile while the IdP was being polled.
+func (ss *session) configOfFlow(flow oauthAuthFlow) *profilemanager.Config {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if sameSessionProfile(ss.configKey, flow.key) {
+		return ss.config
+	}
+	return flow.config
 }
 
 // configBelongsTo reports whether the current config is the one of the profile key.

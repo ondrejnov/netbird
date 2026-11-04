@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
@@ -25,7 +26,7 @@ func TestLogin_ManagementUnreachableIsReturnedInsteadOfDemandingSSO(t *testing.T
 
 	unreachable := errors.New("create connection: dial context: context deadline exceeded")
 	attempts := 0
-	s.isLoginRequiredFn = func(context.Context) (bool, error) {
+	s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) {
 		attempts++
 		return false, unreachable
 	}
@@ -53,7 +54,7 @@ func TestLogin_AuthRefusalStartsSSOFlow(t *testing.T) {
 	s.rootCtx = context.Background()
 	breakProfilePrivateKey(t, cfgPath)
 
-	s.isLoginRequiredFn = func(context.Context) (bool, error) {
+	s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) {
 		return true, nil
 	}
 
@@ -70,12 +71,12 @@ func TestLogin_SetupKeyStillRunsWhenPeerNeedsLogin(t *testing.T) {
 	s, _, _, username, _ := setupServerWithProfile(t)
 	s.rootCtx = context.Background()
 
-	s.isLoginRequiredFn = func(context.Context) (bool, error) {
+	s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) {
 		return true, nil
 	}
 
 	var keysTried []string
-	s.loginAttemptFn = func(_ context.Context, setupKey, _ string) (internal.StatusType, error) {
+	s.loginAttemptFn = func(_ context.Context, _ *profilemanager.Config, setupKey, _ string) (internal.StatusType, error) {
 		keysTried = append(keysTried, setupKey)
 		return "", nil
 	}

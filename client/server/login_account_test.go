@@ -52,7 +52,7 @@ func (f *stubOAuthFlow) GetClientID(context.Context) string {
 func TestWaitSSOLogin_WrongAccountArmsPromptAndFails(t *testing.T) {
 	s := newSSOTestServer(t, "user@example.com", false, "other@example.com")
 	attempts := 0
-	s.loginAttemptFn = func(context.Context, string, string) (internal.StatusType, error) {
+	s.loginAttemptFn = func(context.Context, *profilemanager.Config, string, string) (internal.StatusType, error) {
 		attempts++
 		return "", nil
 	}
@@ -72,7 +72,7 @@ func TestWaitSSOLogin_WrongAccountArmsPromptAndFails(t *testing.T) {
 func TestWaitSSOLogin_WrongAccountAfterPromptProceeds(t *testing.T) {
 	s := newSSOTestServer(t, "user@example.com", true, "other@example.com")
 	attempts := 0
-	s.loginAttemptFn = func(context.Context, string, string) (internal.StatusType, error) {
+	s.loginAttemptFn = func(context.Context, *profilemanager.Config, string, string) (internal.StatusType, error) {
 		attempts++
 		return "", nil
 	}
@@ -88,7 +88,7 @@ func TestWaitSSOLogin_WrongAccountAfterPromptProceeds(t *testing.T) {
 func TestWaitSSOLogin_MatchingAccountProceeds(t *testing.T) {
 	s := newSSOTestServer(t, "user@example.com", false, "User@Example.com")
 	attempts := 0
-	s.loginAttemptFn = func(context.Context, string, string) (internal.StatusType, error) {
+	s.loginAttemptFn = func(context.Context, *profilemanager.Config, string, string) (internal.StatusType, error) {
 		attempts++
 		return "", nil
 	}
@@ -103,7 +103,7 @@ func TestWaitSSOLogin_MatchingAccountProceeds(t *testing.T) {
 func TestWaitSSOLogin_NoHintIsNotJudged(t *testing.T) {
 	s := newSSOTestServer(t, "", false, "whoever@example.com")
 	attempts := 0
-	s.loginAttemptFn = func(context.Context, string, string) (internal.StatusType, error) {
+	s.loginAttemptFn = func(context.Context, *profilemanager.Config, string, string) (internal.StatusType, error) {
 		attempts++
 		return "", nil
 	}
@@ -143,7 +143,7 @@ func TestSwitchProfile_DropsAccountPromptAndPendingFlow(t *testing.T) {
 func TestLogin_ProfileSwitchDropsAccountPromptAndPendingFlow(t *testing.T) {
 	s, _, _, username, cfgPath := setupServerWithProfile(t)
 	s.rootCtx = context.Background()
-	s.isLoginRequiredFn = func(context.Context) (bool, error) {
+	s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) {
 		return true, nil
 	}
 
@@ -192,7 +192,7 @@ func TestLogin_ProfileSwitchDropsAccountPromptAndPendingFlow(t *testing.T) {
 func TestLogin_ProfileSwitchRejectsJWTObtainedUnderPreviousConfig(t *testing.T) {
 	s, _, _, username, cfgPath := setupServerWithProfile(t)
 	s.rootCtx = context.Background()
-	s.isLoginRequiredFn = func(context.Context) (bool, error) {
+	s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) {
 		return false, errors.New("stop once the config is swapped")
 	}
 
@@ -223,7 +223,7 @@ func TestLogin_ProfileSwitchRejectsJWTObtainedUnderPreviousConfig(t *testing.T) 
 func TestLogin_SameProfileKeepsPendingFlow(t *testing.T) {
 	s, _, profName, username, cfgPath := setupServerWithProfile(t)
 	s.rootCtx = context.Background()
-	s.isLoginRequiredFn = func(context.Context) (bool, error) {
+	s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) {
 		return true, nil
 	}
 	breakProfilePrivateKey(t, cfgPath)
@@ -247,7 +247,7 @@ func TestLogin_SameProfileKeepsPendingFlow(t *testing.T) {
 func TestWaitSSOLogin_JudgesTheFlowThatProducedTheToken(t *testing.T) {
 	s := newSSOTestServer(t, "user@example.com", false, "user@example.com")
 	attempts := 0
-	s.loginAttemptFn = func(context.Context, string, string) (internal.StatusType, error) {
+	s.loginAttemptFn = func(context.Context, *profilemanager.Config, string, string) (internal.StatusType, error) {
 		attempts++
 		return "", nil
 	}

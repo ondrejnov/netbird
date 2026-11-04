@@ -1027,8 +1027,11 @@ func (g *BundleGenerator) addUpdateLogs() error {
 }
 
 func (g *BundleGenerator) addCorruptedStateFiles() error {
-	sm := profilemanager.NewServiceManager("")
-	pattern := sm.GetStatePath()
+	pattern := g.statePath
+	if pattern == "" {
+		sm := profilemanager.NewServiceManager("")
+		pattern = sm.GetStatePath()
+	}
 	if pattern == "" {
 		return nil
 	}

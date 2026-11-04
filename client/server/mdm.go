@@ -143,17 +143,28 @@ func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, run
 		return err
 	}
 
-	s.session.setConfig(key, config)
+	s.refreshConfigsAfterRestart(key, config)
 	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
 	ctx, cancel := s.session.runContext(s.rootCtx)
 	s.session.setActCancel(cancel)
-	runningChan, giveUpChan := s.session.beginRun(key)
+	runningChan, giveUpChan := s.session.beginRun(key, config)
 	log.Info("MDM restart: spawning connectWithRetryRuns with re-resolved config")
 	go s.connectWithRetryRuns(ctx, key, config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
+}
+
+// refreshConfigsAfterRestart replaces the selected config for the new policy. A profile
+// selected since the run started stays selected and gets its own config.
+func (s *Server) refreshConfigsAfterRestart(key profilemanager.SessionKey, config *profilemanager.Config) {
+	selectedKey, selected := s.session.selectedConfig()
+	if selected == nil || sameSessionProfile(selectedKey, key) {
+		s.session.setConfig(key, config)
+		return
+	}
+	s.refreshSelectedConfig()
 }
 
 // refreshSelectedConfig re-reads the selected config, whose overlay the kill switches read,

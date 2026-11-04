@@ -108,9 +108,17 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		}
 	}
 
+	// Status, sync response and metrics describe the connection, so do its config and state.
+	config := s.session.connectionConfig()
+	var statePath string
+	if key, otherRuns := s.session.otherProfileRunKey(); otherRuns {
+		statePath = s.profileManager.GetStatePathFor(key)
+	}
+
 	bundleGenerator := debug.NewBundleGenerator(
 		debug.GeneratorDependencies{
-			InternalConfig: s.session.currentConfig(),
+			InternalConfig: config,
+			StatePath:      statePath,
 			StatusRecorder: s.session.statusRecorder,
 			SyncResponse:   syncResponse,
 			LogPath:        s.logFile,
@@ -136,7 +144,7 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		return "", "", fmt.Errorf("generate debug bundle: %w", err)
 	}
 
-	if config := s.session.currentConfig(); config != nil && config.ManagementURL != nil {
+	if config != nil && config.ManagementURL != nil {
 		managementURL = config.ManagementURL.String()
 	}
 

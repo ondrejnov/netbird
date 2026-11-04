@@ -67,6 +67,7 @@ const (
 	// refusal the caller has to act on.
 	errUpdateSettingsDisabled = "update settings are disabled, you cannot use this feature without update settings enabled"
 	errNetworksDisabled       = "network selection is disabled by the administrator"
+	errSelectedNotRunning     = "the selected profile is not the one running, bring the connection down or select it again"
 )
 
 var ErrServiceNotUp = errors.New("service is not up")
@@ -147,9 +148,9 @@ type Server struct {
 	// loginAttemptFn stands in for the Management login round trip. Tests set
 	// it to drive the login outcomes that need a server on the other end;
 	// production leaves it nil, and every login goes through loginAttempt.
-	loginAttemptFn func(ctx context.Context, setupKey, jwtToken string) (internal.StatusType, error)
+	loginAttemptFn func(ctx context.Context, config *profilemanager.Config, setupKey, jwtToken string) (internal.StatusType, error)
 
-	isLoginRequiredFn func(ctx context.Context) (bool, error)
+	isLoginRequiredFn func(ctx context.Context, config *profilemanager.Config) (bool, error)
 
 	// flushRoutesFn stands in for flushing the marked routes, which does nothing on Linux.
 	// Tests set it to see when the flush runs; production leaves it nil.
@@ -167,6 +168,11 @@ type oauthAuthFlow struct {
 	// token finally arrives — would read the new session's one and let the old
 	// session's token into the new session's cache.
 	cacheGeneration uint64
+
+	// key and config are the profile the flow was created for, and the config its IdP and
+	// Management server come from. The token that comes back belongs to them.
+	key    profilemanager.SessionKey
+	config *profilemanager.Config
 
 	waitCancel context.CancelFunc
 	// hint is the account the flow was asked to sign in (login_hint). The token
@@ -326,7 +332,7 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	runningChan, giveUpChan := s.session.beginRun(activeProf.SessionKey())
+	runningChan, giveUpChan := s.session.beginRun(activeProf.SessionKey(), config)
 	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceStartup)
 	return nil
@@ -410,21 +416,20 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, key profilemanager.Se
 	// giveUpChan is closed by the function-scope defer.
 }
 
-// attemptLogin runs a login round trip against Management, or the stand-in a
+// attemptLogin runs a login round trip against the Management of config, or the stand-in a
 // test installed in place of it.
-func (s *Server) attemptLogin(ctx context.Context, setupKey, jwtToken string) (internal.StatusType, error) {
+func (s *Server) attemptLogin(ctx context.Context, config *profilemanager.Config, setupKey, jwtToken string) (internal.StatusType, error) {
 	if s.loginAttemptFn != nil {
-		return s.loginAttemptFn(ctx, setupKey, jwtToken)
+		return s.loginAttemptFn(ctx, config, setupKey, jwtToken)
 	}
-	return s.loginAttempt(ctx, setupKey, jwtToken)
+	return s.loginAttempt(ctx, config, setupKey, jwtToken)
 }
 
-func (s *Server) isLoginRequired(ctx context.Context) (bool, error) {
+func (s *Server) isLoginRequired(ctx context.Context, config *profilemanager.Config) (bool, error) {
 	if s.isLoginRequiredFn != nil {
-		return s.isLoginRequiredFn(ctx)
+		return s.isLoginRequiredFn(ctx, config)
 	}
 
-	config := s.session.currentConfig()
 	authClient, err := auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config)
 	if err != nil {
 		log.Errorf("failed to create auth client: %v", err)
@@ -439,8 +444,7 @@ func (s *Server) isLoginRequired(ctx context.Context) (bool, error) {
 // StatusNeedsLogin when Management refused the peer's credentials and
 // StatusLoginFailed for every other failure, so callers can tell an
 // authentication decision apart from a login that never got made.
-func (s *Server) loginAttempt(ctx context.Context, setupKey, jwtToken string) (internal.StatusType, error) {
-	config := s.session.currentConfig()
+func (s *Server) loginAttempt(ctx context.Context, config *profilemanager.Config, setupKey, jwtToken string) (internal.StatusType, error) {
 	authClient, err := auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config)
 	if err != nil {
 		log.Errorf("failed to create auth client: %v", err)
@@ -726,7 +730,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	// while Management is unreachable anyway. Only Management refusing the
 	// peer's key is a decision, and IsLoginRequired reports that as
 	// needsLogin=true rather than an error.
-	needsLogin, err := s.isLoginRequired(ctx)
+	needsLogin, err := s.isLoginRequired(ctx, config)
 	if err != nil {
 		state.Set(internal.StatusLoginFailed)
 		return nil, err
@@ -737,7 +741,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	}
 
 	if msg.SetupKey == "" {
-		return s.startSSOLogin(ctx, msg, config, state)
+		return s.startSSOLogin(ctx, msg, activeProf.SessionKey(), config, state)
 	}
 
 	// Setup-key path: we are about to dial Management with the key, so the
@@ -745,7 +749,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	// which returns NeedsLogin and parks on the browser leg.
 	state.Set(internal.StatusConnecting)
 
-	if loginStatus, err := s.attemptLogin(ctx, msg.SetupKey, ""); err != nil {
+	if loginStatus, err := s.attemptLogin(ctx, config, msg.SetupKey, ""); err != nil {
 		state.Set(loginStatus)
 		return nil, err
 	}
@@ -756,7 +760,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 // startSSOLogin opens the interactive leg of a login: it reuses the in-flight
 // OAuth flow when one is still valid for the same client, and otherwise
 // requests fresh auth info and parks the daemon on StatusNeedsLogin.
-func (s *Server) startSSOLogin(ctx context.Context, msg *proto.LoginRequest, config *profilemanager.Config, state statusSetter) (*proto.LoginResponse, error) {
+func (s *Server) startSSOLogin(ctx context.Context, msg *proto.LoginRequest, key profilemanager.SessionKey, config *profilemanager.Config, state statusSetter) (*proto.LoginResponse, error) {
 	hint := ""
 	if msg.Hint != nil {
 		hint = *msg.Hint
@@ -793,6 +797,8 @@ func (s *Server) startSSOLogin(ctx context.Context, msg *proto.LoginRequest, con
 		expiresAt:       time.Now().Add(time.Duration(authInfo.ExpiresIn) * time.Second),
 		hint:            hint,
 		accountPrompted: promptForAccount,
+		key:             key,
+		config:          config,
 	})
 
 	state.Set(internal.StatusNeedsLogin)
@@ -1049,7 +1055,7 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 		log.Warnf("login still returned a different account after the prompt, continuing with it")
 	}
 
-	if loginStatus, err := s.attemptLogin(ctx, "", tokenInfo.GetTokenToUse()); err != nil {
+	if loginStatus, err := s.attemptLogin(ctx, s.session.configOfFlow(pending), "", tokenInfo.GetTokenToUse()); err != nil {
 		state.Set(loginStatus)
 		return nil, err
 	}
@@ -1178,7 +1184,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 	s.localMetrics.Reconcile(config.LocalMetricsEnabled, config.LocalMetricsAddress)
 
-	runningChan, giveUpChan := s.session.beginRun(activeProf.SessionKey())
+	runningChan, giveUpChan := s.session.beginRun(activeProf.SessionKey(), config)
 
 	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceUpRPC)
@@ -1900,7 +1906,8 @@ func (s *Server) buildStatusResponse(ctx context.Context, msg *proto.StatusReque
 		statusResponse.SessionExpiresAt = timestamppb.New(deadline)
 	}
 
-	config := s.session.currentConfig()
+	// The recorder reports on the connection, whichever profile is selected by now.
+	config := s.session.connectionConfig()
 	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
@@ -2052,12 +2059,18 @@ func (s *Server) RequestJWTAuth(
 	// read as the generation this flow belongs to. SwitchProfile holds
 	// s.mutex across its own clear(), so the pair cannot be torn.
 	s.mutex.Lock()
-	config := s.session.currentConfig()
+	key, config := s.session.selectedConfig()
+	_, otherProfileRuns := s.session.otherProfileRunKey()
 	cacheGeneration := s.session.jwtCache.currentGeneration()
 	s.mutex.Unlock()
 
 	if config == nil {
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "client is not configured")
+	}
+	// The flow comes from the IdP of config and the caller presents its token to the peers
+	// of the running engine.
+	if otherProfileRuns {
+		return nil, gstatus.Errorf(codes.FailedPrecondition, errSelectedNotRunning)
 	}
 
 	jwtCacheTTL := s.getJWTCacheTTL()
@@ -2100,6 +2113,8 @@ func (s *Server) RequestJWTAuth(
 		info:            authInfo,
 		expiresAt:       time.Now().Add(time.Duration(authInfo.ExpiresIn) * time.Second),
 		cacheGeneration: cacheGeneration,
+		key:             key,
+		config:          config,
 	})
 
 	return &proto.RequestJWTAuthResponse{
@@ -2192,7 +2207,7 @@ func (s *Server) RequestExtendAuthSession(
 	}
 	// The flow comes from the IdP of config and its token goes to the engine of the client.
 	if !configOfClient {
-		return nil, gstatus.Errorf(codes.FailedPrecondition, "the selected profile is not the one running, bring the connection down or select it again")
+		return nil, gstatus.Errorf(codes.FailedPrecondition, errSelectedNotRunning)
 	}
 	if connectClient.Engine() == nil {
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "session can no longer be extended, log in again to reconnect")
@@ -2589,6 +2604,11 @@ func (s *Server) RemoveProfile(ctx context.Context, msg *proto.RemoveProfileRequ
 		return nil, err
 	}
 
+	// Ahead of the deregistration, which cannot be undone.
+	if key, running := s.session.runningKey(); running && isSessionProfile(key, resolved.ID, msg.Username) {
+		return nil, gstatus.Errorf(codes.FailedPrecondition, "profile %q is running, bring the connection down first", msg.ProfileName)
+	}
+
 	if err := s.logoutFromProfile(ctx, resolved, msg.Username); err != nil {
 		// Deregistration is best-effort here: the local profile is removed
 		// either way, so an unprivileged caller leaves the peer registered on
@@ -2765,7 +2785,8 @@ func (s *Server) connect(ctx context.Context, key profilemanager.SessionKey, con
 // MDM source is silent on the key. This honors the "MDM decides
 // everything" semantic agreed for NET-1214 — an admin pushing
 // disableX=false via MDM explicitly re-enables the feature even on a
-// box installed with --disable-X.
+// box installed with --disable-X. A check reads the policy off the config
+// its operation belongs to.
 func (s *Server) checkProfilesDisabled() bool {
 	if config := s.session.currentConfig(); config != nil {
 		if v, ok := config.Policy().GetBool(mdm.KeyDisableProfiles); ok {
@@ -2784,7 +2805,8 @@ func (s *Server) checkProfilesDisabled() bool {
 // silent on the key. Mirrors checkProfilesDisabled and
 // checkUpdateSettingsDisabled.
 func (s *Server) checkNetworksDisabled() bool {
-	if config := s.session.currentConfig(); config != nil {
+	// The networks are those of the running engine.
+	if config := s.session.connectionConfig(); config != nil {
 		if v, ok := config.Policy().GetBool(mdm.KeyDisableNetworks); ok {
 			return v
 		}
@@ -2812,13 +2834,19 @@ func (s *Server) startUpdateManagerForGUI() {
 func (s *Server) onSessionExpire() {
 	if runtime.GOOS != "windows" {
 		isUIActive := internal.CheckUIApp()
-		config := s.session.currentConfig()
-		if !isUIActive && config.DisableNotifications != nil && !*config.DisableNotifications {
+		if !isUIActive && s.sessionExpireNotifies() {
 			if err := sendTerminalNotification(); err != nil {
 				log.Errorf("send session expire terminal notification: %v", err)
 			}
 		}
 	}
+}
+
+// sessionExpireNotifies reads the setting of the connection, as it is the session of the
+// connection that expired.
+func (s *Server) sessionExpireNotifies() bool {
+	config := s.session.connectionConfig()
+	return config.DisableNotifications != nil && !*config.DisableNotifications
 }
 
 // getConnectWithBackoff returns a backoff with exponential backoff strategy for connection retries

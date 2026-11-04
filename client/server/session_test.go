@@ -66,12 +66,14 @@ func TestSessionLifecycle_ConcurrentAccess(t *testing.T) {
 		ss.runningKey()
 		ss.restarting()
 		ss.restartStillWanted(runRestart{})
+		ss.connectionConfig()
+		ss.otherProfileRunKey()
 		ss.configBelongsTo(profilemanager.SessionKey{})
 		ss.configBelongsToRun()
 	}, func() {
 		ss.setActCancel(func() {})
 		ss.setClient(client)
-		_, giveUp := ss.beginRun(profilemanager.SessionKey{})
+		_, giveUp := ss.beginRun(profilemanager.SessionKey{}, nil)
 		ss.beginRestart()
 		ss.endRestart()
 		close(giveUp)
@@ -93,7 +95,7 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	require.NoError(t, err)
 	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: mgmtURL})
 
-	s.session.beginRun(profilemanager.SessionKey{})
+	s.session.beginRun(profilemanager.SessionKey{}, nil)
 
 	waitForReady := true
 	done := make(chan error, 1)
@@ -105,7 +107,7 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	// Long enough for Status to park on the first run's channels.
 	time.Sleep(100 * time.Millisecond)
 
-	restarted, _ := s.session.beginRun(profilemanager.SessionKey{})
+	restarted, _ := s.session.beginRun(profilemanager.SessionKey{}, nil)
 	close(restarted)
 
 	select {
@@ -235,7 +237,7 @@ func TestRunningKey_FollowsTheRun(t *testing.T) {
 	_, running := ss.runningKey()
 	assert.False(t, running, "no run was ever started")
 
-	_, giveUp := ss.beginRun(first)
+	_, giveUp := ss.beginRun(first, nil)
 	key, running := ss.runningKey()
 	assert.True(t, running, "the goroutine of the run is alive")
 	assert.Equal(t, first, key, "the key must be the one the run started with")
@@ -244,7 +246,7 @@ func TestRunningKey_FollowsTheRun(t *testing.T) {
 	_, running = ss.runningKey()
 	assert.False(t, running, "the goroutine gave up, nothing runs")
 
-	ss.beginRun(second)
+	ss.beginRun(second, nil)
 	key, running = ss.runningKey()
 	assert.True(t, running, "the restarted goroutine is alive")
 	assert.Equal(t, second, key, "the key must follow the restart")
@@ -291,13 +293,13 @@ func TestExtendSessionLoginHint_FollowsRunningProfile(t *testing.T) {
 
 	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "with nothing running the hint stays the local active profile's")
 
-	_, giveUp := s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	_, giveUp := s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
 	assert.Equal(t, "default@example.com", s.extendSessionLoginHint(), "the hint must be the running profile's")
 
 	close(giveUp)
 	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "a finished run must not decide the hint")
 
-	s.session.beginRun(profilemanager.SessionKey{Profile: "gone", Username: username})
+	s.session.beginRun(profilemanager.SessionKey{Profile: "gone", Username: username}, nil)
 	assert.Empty(t, s.extendSessionLoginHint(), "a running profile with no recorded account has no hint")
 }
 

@@ -243,7 +243,7 @@ func setupSwitchedWithoutDown(t *testing.T, def, work func(path string) *profile
 		Username: workKey.Username,
 	}))
 
-	s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
 	s.session.setActCancel(func() {})
 	s.session.setClient(newDummyConnectClient(internal.CtxWithState(s.rootCtx, s.session.state)))
 	s.session.setConfig(workKey, workCfg)
@@ -338,7 +338,7 @@ func TestLogout_FollowsActiveProfileWhenRunIsOver(t *testing.T) {
 		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, true, false) },
 		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
 	)
-	_, giveUp := d.s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	_, giveUp := d.s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
 	close(giveUp)
 
 	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.work, Username: &d.username})
