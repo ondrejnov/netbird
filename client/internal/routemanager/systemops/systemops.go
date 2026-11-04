@@ -87,14 +87,16 @@ type SysOps struct {
 	// owns the base alone. Only Linux uses it.
 	//nolint:unused // only used on Linux
 	coordinator *hostcoord.Coordinator
-	//nolint:unused // only used on Linux
-	sessionKey hostcoord.SessionKey
+	sessionKey  hostcoord.SessionKey
 	// sharedRoutes decides which session carries a prefix of the shared table. When
 	// nil, routes go straight to the kernel. Only Linux uses it.
 	//nolint:unused // only used on Linux
 	sharedRoutes *hostcoord.Routes
 	//nolint:unused // only used on Linux
 	sharedRouteEvents hostcoord.RouteEventFunc
+	// otherOverlays lists the overlay prefixes of the other sessions. When nil, only the
+	// own overlay is refused.
+	otherOverlays overlayPrefixSource
 	// originalSysctl stores the sysctl values from before this instance changed them.
 	//nolint:unused // only used on Linux
 	originalSysctl map[string]int
@@ -123,6 +125,12 @@ func NewShared(wgInterface wgIface, notifier *notifier.Notifier, coordinator *ho
 	return r
 }
 
+// overlayPrefixSource reports the overlay prefixes of the sessions of the daemon other
+// than key. hostcoord.Sessions implements it.
+type overlayPrefixSource interface {
+	OverlayPrefixesExcept(key hostcoord.SessionKey) []netip.Prefix
+}
+
 // SharedOption configures a SysOps returned by NewShared.
 type SharedOption func(*SysOps)
 
@@ -134,6 +142,16 @@ func WithSharedRoutes(routes *hostcoord.Routes, onEvent hostcoord.RouteEventFunc
 	return func(r *SysOps) {
 		r.sharedRoutes = routes
 		r.sharedRouteEvents = onEvent
+	}
+}
+
+// WithOverlayPrefixes makes the session refuse every route that covers or overlaps an
+// overlay prefix src reports for another session. The default routes 0.0.0.0/0 and ::/0 stay allowed,
+// since the traffic to an overlay still follows the rules of the host. A nil src keeps
+// the check on the own overlay only.
+func WithOverlayPrefixes(src overlayPrefixSource) SharedOption {
+	return func(r *SysOps) {
+		r.otherOverlays = src
 	}
 }
 
@@ -154,10 +172,27 @@ func (r *SysOps) validateRoute(prefix netip.Prefix) error {
 		addr.IsInterfaceLocalMulticast(),
 		addr.IsMulticast(),
 		addr.IsUnspecified() && prefix.Bits() != 0,
-		r.isOwnAddress(addr):
+		r.isOwnAddress(addr),
+		r.overlapsOtherOverlay(prefix):
 		return vars.ErrRouteNotAllowed
 	}
 	return nil
+}
+
+func (r *SysOps) overlapsOtherOverlay(prefix netip.Prefix) bool {
+	if r.otherOverlays == nil || prefix.Bits() == 0 {
+		return false
+	}
+	// A 4in6 prefix would never overlap a v4 prefix, so compare the v4 form.
+	if addr := prefix.Addr(); addr.Is4In6() && prefix.Bits() >= 96 {
+		prefix = netip.PrefixFrom(addr.Unmap(), prefix.Bits()-96)
+	}
+	for _, overlay := range r.otherOverlays.OverlayPrefixesExcept(r.sessionKey) {
+		if prefix.Overlaps(overlay) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *SysOps) isOwnAddress(addr netip.Addr) bool {
