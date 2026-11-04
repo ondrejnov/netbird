@@ -145,10 +145,12 @@ type DefaultServer struct {
 	localResolver      *local.Resolver
 	wgInterface        WGIface
 	hostManager        hostManager
+	hostDNS            HostDNSCoordinator
 	updateSerial       uint64
 	previousConfigHash uint64
 	currentConfig      HostDNSConfig
 	currentConfigHash  uint64
+	refusedConfigHash  uint64
 	handlerChain       *HandlerChain
 	extraDomains       map[domain.Domain]int
 	batchMode          bool
@@ -212,6 +214,9 @@ type DefaultServerConfig struct {
 	StatusRecorder *peer.Status
 	StateManager   *statemanager.Manager
 	DisableSys     bool
+	// HostDNS shares the host DNS with other sessions on Linux and FreeBSD. Nil means
+	// this server is the only one on the host.
+	HostDNS HostDNSCoordinator
 }
 
 // NewDefaultServer returns a new dns server
@@ -233,6 +238,7 @@ func NewDefaultServer(ctx context.Context, config DefaultServerConfig) (*Default
 	}
 
 	server := newDefaultServer(ctx, config.WgInterface, dnsService, config.StatusRecorder, config.StateManager, config.DisableSys)
+	server.hostDNS = config.HostDNS
 	return server, nil
 }
 
@@ -300,7 +306,7 @@ func newDefaultServer(
 		hostsDNSHolder:    newHostsDNSHolder(),
 		hostManager:       &noopHostConfigurator{},
 		mgmtCacheResolver: mgmtCacheResolver,
-		currentConfigHash: ^uint64(0), // Initialize to max uint64 to ensure first config is always applied
+		currentConfigHash: hostConfigNotApplied, // ensures the first config is always applied
 		warningDelayBase:  warningDelayBaseFromEnv(),
 		healthRefresh:     make(chan struct{}, 1),
 	}
@@ -588,6 +594,9 @@ func (s *DefaultServer) UpdateDNSServer(serial uint64, update nbdns.Config) erro
 	if s.previousConfigHash == hash {
 		log.Debugf("not applying the dns configuration update as there is nothing new")
 		s.updateSerial = serial
+		if hostClaimPending(s.hostManager) {
+			s.applyHostConfig()
+		}
 		return nil
 	}
 
@@ -766,26 +775,53 @@ func (s *DefaultServer) applyHostConfig() {
 		SlicesAsSets:    true,
 		UseStringer:     true,
 	})
-	if err != nil {
+	switch {
+	case err != nil:
 		log.Warnf("unable to hash the host dns configuration, will apply config anyway: %s", err)
 		// Fall through to apply config anyway (fail-safe approach)
-	} else if s.currentConfigHash == hash {
+	case s.currentConfigHash == hash:
 		log.Debugf("not applying host config as there are no changes")
+		return
+	case s.claimStillRefused(hash):
+		log.Debugf("not applying host config as the claim it needs is still refused")
 		return
 	}
 
 	log.Debugf("applying host config as there are changes")
+	s.refusedConfigHash = hostConfigNotApplied
 	if err := s.hostManager.applyDNSConfig(config, s.stateManager); err != nil {
 		log.Errorf("failed to apply DNS host manager update: %v", err)
+		if hostClaimPending(s.hostManager) {
+			s.currentConfigHash = hostConfigNotApplied
+		}
 		return
 	}
 
 	// Only update hash if it was computed successfully and config was applied
 	if err == nil {
-		s.currentConfigHash = hash
+		s.rememberHostConfig(hash)
 	}
 
 	s.registerFallback()
+}
+
+// rememberHostConfig keeps a configuration limited by a refused claim out of
+// currentConfigHash, so the same configuration is tried again.
+func (s *DefaultServer) rememberHostConfig(hash uint64) {
+	if hostClaimPending(s.hostManager) {
+		s.currentConfigHash = hostConfigNotApplied
+		s.refusedConfigHash = hash
+		return
+	}
+	s.currentConfigHash = hash
+}
+
+// claimStillRefused tells whether the host already has this configuration in the form
+// a refused claim allows, and the claim is still refused. Reprogramming the host would
+// then change nothing, while NetworkManager would reapply the connection every time.
+func (s *DefaultServer) claimStillRefused(hash uint64) bool {
+	manager, ok := s.hostManager.(claimingHostManager)
+	return ok && manager.hostClaimPending() && s.refusedConfigHash == hash && !manager.retryClaim()
 }
 
 // registerFallback registers original nameservers as low-priority fallback handlers.
