@@ -42,6 +42,7 @@ import (
 	dnsconfig "github.com/netbirdio/netbird/client/internal/dns/config"
 	"github.com/netbirdio/netbird/client/internal/dnsfwd"
 	"github.com/netbirdio/netbird/client/internal/expose"
+	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/lazyconn"
 	"github.com/netbirdio/netbird/client/internal/metrics"
 	"github.com/netbirdio/netbird/client/internal/netflow"
@@ -126,6 +127,10 @@ type EngineConfig struct {
 	// IFaceBlackList is a list of network interfaces to ignore when discovering connection candidates (ICE related)
 	IFaceBlackList       []string
 	DisableIPv6Discovery bool
+
+	// Sessions reports the interfaces and overlay prefixes of all sessions of the
+	// daemon. Nil keeps the single-session behavior.
+	Sessions hostcoord.SessionSource
 
 	PreSharedKey *wgtypes.Key
 
@@ -1308,6 +1313,7 @@ func (e *Engine) infoGatherTimeout() time.Duration {
 
 // applyInfoFlags sets the engine's config-derived feature flags on the gathered system info.
 func (e *Engine) applyInfoFlags(info *system.Info) {
+	e.excludeSessionAddresses(info)
 	info.SetFlags(
 		e.config.RosenpassEnabled,
 		e.config.RosenpassPermissive,
@@ -2129,7 +2135,7 @@ func (e *Engine) receiveSignalEvents() error {
 func (e *Engine) parseNATExternalIPMappings() []string {
 	var mappedIPs []string
 	var ignoredIFaces = make(map[string]interface{})
-	for _, iFace := range e.config.IFaceBlackList {
+	for _, iFace := range e.iceBlackList() {
 		ignoredIFaces[iFace] = nil
 	}
 	for _, mapping := range e.config.NATExternalIPs {

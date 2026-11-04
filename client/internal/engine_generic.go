@@ -10,7 +10,7 @@ import (
 func (e *Engine) createICEConfig() icemaker.Config {
 	return icemaker.Config{
 		StunTurn:             &e.stunTurn,
-		InterfaceBlackList:   e.config.IFaceBlackList,
+		InterfaceBlackList:   e.iceBlackList(),
 		DisableIPv6Discovery: e.config.DisableIPv6Discovery,
 		UDPMux:               e.udpMux.SingleSocketUDPMux,
 		UDPMuxSrflx:          e.udpMux,
