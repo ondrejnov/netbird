@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	nberrors "github.com/netbirdio/netbird/client/errors"
+	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/routemanager/sysctl"
 	"github.com/netbirdio/netbird/client/internal/routemanager/vars"
 	"github.com/netbirdio/netbird/client/internal/statemanager"
@@ -61,12 +62,6 @@ var ErrTableIDExists = errors.New("ID exists with different name")
 
 const errParsePrefixMsg = "failed to parse prefix %s: %w"
 
-// originalSysctl stores the original sysctl values before they are modified
-var originalSysctl map[string]int
-
-// sysctlFailed is used as an indicator to emit a warning when default routes are configured
-var sysctlFailed bool
-
 type ruleParams struct {
 	priority       int
 	fwmark         uint32
@@ -110,25 +105,62 @@ func (r *SysOps) SetupRouting(initAddresses []net.IP, stateManager *statemanager
 		}
 	}()
 
-	rules := getSetupRules()
-	for _, rule := range rules {
+	if r.coordinator != nil {
+		return r.acquireSharedRoutingBase()
+	}
+
+	originalValues, sysctlFailed, err := setupRoutingBase(r.wgInterface)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	r.originalSysctl = originalValues
+	r.mu.Unlock()
+	r.sysctlFailed.Store(sysctlFailed)
+
+	return nil
+}
+
+func (r *SysOps) acquireSharedRoutingBase() error {
+	base, err := r.coordinator.AcquireRoutingBase(r.sessionKey, func() (hostcoord.RoutingBase, hostcoord.TeardownFunc, error) {
+		originalValues, sysctlFailed, err := setupRoutingBase(r.wgInterface)
+		if err != nil {
+			return hostcoord.RoutingBase{}, nil, err
+		}
+		teardown := func() error {
+			return cleanupRoutingBase(originalValues)
+		}
+		return hostcoord.RoutingBase{SysctlFailed: sysctlFailed}, teardown, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	r.sysctlFailed.Store(base.SysctlFailed)
+	return nil
+}
+
+// setupRoutingBase installs the rules and sysctls of the shared table. It returns
+// the original sysctl values and whether configuring the sysctls failed.
+func setupRoutingBase(overlayIface wgIface) (map[string]int, bool, error) {
+	for _, rule := range getSetupRules() {
 		if err := addRule(rule); err != nil {
-			return fmt.Errorf("%s: %w", rule.description, err)
+			return nil, false, fmt.Errorf("%s: %w", rule.description, err)
 		}
 	}
 
-	if err = addRoutingTableName(); err != nil {
+	if err := addRoutingTableName(); err != nil {
 		log.Errorf("Error adding routing table name: %v", err)
 	}
 
-	originalValues, err := sysctl.Setup(r.wgInterface)
+	originalValues, err := sysctl.Setup(overlayIface)
 	if err != nil {
 		log.Errorf("Error setting up sysctl: %v", err)
-		sysctlFailed = true
+		return originalValues, true, nil
 	}
-	originalSysctl = originalValues
 
-	return nil
+	return originalValues, false, nil
 }
 
 // CleanupRouting performs a thorough cleanup of the routing configuration established by 'setupRouting'.
@@ -139,6 +171,25 @@ func (r *SysOps) CleanupRouting(stateManager *statemanager.Manager, advancedRout
 		return r.cleanupRefCounter(stateManager)
 	}
 
+	defer r.sysctlFailed.Store(false)
+
+	if r.coordinator != nil {
+		return r.coordinator.ReleaseRoutingBase(r.sessionKey, func() error {
+			return cleanupRoutingBase(nil)
+		})
+	}
+
+	r.mu.Lock()
+	originalValues := r.originalSysctl
+	r.originalSysctl = nil
+	r.mu.Unlock()
+
+	return cleanupRoutingBase(originalValues)
+}
+
+// cleanupRoutingBase flushes the shared table and removes the rules and sysctls
+// installed by setupRoutingBase.
+func cleanupRoutingBase(originalValues map[string]int) error {
 	var result *multierror.Error
 
 	if err := flushRoutes(NetbirdVPNTableID, netlink.FAMILY_V4); err != nil {
@@ -155,11 +206,9 @@ func (r *SysOps) CleanupRouting(stateManager *statemanager.Manager, advancedRout
 		}
 	}
 
-	if err := sysctl.Cleanup(originalSysctl); err != nil {
+	if err := sysctl.Cleanup(originalValues); err != nil {
 		result = multierror.Append(result, fmt.Errorf("cleanup sysctl: %w", err))
 	}
-	originalSysctl = nil
-	sysctlFailed = false
 
 	return nberrors.FormatErrorOrNil(result)
 }
@@ -181,7 +230,7 @@ func (r *SysOps) AddVPNRoute(prefix netip.Prefix, intf *net.Interface) error {
 		return r.genericAddVPNRoute(prefix, intf)
 	}
 
-	if sysctlFailed && (prefix == vars.Defaultv4 || prefix == vars.Defaultv6) {
+	if r.sysctlFailed.Load() && (prefix == vars.Defaultv4 || prefix == vars.Defaultv6) {
 		log.Warnf("Default route is configured but sysctl operations failed, VPN traffic may not be routed correctly, consider using NB_USE_LEGACY_ROUTING=true or setting net.ipv4.conf.*.rp_filter to 2 (loose) or 0 (off)")
 	}
 

@@ -469,6 +469,9 @@ zodpovězená pro self-hosted, cloud se neověřuje.
 | 7 | Zpracování `sessions.json`, sloty a porty, odlišení auto a explicitního interface | Migrace starých state souborů, restart zachová slot |
 | 8 | Filtry I5: `infoSource`, ICE blacklist | Test odeslaných metadat |
 
+Refcount IP forwardingu a `nf_conntrack_acct` z 5.2 patří do PR 5, `nbnet.Init` do PR 9. PR 1 pokrývá pravidla
+105/110 a sysctl, legacy routing nemění (R2).
+
 U všech PR ve F1 platí: stejné chování ostatních platforem a žádná omezení z 5.8. F1 musí pokrýt i iptables
 a `uspfilter`, které F0 neověřil. PR závislé na otevřeném rozhodnutí (viz 2.2) čekají.
 

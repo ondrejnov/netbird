@@ -1,0 +1,91 @@
+// Package hostcoord coordinates host resources shared by concurrent sessions
+// running in one daemon.
+package hostcoord
+
+import (
+	"sync"
+
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
+)
+
+// SessionKey identifies one session. It includes the user because legacy profile
+// IDs are not unique across users.
+type SessionKey struct {
+	Profile  profilemanager.ID
+	Username string
+}
+
+// RoutingBase describes the routing state shared by all holders.
+type RoutingBase struct {
+	// SysctlFailed reports that the host sysctls could not be fully configured.
+	SysctlFailed bool
+}
+
+// TeardownFunc undoes host state.
+type TeardownFunc func() error
+
+// SetupFunc installs the shared routing state. On error it leaves the installed
+// state for the caller's cleanup, and the base stays unheld.
+type SetupFunc func() (RoutingBase, TeardownFunc, error)
+
+// Coordinator owns the host resources shared by sessions. It is passed as a
+// dependency so tests and the foreground mode can use their own instance.
+type Coordinator struct {
+	mu       sync.Mutex
+	holders  map[SessionKey]struct{}
+	base     RoutingBase
+	teardown TeardownFunc
+}
+
+// New returns a Coordinator with no holders.
+func New() *Coordinator {
+	return &Coordinator{holders: make(map[SessionKey]struct{})}
+}
+
+// AcquireRoutingBase adds key to the routing base holders. Only the first holder
+// runs setup. Repeated calls with the same key hold one reference.
+func (c *Coordinator) AcquireRoutingBase(key SessionKey, setup SetupFunc) (RoutingBase, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.holders) > 0 {
+		c.holders[key] = struct{}{}
+		return c.base, nil
+	}
+
+	base, teardown, err := setup()
+	if err != nil {
+		return RoutingBase{}, err
+	}
+
+	c.holders[key] = struct{}{}
+	c.base = base
+	c.teardown = teardown
+	return base, nil
+}
+
+// ReleaseRoutingBase removes key from the routing base holders. The last holder
+// runs the teardown returned by setup. When nobody holds the base, idleCleanup
+// removes what a previous run may have left behind. While another session holds
+// the base, nothing on the host changes.
+func (c *Coordinator) ReleaseRoutingBase(key SessionKey, idleCleanup TeardownFunc) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.holders, key)
+	if len(c.holders) > 0 {
+		return nil
+	}
+
+	cleanup := idleCleanup
+	if c.teardown != nil {
+		cleanup = c.teardown
+	}
+	c.base = RoutingBase{}
+	c.teardown = nil
+
+	if cleanup == nil {
+		return nil
+	}
+	return cleanup()
+}
