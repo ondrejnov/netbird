@@ -93,9 +93,9 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	s.rootCtx = context.Background()
 	mgmtURL, err := url.Parse("https://management.example:443")
 	require.NoError(t, err)
-	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: mgmtURL})
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: mgmtURL})
 
-	s.session.beginRun(profilemanager.SessionKey{}, nil)
+	s.focusedSession().beginRun(profilemanager.SessionKey{}, nil)
 
 	waitForReady := true
 	done := make(chan error, 1)
@@ -107,7 +107,7 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	// Long enough for Status to park on the first run's channels.
 	time.Sleep(100 * time.Millisecond)
 
-	restarted, _ := s.session.beginRun(profilemanager.SessionKey{}, nil)
+	restarted, _ := s.focusedSession().beginRun(profilemanager.SessionKey{}, nil)
 	close(restarted)
 
 	select {
@@ -127,7 +127,7 @@ func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
 	require.NoError(t, err)
 	first := &profilemanager.Config{ManagementURL: mgmtURL}
 	second := &profilemanager.Config{ManagementURL: mgmtURL}
-	s.session.setConfig(profilemanager.SessionKey{}, first)
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, first)
 
 	hammerWithReaders(func() {
 		_, err := s.Status(context.Background(), &proto.StatusRequest{})
@@ -135,12 +135,12 @@ func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
 		s.checkUpdateSettingsDisabled()
 	}, func() {
 		s.mutex.Lock()
-		s.session.setConfig(profilemanager.SessionKey{}, second)
-		s.session.setConfig(profilemanager.SessionKey{}, first)
+		s.focusedSession().setConfig(profilemanager.SessionKey{}, second)
+		s.focusedSession().setConfig(profilemanager.SessionKey{}, first)
 		s.mutex.Unlock()
 	})
 
-	assert.Same(t, first, s.session.currentConfig(), "the last write should be the one a reader sees")
+	assert.Same(t, first, s.focusedSession().currentConfig(), "the last write should be the one a reader sees")
 }
 
 // WaitSSOLogin and WaitJWTToken read the flow record while Login and RequestJWTAuth
@@ -293,13 +293,13 @@ func TestExtendSessionLoginHint_FollowsRunningProfile(t *testing.T) {
 
 	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "with nothing running the hint stays the local active profile's")
 
-	_, giveUp := s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
+	_, giveUp := s.focusedSession().beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
 	assert.Equal(t, "default@example.com", s.extendSessionLoginHint(), "the hint must be the running profile's")
 
 	close(giveUp)
 	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "a finished run must not decide the hint")
 
-	s.session.beginRun(profilemanager.SessionKey{Profile: "gone", Username: username}, nil)
+	s.focusedSession().beginRun(profilemanager.SessionKey{Profile: "gone", Username: username}, nil)
 	assert.Empty(t, s.extendSessionLoginHint(), "a running profile with no recorded account has no hint")
 }
 
@@ -309,7 +309,7 @@ func TestServerHandlers_WorkWithoutStateInRootContext(t *testing.T) {
 	s := New(context.Background(), "console", "", false, false, false, false)
 	managementURL, err := url.Parse("https://management.example.com")
 	require.NoError(t, err)
-	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: managementURL})
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: managementURL})
 
 	require.NotPanics(t, func() {
 		resp, err := s.Status(context.Background(), &proto.StatusRequest{})

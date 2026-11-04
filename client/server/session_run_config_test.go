@@ -62,9 +62,9 @@ func newSwitchedRun(t *testing.T) *switchedRun {
 		run:         testManagementConfig(t, runManagementURL),
 		selected:    testManagementConfig(t, selectedManagementURL),
 	}
-	r.s.session.setConfig(r.runKey, r.run)
-	_, r.giveUp = r.s.session.beginRun(r.runKey, r.run)
-	r.s.session.setConfig(r.selectedKey, r.selected)
+	r.s.focusedSession().setConfig(r.runKey, r.run)
+	_, r.giveUp = r.s.focusedSession().beginRun(r.runKey, r.run)
+	r.s.focusedSession().setConfig(r.selectedKey, r.selected)
 	return r
 }
 
@@ -181,7 +181,7 @@ func TestStatus_DescribesTheRunWhileAnotherProfileIsSelected(t *testing.T) {
 		"status should show the Rosenpass setting of the running profile")
 
 	// With the run gone the selected profile is what the next Up connects.
-	r.s.session.markClientDown()
+	r.s.focusedSession().markClientDown()
 	close(r.giveUp)
 	resp, err = r.s.Status(context.Background(), &proto.StatusRequest{GetFullPeerStatus: true})
 	require.NoError(t, err)
@@ -228,8 +228,8 @@ func TestDebugBundle_DescribesTheRunWhileAnotherProfileIsSelected(t *testing.T) 
 func TestDebugBundle_WithoutSwitchKeepsTheActiveState(t *testing.T) {
 	f := newResidualFixture(t)
 	config := testManagementConfig(t, runManagementURL)
-	f.s.session.setConfig(f.active, config)
-	f.s.session.beginRun(f.active, config)
+	f.s.focusedSession().setConfig(f.active, config)
+	f.s.focusedSession().beginRun(f.active, config)
 	require.NoError(t, os.WriteFile(f.statePath(f.active), []byte(`{"marker_of_the_active":{}}`), 0o600))
 
 	path, managementURL, err := f.s.generateDebugBundle(&proto.DebugBundleRequest{}, nil)
@@ -292,7 +292,7 @@ func TestLogin_StaysOnItsProfileWhenTheSelectionMoves(t *testing.T) {
 	moved := testManagementConfig(t, selectedManagementURL)
 	s.isLoginRequiredFn = func(_ context.Context, config *profilemanager.Config) (bool, error) {
 		probed = config
-		s.session.setConfig(f.other, moved)
+		s.focusedSession().setConfig(f.other, moved)
 		return true, nil
 	}
 	s.loginAttemptFn = func(_ context.Context, config *profilemanager.Config, _, _ string) (internal.StatusType, error) {
@@ -315,16 +315,16 @@ func TestWaitSSOLogin_LogsInToTheProfileOfTheFlow(t *testing.T) {
 	flowKey := profilemanager.SessionKey{Profile: "work", Username: "user"}
 	flowConfig := testManagementConfig(t, runManagementURL)
 	moved := testManagementConfig(t, selectedManagementURL)
-	s.session.setConfig(flowKey, flowConfig)
+	s.focusedSession().setConfig(flowKey, flowConfig)
 
 	var attempted *profilemanager.Config
 	s.loginAttemptFn = func(_ context.Context, config *profilemanager.Config, _, _ string) (internal.StatusType, error) {
 		attempted = config
 		return "", nil
 	}
-	s.session.swapOAuthFlow(oauthAuthFlow{
+	s.focusedSession().swapOAuthFlow(oauthAuthFlow{
 		flow: &stubOAuthFlow{onWait: func() {
-			s.session.setConfig(profilemanager.SessionKey{Profile: "other", Username: "user"}, moved)
+			s.focusedSession().setConfig(profilemanager.SessionKey{Profile: "other", Username: "user"}, moved)
 		}},
 		info:   auth.AuthFlowInfo{UserCode: "code"},
 		key:    flowKey,
@@ -343,14 +343,14 @@ func TestWaitSSOLogin_WithoutSwitchUsesTheLatestConfig(t *testing.T) {
 	key := profilemanager.SessionKey{Profile: "work", Username: "user"}
 	flowConfig := testManagementConfig(t, runManagementURL)
 	latest := testManagementConfig(t, selectedManagementURL)
-	s.session.setConfig(key, latest)
+	s.focusedSession().setConfig(key, latest)
 
 	var attempted *profilemanager.Config
 	s.loginAttemptFn = func(_ context.Context, config *profilemanager.Config, _, _ string) (internal.StatusType, error) {
 		attempted = config
 		return "", nil
 	}
-	s.session.swapOAuthFlow(oauthAuthFlow{
+	s.focusedSession().swapOAuthFlow(oauthAuthFlow{
 		flow:   &stubOAuthFlow{},
 		info:   auth.AuthFlowInfo{UserCode: "code"},
 		key:    key,
@@ -371,14 +371,14 @@ func TestRequestJWTAuth_RefusedWhileAnotherProfileRuns(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "want the profile mismatch refusal, got %v", err)
-	assert.Nil(t, r.s.session.oauthFlow().flow, "a refused request must not leave a flow behind")
+	assert.Nil(t, r.s.focusedSession().oauthFlow().flow, "a refused request must not leave a flow behind")
 }
 
 // A published client of another profile counts as well: it can come back on the next retry,
 // and RequestExtendAuthSession refuses on the client too.
 func TestRequestJWTAuth_RefusedWhileAnotherProfilesClientIsPublished(t *testing.T) {
 	r := newSwitchedRun(t)
-	r.s.session.setClient(newDummyConnectClient(internal.CtxInitState(context.Background())))
+	r.s.focusedSession().setClient(newDummyConnectClient(internal.CtxInitState(context.Background())))
 	close(r.giveUp)
 
 	_, err := r.s.RequestJWTAuth(context.Background(), &proto.RequestJWTAuthRequest{})
@@ -395,7 +395,7 @@ func TestRequestJWTAuth_PassesWithoutSwitch(t *testing.T) {
 	}{
 		{name: "no run", start: func(*residualFixture, *profilemanager.Config) {}},
 		{name: "the selected profile runs", start: func(f *residualFixture, config *profilemanager.Config) {
-			f.s.session.beginRun(f.active, config)
+			f.s.focusedSession().beginRun(f.active, config)
 		}},
 	}
 
@@ -404,7 +404,7 @@ func TestRequestJWTAuth_PassesWithoutSwitch(t *testing.T) {
 			f := newResidualFixture(t)
 			config, err := f.s.storedRunningConfig(f.active)
 			require.NoError(t, err)
-			f.s.session.setConfig(f.active, config)
+			f.s.focusedSession().setConfig(f.active, config)
 			tt.start(f, config)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -470,11 +470,11 @@ func TestRemoveProfile_RefusesTheRunningProfile(t *testing.T) {
 		start func(f *residualFixture)
 	}{
 		{name: "the selection moved away from the run", start: func(f *residualFixture) {
-			f.s.session.beginRun(f.other, nil)
+			f.s.focusedSession().beginRun(f.other, nil)
 		}},
 		{name: "a restart is replacing the run", start: func(f *residualFixture) {
-			_, giveUp := f.s.session.beginRun(f.other, nil)
-			_, ok := f.s.session.beginRestart()
+			_, giveUp := f.s.focusedSession().beginRun(f.other, nil)
+			_, ok := f.s.focusedSession().beginRestart()
 			require.True(t, ok)
 			close(giveUp)
 		}},
@@ -503,19 +503,19 @@ func TestRemoveProfile_AllowsAProfileThatDoesNotRun(t *testing.T) {
 	}{
 		{name: "nothing runs", start: func(*residualFixture) {}},
 		{name: "another profile runs", start: func(f *residualFixture) {
-			f.s.session.beginRun(f.active, nil)
+			f.s.focusedSession().beginRun(f.active, nil)
 		}},
 		{name: "its run was taken down", start: func(f *residualFixture) {
-			_, giveUp := f.s.session.beginRun(f.other, nil)
-			f.s.session.markClientDown()
+			_, giveUp := f.s.focusedSession().beginRun(f.other, nil)
+			f.s.focusedSession().markClientDown()
 			close(giveUp)
 		}},
 		{name: "its run gave up", start: func(f *residualFixture) {
-			_, giveUp := f.s.session.beginRun(f.other, nil)
+			_, giveUp := f.s.focusedSession().beginRun(f.other, nil)
 			close(giveUp)
 		}},
 		{name: "a namesake of another user runs", start: func(f *residualFixture) {
-			f.s.session.beginRun(profilemanager.SessionKey{Profile: f.other.Profile, Username: "someone-else"}, nil)
+			f.s.focusedSession().beginRun(profilemanager.SessionKey{Profile: f.other.Profile, Username: "someone-else"}, nil)
 		}},
 	}
 
@@ -539,7 +539,7 @@ func TestMDMRestart_KeepsTheSelectionWithItsOwnConfig(t *testing.T) {
 	s, f := p.f.s, p.f
 	selected, err := s.storedRunningConfig(f.other)
 	require.NoError(t, err)
-	s.session.setConfig(f.other, selected)
+	s.focusedSession().setConfig(f.other, selected)
 
 	withMDMPolicy(t, s, mdm.NewPolicy(map[string]any{
 		mdm.KeyDisableProfiles: true,
@@ -548,15 +548,15 @@ func TestMDMRestart_KeepsTheSelectionWithItsOwnConfig(t *testing.T) {
 	p.endRun()
 	require.NoError(t, p.waitRestarted(t))
 
-	key, config := s.session.selectedConfig()
+	key, config := s.focusedSession().selectedConfig()
 	assert.Equal(t, f.other, key, "the selection should stay on its profile")
 	assert.NotSame(t, selected, config, "the selected config should be read again")
 	assert.True(t, s.checkProfilesDisabled(), "the selected config should carry the new policy")
 
-	running, alive := s.session.runningKey()
+	running, alive := s.focusedSession().runningKey()
 	assert.True(t, alive, "the restart should have brought the run back")
 	assert.Equal(t, f.active, running, "the run should stay on its profile")
-	assert.NotSame(t, config, s.session.connectionConfig(), "the run should keep a config of its own")
+	assert.NotSame(t, config, s.focusedSession().connectionConfig(), "the run should keep a config of its own")
 	assert.True(t, s.checkNetworksDisabled(), "the config of the run should carry the new policy")
 }
 
@@ -566,7 +566,7 @@ func TestMDMRestart_UnreadableSelectionStillGetsThePolicy(t *testing.T) {
 	s, f := p.f.s, p.f
 	selected, err := s.storedRunningConfig(f.other)
 	require.NoError(t, err)
-	s.session.setConfig(f.other, selected)
+	s.focusedSession().setConfig(f.other, selected)
 
 	path, err := profileStateOf(f.other).FilePath()
 	require.NoError(t, err)
@@ -577,6 +577,6 @@ func TestMDMRestart_UnreadableSelectionStillGetsThePolicy(t *testing.T) {
 	require.NoError(t, p.waitRestarted(t))
 
 	assert.True(t, s.checkProfilesDisabled(), "the kill switches should see the new policy")
-	key, _ := s.session.selectedConfig()
+	key, _ := s.focusedSession().selectedConfig()
 	assert.Equal(t, f.other, key, "the selection should stay where it was")
 }

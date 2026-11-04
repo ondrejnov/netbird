@@ -379,3 +379,9 @@ func sameSessionProfile(a, b profilemanager.SessionKey) bool {
 	}
 	return a.Profile == profilemanager.DefaultProfileName || a.Username == b.Username
 }
+
+// focusedSession returns the session an RPC without a selector acts on. A caller that uses
+// it more than once takes one snapshot, so it cannot mix the state of two sessions.
+func (s *Server) focusedSession() *session {
+	return s.focused.Load()
+}

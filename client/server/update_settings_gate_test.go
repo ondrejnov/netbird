@@ -112,7 +112,7 @@ func TestLogin_ChangingTheManagementURLIsRefused(t *testing.T) {
 	s.rootCtx = context.Background()
 
 	cancelled := false
-	s.session.actCancel = func() { cancelled = true }
+	s.focusedSession().actCancel = func() { cancelled = true }
 
 	_, err := s.Login(userCtx(), &proto.LoginRequest{
 		Username:      &username,
@@ -331,7 +331,7 @@ func TestLogin_ChangeThatAppearsMidRequestIsRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelled := false
-	s.session.actCancel = func() { cancelled = true }
+	s.focusedSession().actCancel = func() { cancelled = true }
 
 	// Stand in for a concurrent writer that repoints the profile between the two
 	// checks, which is the interleaving the lock has to make safe. The login

@@ -121,18 +121,18 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 
 	s := New(ctx, "debug", "", false, false, false, false)
 
-	s.session.setConfig(profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}, config)
+	s.focusedSession().setConfig(profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}, config)
 
-	s.session.statusRecorder = peer.NewRecorder(config.ManagementURL.String())
+	s.focusedSession().statusRecorder = peer.NewRecorder(config.ManagementURL.String())
 	t.Setenv(retryInitialIntervalVar, "1s")
 	t.Setenv(maxRetryIntervalVar, "2s")
 	t.Setenv(maxRetryTimeVar, "5s")
 	t.Setenv(retryMultiplierVar, "1")
 
 	key := profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}
-	runCtx, cancelRun := s.session.runContext(ctx)
+	runCtx, cancelRun := s.focusedSession().runContext(ctx)
 	defer cancelRun()
-	s.connectWithRetryRuns(runCtx, key, config, s.session.statusRecorder, nil, nil)
+	s.connectWithRetryRuns(runCtx, key, config, s.focusedSession().statusRecorder, nil, nil)
 	if counter != 1 {
 		t.Fatalf("expected exactly 1 login attempt (PermissionDenied must stop the retry loop), got %d", counter)
 	}

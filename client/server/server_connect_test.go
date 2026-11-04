@@ -15,10 +15,9 @@ import (
 )
 
 func newTestServer() *Server {
-	return &Server{
-		rootCtx: context.Background(),
-		session: newSession(),
-	}
+	s := &Server{rootCtx: context.Background()}
+	s.focused.Store(newSession())
+	return s
 }
 
 func newDummyConnectClient(ctx context.Context) *internal.ConnectClient {
@@ -35,9 +34,9 @@ func TestConnectPublishedClientIsVisible(t *testing.T) {
 	// Manually simulate what connect() does (without calling Run which panics without full setup)
 	client := newDummyConnectClient(ctx)
 
-	s.session.setClient(client)
+	s.focusedSession().setClient(client)
 
-	assert.Equal(t, client, s.session.client(), "connectClient should be set")
+	assert.Equal(t, client, s.focusedSession().client(), "connectClient should be set")
 }
 
 // TestConcurrentConnectClientAccess validates that a read of the connect client does
@@ -58,7 +57,7 @@ func TestConcurrentConnectClientAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c := s.session.client()
+			c := s.focusedSession().client()
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -73,7 +72,7 @@ func TestConcurrentConnectClientAccess(t *testing.T) {
 	// Simulate connect() writing under mutex
 	time.Sleep(5 * time.Millisecond)
 	s.mutex.Lock()
-	s.session.setClient(client)
+	s.focusedSession().setClient(client)
 	s.mutex.Unlock()
 
 	wg.Wait()
@@ -86,23 +85,23 @@ func TestConcurrentConnectClientAccess(t *testing.T) {
 func TestCleanupConnection_ClearsConnectClient(t *testing.T) {
 	s := newTestServer()
 	_, cancel := context.WithCancel(context.Background())
-	s.session.actCancel = cancel
+	s.focusedSession().actCancel = cancel
 
-	s.session.connectClient = newDummyConnectClient(context.Background())
-	s.session.clientRunning = true
+	s.focusedSession().connectClient = newDummyConnectClient(context.Background())
+	s.focusedSession().clientRunning = true
 
 	err := s.cleanupConnection()
 	require.NoError(t, err)
 
-	assert.Nil(t, s.session.connectClient, "connectClient should be nil after cleanup")
-	assert.False(t, s.session.clientRunning, "clientRunning should be cleared after cleanup (intent = down)")
+	assert.Nil(t, s.focusedSession().connectClient, "connectClient should be nil after cleanup")
+	assert.False(t, s.focusedSession().clientRunning, "clientRunning should be cleared after cleanup (intent = down)")
 }
 
 // TestCleanState_NilConnectClient validates that CleanState doesn't panic
 // when connectClient is nil.
 func TestCleanState_NilConnectClient(t *testing.T) {
 	s := newTestServer()
-	s.session.connectClient = nil
+	s.focusedSession().connectClient = nil
 	s.profileManager = nil // will cause error if it tries to proceed past the nil check
 
 	// Should not panic — the nil check should prevent calling Status() on nil
@@ -115,7 +114,7 @@ func TestCleanState_NilConnectClient(t *testing.T) {
 // when connectClient is nil.
 func TestDeleteState_NilConnectClient(t *testing.T) {
 	s := newTestServer()
-	s.session.connectClient = nil
+	s.focusedSession().connectClient = nil
 	s.profileManager = nil
 
 	assert.NotPanics(t, func() {
@@ -130,14 +129,14 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 	s := newTestServer()
 
 	// Simulate state after a successful connection
-	s.session.clientRunning = true
-	s.session.clientRunningChan = make(chan struct{})
-	close(s.session.clientRunningChan) // closed when engine started
-	s.session.clientGiveUpChan = make(chan struct{})
-	s.session.connectClient = newDummyConnectClient(context.Background())
+	s.focusedSession().clientRunning = true
+	s.focusedSession().clientRunningChan = make(chan struct{})
+	close(s.focusedSession().clientRunningChan) // closed when engine started
+	s.focusedSession().clientGiveUpChan = make(chan struct{})
+	s.focusedSession().connectClient = newDummyConnectClient(context.Background())
 
 	_, cancel := context.WithCancel(context.Background())
-	s.session.actCancel = cancel
+	s.focusedSession().actCancel = cancel
 
 	// Simulate Down(): cleanupConnection sets connectClient = nil and
 	// flips clientRunning to false (intent = down). The connectionGoroutineRunning state
@@ -151,8 +150,8 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 	// cleared by cleanupConnection), connectionGoroutineRunning may still be true
 	// (goroutine teardown is independent of the intent flag).
 	s.mutex.Lock()
-	assert.Nil(t, s.session.client(), "connectClient should be nil after cleanup")
-	assert.False(t, s.session.isClientRunning(), "clientRunning should be cleared by cleanupConnection (intent = down)")
+	assert.Nil(t, s.focusedSession().client(), "connectClient should be nil after cleanup")
+	assert.False(t, s.focusedSession().isClientRunning(), "clientRunning should be cleared by cleanupConnection (intent = down)")
 	s.mutex.Unlock()
 
 	// waitForUp() returns immediately due to stale closed clientRunningChan
@@ -170,7 +169,7 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 		assert.NoError(t, err, "waitForUp returns success on stale channel")
 		// But connectClient is still nil — this is the stale state issue
 		s.mutex.Lock()
-		assert.Nil(t, s.session.client(), "connectClient is nil despite waitForUp success")
+		assert.Nil(t, s.focusedSession().client(), "connectClient is nil despite waitForUp success")
 		s.mutex.Unlock()
 	case <-time.After(1 * time.Second):
 		t.Fatal("waitForUp should have returned immediately due to stale closed channel")
@@ -196,7 +195,7 @@ func TestConnect_DoesNotNeedServerMutex(t *testing.T) {
 	require.NoError(t, err)
 
 	// The cancelled context stands for the restart that is waiting: the attempt is on its way out.
-	ctx, cancel := s.session.runContext(context.Background())
+	ctx, cancel := s.focusedSession().runContext(context.Background())
 	cancel()
 
 	s.mutex.Lock()
@@ -206,7 +205,7 @@ func TestConnect_DoesNotNeedServerMutex(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := s.connect(ctx, key, cfg, s.session.statusRecorder, make(chan struct{})); err != nil {
+		if err := s.connect(ctx, key, cfg, s.focusedSession().statusRecorder, make(chan struct{})); err != nil {
 			t.Logf("connect returned: %v", err)
 		}
 	}()
@@ -216,5 +215,5 @@ func TestConnect_DoesNotNeedServerMutex(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("connect did not end while Server.mutex was held")
 	}
-	assert.NotNil(t, s.session.client(), "connect should have published its client")
+	assert.NotNil(t, s.focusedSession().client(), "connect should have published its client")
 }

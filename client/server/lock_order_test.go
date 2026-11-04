@@ -61,12 +61,12 @@ func TestSetConfig_TakesGuardedConfigMuBeforeServerMutex(t *testing.T) {
 func requireWaitsOnSessionMu(t *testing.T, s *Server, rpc func() error, held ...*sync.Mutex) {
 	t.Helper()
 
-	s.session.mu.Lock()
+	s.focusedSession().mu.Lock()
 	unlocked := false
 	unlock := func() {
 		if !unlocked {
 			unlocked = true
-			s.session.mu.Unlock()
+			s.focusedSession().mu.Unlock()
 		}
 	}
 	defer unlock()
@@ -119,7 +119,7 @@ func TestDown_TakesServerMutexBeforeSessionMu(t *testing.T) {
 	s.rootCtx = context.Background()
 	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	s.session.actCancel = cancel
+	s.focusedSession().actCancel = cancel
 
 	requireWaitsOnSessionMu(t, s, func() error {
 		_, err := s.Down(context.Background(), &proto.DownRequest{})
@@ -174,7 +174,7 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ss := s.session
+		ss := s.focusedSession()
 
 		ss.setActCancel(func() {})
 		ss.hasActCancel()
@@ -222,9 +222,9 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 // way out, so the cancel has to run outside the critical section that took it.
 func TestDropPendingAuthFlows_CancelsOutsideSessionMu(t *testing.T) {
 	s := newTestServer()
-	s.session.oauthAuthFlow = oauthAuthFlow{
+	s.focusedSession().oauthAuthFlow = oauthAuthFlow{
 		flow:       &stubOAuthFlow{},
-		waitCancel: func() { s.session.oauthFlow() },
+		waitCancel: func() { s.focusedSession().oauthFlow() },
 	}
 
 	done := make(chan struct{})

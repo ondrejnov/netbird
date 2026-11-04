@@ -87,7 +87,7 @@ func stopRunAtCleanup(t *testing.T, s *Server, cancelRoot context.CancelFunc) {
 	t.Helper()
 	t.Cleanup(func() {
 		cancelRoot()
-		_, giveUp := s.session.runChans()
+		_, giveUp := s.focusedSession().runChans()
 		if giveUp == nil {
 			return
 		}
@@ -161,7 +161,7 @@ func TestServer_SubcribeEvents(t *testing.T) {
 
 	u, err := url.Parse("http://non-existent-url-for-testing.invalid:12345")
 	require.NoError(t, err)
-	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, &profilemanager.Config{
 		ManagementURL: u,
 	})
 

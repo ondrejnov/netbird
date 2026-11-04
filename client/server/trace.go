@@ -62,7 +62,7 @@ func (s *Server) TracePacket(_ context.Context, req *proto.TracePacketRequest) (
 }
 
 func (s *Server) getPacketTracer() (packetTracer, *internal.Engine, error) {
-	connectClient := s.session.client()
+	connectClient := s.focusedSession().client()
 	if connectClient == nil {
 		return nil, nil, fmt.Errorf("connect client not initialized")
 	}

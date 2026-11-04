@@ -30,7 +30,7 @@ func (a *serverAgent) Down(ctx context.Context) error {
 }
 
 func (a *serverAgent) Status() (internal.StatusType, error) {
-	return a.s.session.state.Status()
+	return a.s.focusedSession().state.Status()
 }
 
 // startSleepDetector starts the OS sleep/wake detector and forwards events to

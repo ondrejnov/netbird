@@ -185,13 +185,14 @@ func streamToGRPC(r io.Reader, stream proto.DaemonService_StartCaptureServer) er
 // A timeout auto-stops the capture as a safety net if StopBundleCapture is
 // never called (e.g. CLI crash).
 func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCaptureRequest) (*proto.StartBundleCaptureResponse, error) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	s.stopBundleCaptureLocked()
 	s.cleanupBundleCapture()
 
-	if s.session.currentCapture() != nil {
+	if ss.currentCapture() != nil {
 		return nil, status.Error(codes.FailedPrecondition, "another capture is already running")
 	}
 
@@ -227,7 +228,7 @@ func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCap
 		log.Warnf("packet capture unavailable (no filtered device), skipping: %v", err)
 		return &proto.StartBundleCaptureResponse{}, nil
 	}
-	s.session.setCapture(sess)
+	ss.setCapture(sess)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	bc := &bundleCapture{
@@ -266,15 +267,16 @@ func (s *Server) StopBundleCapture(_ context.Context, _ *proto.StopBundleCapture
 
 // stopBundleCaptureLocked stops the bundle capture if running. Must hold s.mutex.
 func (s *Server) stopBundleCaptureLocked() {
+	ss := s.focusedSession()
 	if s.bundleCapture == nil {
 		return
 	}
 	bc := s.bundleCapture
-	if bc.engine != nil && s.session.currentCapture() == bc.sess {
+	if bc.engine != nil && ss.currentCapture() == bc.sess {
 		if err := bc.engine.SetCapture(nil); err != nil {
 			log.Debugf("clear bundle capture: %v", err)
 		}
-		s.session.setCapture(nil)
+		ss.setCapture(nil)
 	}
 	bc.stop()
 
@@ -307,44 +309,47 @@ func (s *Server) cleanupBundleCapture() {
 // claimCapture reserves the engine's capture slot for sess. Returns
 // FailedPrecondition if another capture is already active.
 func (s *Server) claimCapture(sess *capture.Session) (*internal.Engine, error) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.session.currentCapture() != nil {
+	if ss.currentCapture() != nil {
 		return nil, status.Error(codes.FailedPrecondition, "another capture is already running")
 	}
 	engine, err := s.getCaptureEngineLocked()
 	if err != nil {
 		return nil, err
 	}
-	s.session.setCapture(sess)
+	ss.setCapture(sess)
 	return engine, nil
 }
 
 // releaseCapture clears the active-capture owner if it still matches sess.
 func (s *Server) releaseCapture(sess *capture.Session) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.session.currentCapture() == sess {
-		s.session.setCapture(nil)
+	if ss.currentCapture() == sess {
+		ss.setCapture(nil)
 	}
 }
 
 // clearCaptureIfOwner clears engine's capture slot only if sess still owns it.
 func (s *Server) clearCaptureIfOwner(sess *capture.Session, engine *internal.Engine) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.session.currentCapture() != sess {
+	if ss.currentCapture() != sess {
 		return
 	}
 	if err := engine.SetCapture(nil); err != nil {
 		log.Debugf("clear capture: %v", err)
 	}
-	s.session.setCapture(nil)
+	ss.setCapture(nil)
 }
 
 func (s *Server) getCaptureEngineLocked() (*internal.Engine, error) {
-	connectClient := s.session.client()
+	connectClient := s.focusedSession().client()
 	if connectClient == nil {
 		return nil, status.Error(codes.FailedPrecondition, "client not connected")
 	}

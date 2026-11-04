@@ -26,6 +26,7 @@ type selectRoute struct {
 
 // ListNetworks returns a list of all available networks.
 func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*proto.ListNetworksResponse, error) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -33,7 +34,7 @@ func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*pro
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
-	connectClient := s.session.client()
+	connectClient := ss.client()
 	if connectClient == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -94,7 +95,7 @@ func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*pro
 		return iPrefix < jPrefix
 	})
 
-	resolvedDomains := s.session.statusRecorder.GetResolvedDomainsStates()
+	resolvedDomains := ss.statusRecorder.GetResolvedDomainsStates()
 	var pbRoutes []*proto.Network
 	for _, route := range routes {
 		rangeStr := route.Network.String()
@@ -140,6 +141,7 @@ func (s *Server) ListNetworks(context.Context, *proto.ListNetworksRequest) (*pro
 
 // SelectNetworks selects specific networks based on the client request.
 func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -147,7 +149,7 @@ func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequ
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
-	connectClient := s.session.client()
+	connectClient := ss.client()
 	if connectClient == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -168,7 +170,7 @@ func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequ
 		return nil, err
 	}
 
-	s.session.statusRecorder.PublishEvent(
+	ss.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"Network selection changed",
@@ -185,6 +187,7 @@ func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequ
 
 // DeselectNetworks deselects specific networks based on the client request.
 func (s *Server) DeselectNetworks(_ context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -192,7 +195,7 @@ func (s *Server) DeselectNetworks(_ context.Context, req *proto.SelectNetworksRe
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
-	connectClient := s.session.client()
+	connectClient := ss.client()
 	if connectClient == nil {
 		return nil, fmt.Errorf("not connected")
 	}
@@ -213,7 +216,7 @@ func (s *Server) DeselectNetworks(_ context.Context, req *proto.SelectNetworksRe
 		return nil, err
 	}
 
-	s.session.statusRecorder.PublishEvent(
+	ss.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"Network deselection changed",

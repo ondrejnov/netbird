@@ -90,8 +90,9 @@ func (s *Server) restoreOwnResidual(ctx context.Context, key profilemanager.Sess
 // cancelling the run identified by cancelled. A run of key started since then owns the state
 // file and the routes, so there is nothing to clean. The caller holds the server mutex.
 func (s *Server) restoreLoginResidual(ctx context.Context, key profilemanager.SessionKey, cancelled <-chan struct{}) error {
-	running, ok := s.session.runningKey()
-	if _, giveUp := s.session.runChans(); ok && giveUp != cancelled && sameSessionProfile(running, key) {
+	ss := s.focusedSession()
+	running, ok := ss.runningKey()
+	if _, giveUp := ss.runChans(); ok && giveUp != cancelled && sameSessionProfile(running, key) {
 		return nil
 	}
 	return s.restoreOwnResidual(ctx, key)
@@ -99,7 +100,7 @@ func (s *Server) restoreLoginResidual(ctx context.Context, key profilemanager.Se
 
 // otherSessionRunning reports whether a session of another profile than key is running.
 func (s *Server) otherSessionRunning(key profilemanager.SessionKey) bool {
-	running, ok := s.session.runningKey()
+	running, ok := s.focusedSession().runningKey()
 	return ok && !sameSessionProfile(running, key)
 }
 

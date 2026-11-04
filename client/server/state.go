@@ -37,7 +37,7 @@ func (s *Server) ListStates(_ context.Context, _ *proto.ListStatesRequest) (*pro
 
 // CleanState handles cleaning of states (performing cleanup operations)
 func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (*proto.CleanStateResponse, error) {
-	if s.session.clientConnectingOrConnected() {
+	if s.focusedSession().clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
 
@@ -80,7 +80,7 @@ func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (
 
 // DeleteState handles deletion of states without cleanup
 func (s *Server) DeleteState(ctx context.Context, req *proto.DeleteStateRequest) (*proto.DeleteStateResponse, error) {
-	if s.session.clientConnectingOrConnected() {
+	if s.focusedSession().clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
 

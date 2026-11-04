@@ -64,6 +64,7 @@ func (s *Server) DebugBundle(callerCtx context.Context, req *proto.DebugBundleRe
 // the management URL captured under the lock, so the caller can run the upload
 // without holding the lock.
 func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener debug.LogOpener) (path string, managementURL string, err error) {
+	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -72,7 +73,7 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		log.Warnf("failed to get latest sync response: %v", err)
 	}
 
-	connectClient := s.session.client()
+	connectClient := ss.client()
 
 	var clientMetrics debug.MetricsExporter
 	if connectClient != nil {
@@ -109,9 +110,9 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 	}
 
 	// Status, sync response and metrics describe the connection, so do its config and state.
-	config := s.session.connectionConfig()
+	config := ss.connectionConfig()
 	var statePath string
-	if key, otherRuns := s.session.otherProfileRunKey(); otherRuns {
+	if key, otherRuns := ss.otherProfileRunKey(); otherRuns {
 		statePath = s.profileManager.GetStatePathFor(key)
 	}
 
@@ -119,7 +120,7 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		debug.GeneratorDependencies{
 			InternalConfig: config,
 			StatePath:      statePath,
-			StatusRecorder: s.session.statusRecorder,
+			StatusRecorder: ss.statusRecorder,
 			SyncResponse:   syncResponse,
 			LogPath:        s.logFile,
 			UILogPath:      s.uiLogPath,
@@ -172,7 +173,7 @@ func (s *Server) SetLogLevel(_ context.Context, req *proto.SetLogLevelRequest) (
 
 	log.SetLevel(level)
 
-	if connectClient := s.session.client(); connectClient != nil {
+	if connectClient := s.focusedSession().client(); connectClient != nil {
 		connectClient.SetLogLevel(level)
 	}
 
@@ -227,7 +228,7 @@ func (s *Server) SetSyncResponsePersistence(_ context.Context, req *proto.SetSyn
 
 	enabled := req.GetEnabled()
 	s.persistSyncResponse = enabled
-	if connectClient := s.session.client(); connectClient != nil {
+	if connectClient := s.focusedSession().client(); connectClient != nil {
 		connectClient.SetSyncResponsePersistence(enabled)
 	}
 
@@ -235,7 +236,7 @@ func (s *Server) SetSyncResponsePersistence(_ context.Context, req *proto.SetSyn
 }
 
 func (s *Server) getLatestSyncResponse() (*mgmProto.SyncResponse, error) {
-	cClient := s.session.client()
+	cClient := s.focusedSession().client()
 	if cClient == nil {
 		return nil, errors.New("connect client is not initialized")
 	}
