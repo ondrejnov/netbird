@@ -140,9 +140,9 @@ func TestServer_SubcribeEvents(t *testing.T) {
 
 	u, err := url.Parse("http://non-existent-url-for-testing.invalid:12345")
 	require.NoError(t, err)
-	s.config = &profilemanager.Config{
+	s.session.setConfig(&profilemanager.Config{
 		ManagementURL: u,
-	}
+	})
 
 	ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()

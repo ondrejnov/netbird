@@ -5,6 +5,8 @@ import (
 	"sync"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/peer"
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 )
 
 // session is the state of one connection the daemon runs. The daemon still runs a
@@ -29,10 +31,16 @@ type session struct {
 	clientGiveUpChan  chan struct{} // closed when connectWithRetryRuns goroutine exits
 
 	connectClient *internal.ConnectClient
+
+	config *profilemanager.Config
+
+	// statusRecorder is set by newSession and never replaced, so reading it takes no
+	// lock. The recorder synchronizes itself.
+	statusRecorder *peer.Status
 }
 
 func newSession() *session {
-	return &session{}
+	return &session{statusRecorder: peer.NewRecorder("")}
 }
 
 // cancelAct cancels the current attempt, if there is one. The cancel runs after the
@@ -132,4 +140,19 @@ func (ss *session) clientConnectingOrConnected() bool {
 	}
 	status := client.Status()
 	return status == internal.StatusConnected || status == internal.StatusConnecting
+}
+
+// currentConfig returns the config the session runs with, nil until something resolved
+// one. A caller that uses it more than once takes one snapshot, so a concurrent swap
+// cannot mix the fields of two configs.
+func (ss *session) currentConfig() *profilemanager.Config {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.config
+}
+
+func (ss *session) setConfig(config *profilemanager.Config) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.config = config
 }

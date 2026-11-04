@@ -72,7 +72,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 	validKey := cfgA.PrivateKey
 	cfgA.PrivateKey = "not-a-wireguard-key"
 	require.NoError(t, profilemanager.WriteOutConfig(cfgPathA, cfgA))
-	s.config = cfgA
+	s.session.setConfig(cfgA)
 
 	profileB := "profile-b"
 	_, err = profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
@@ -95,7 +95,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 		// before SwitchProfile replaces it. This goroutine is the only one reading
 		// the key, because no attempt is running.
 		s.mutex.Lock()
-		running := s.config
+		running := s.session.currentConfig()
 		s.mutex.Unlock()
 		running.PrivateKey = validKey
 

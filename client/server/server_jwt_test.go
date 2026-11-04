@@ -96,7 +96,7 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 
 	s := newTestServer()
 	s.profileManager = profilemanager.NewServiceManager(defaultConfig)
-	s.localMetrics = localmetrics.NewManager(ctx, s.statusRecorder, nil)
+	s.localMetrics = localmetrics.NewManager(ctx, s.session.statusRecorder, nil)
 
 	// A second profile to move to, so the request goes through
 	// switchProfileIfNeeded rather than the no-op path a nil request takes.
@@ -170,7 +170,7 @@ func TestWaitJWTToken_DropsTokenFromASessionThatEndedBeforeTheWait(t *testing.T)
 	s := newTestServer()
 	owner := unprivilegedIdentity()
 	ttl := int(testTTL.Seconds())
-	s.config = &profilemanager.Config{SSHJWTCacheTTL: &ttl}
+	s.session.setConfig(&profilemanager.Config{SSHJWTCacheTTL: &ttl})
 
 	// RequestJWTAuth ran under the previous session and recorded its generation.
 	s.oauthAuthFlow.flow = &fakeOAuthFlow{token: "token-from-the-old-session"}

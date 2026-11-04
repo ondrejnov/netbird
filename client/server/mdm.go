@@ -70,7 +70,7 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	// restartEngineForMDMLocked with source="mdm". Emit an MDM-specific
 	// user-visible toast so the operator knows their IT policy was
 	// applied (UserMessage != "" triggers the GUI notifier).
-	s.statusRecorder.PublishEvent(
+	s.session.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"MDM policy applied",
@@ -94,10 +94,10 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 // for every internal restart; the MDM path emits a separate
 // "policy_applied" event (with UserMessage) for that purpose.
 func (s *Server) publishConfigChangedEvent(source string) {
-	if s.statusRecorder == nil {
+	if s.session.statusRecorder == nil {
 		return
 	}
-	s.statusRecorder.PublishEvent(
+	s.session.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		fmt.Sprintf("daemon config changed (source=%s)", source),
@@ -128,15 +128,15 @@ func (s *Server) restartEngineForMDMLocked() error {
 		return fmt.Errorf("get active profile config: %w", err)
 	}
 
-	s.config = config
-	s.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
-	s.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
+	s.session.setConfig(config)
+	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
+	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
 	ctx, cancel := context.WithCancel(s.rootCtx)
 	s.session.setActCancel(cancel)
 	runningChan, giveUpChan := s.session.beginRun()
 	log.Info("MDM restart: spawning connectWithRetryRuns with re-resolved config")
-	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, runningChan, giveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
 }

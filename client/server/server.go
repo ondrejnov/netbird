@@ -113,11 +113,9 @@ type Server struct {
 	// could land after a concurrent privileged request enabled it.
 	guardedConfigMu sync.Mutex
 
-	mutex  sync.Mutex
-	config *profilemanager.Config
+	mutex sync.Mutex
 	proto.UnimplementedDaemonServiceServer
 
-	statusRecorder *peer.Status
 	sessionWatcher *internal.SessionWatcher
 	localMetrics   *localmetrics.Manager
 
@@ -195,7 +193,6 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 		session:                newSession(),
 		logFile:                logFile,
 		persistSyncResponse:    true,
-		statusRecorder:         peer.NewRecorder(""),
 		profileManager:         profilemanager.NewServiceManager(configFile),
 		profilesDisabled:       profilesDisabled,
 		updateSettingsDisabled: updateSettingsDisabled,
@@ -209,7 +206,7 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 	s.sleepHandler = sleephandler.New(agent)
 	s.startSleepDetector()
 
-	s.localMetrics = localmetrics.NewManager(ctx, s.statusRecorder, s.clientMetricsGatherer)
+	s.localMetrics = localmetrics.NewManager(ctx, s.session.statusRecorder, s.clientMetricsGatherer)
 
 	return s
 }
@@ -248,7 +245,7 @@ func (s *Server) Start() error {
 	// UI stuck on the previous status until the next unrelated peer event.
 	// Binding the recorder here means new state.Set callsites don't have
 	// to opt in individually.
-	state.SetOnChange(s.statusRecorder.NotifyStateChange)
+	state.SetOnChange(s.session.statusRecorder.NotifyStateChange)
 
 	if err := handlePanicLog(); err != nil {
 		log.Warnf("failed to redirect stderr: %v", err)
@@ -260,7 +257,7 @@ func (s *Server) Start() error {
 
 	if s.updateManager == nil {
 		stateMgr := statemanager.New(s.profileManager.GetStatePath())
-		s.updateManager = updater.NewManager(s.rootCtx, s.statusRecorder, stateMgr)
+		s.updateManager = updater.NewManager(s.rootCtx, s.session.statusRecorder, stateMgr)
 		s.updateManager.CheckUpdateSuccess(s.rootCtx)
 	}
 
@@ -313,14 +310,14 @@ func (s *Server) Start() error {
 
 		return err
 	}
-	s.config = config
+	s.session.setConfig(config)
 
-	s.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
-	s.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
+	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
+	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 	s.localMetrics.Reconcile(config.LocalMetricsEnabled, config.LocalMetricsAddress)
 
 	if s.sessionWatcher == nil {
-		s.sessionWatcher = internal.NewSessionWatcher(s.rootCtx, s.statusRecorder)
+		s.sessionWatcher = internal.NewSessionWatcher(s.rootCtx, s.session.statusRecorder)
 		s.sessionWatcher.SetOnExpireListener(s.onSessionExpire)
 	}
 
@@ -336,7 +333,7 @@ func (s *Server) Start() error {
 	}
 
 	runningChan, giveUpChan := s.session.beginRun()
-	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, runningChan, giveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceStartup)
 	return nil
 }
@@ -433,7 +430,8 @@ func (s *Server) isLoginRequired(ctx context.Context) (bool, error) {
 		return s.isLoginRequiredFn(ctx)
 	}
 
-	authClient, err := auth.NewAuth(ctx, s.config.PrivateKey, s.config.ManagementURL, s.config)
+	config := s.session.currentConfig()
+	authClient, err := auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config)
 	if err != nil {
 		log.Errorf("failed to create auth client: %v", err)
 		return false, err
@@ -448,7 +446,8 @@ func (s *Server) isLoginRequired(ctx context.Context) (bool, error) {
 // StatusLoginFailed for every other failure, so callers can tell an
 // authentication decision apart from a login that never got made.
 func (s *Server) loginAttempt(ctx context.Context, setupKey, jwtToken string) (internal.StatusType, error) {
-	authClient, err := auth.NewAuth(ctx, s.config.PrivateKey, s.config.ManagementURL, s.config)
+	config := s.session.currentConfig()
+	authClient, err := auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config)
 	if err != nil {
 		log.Errorf("failed to create auth client: %v", err)
 		return internal.StatusLoginFailed, err
@@ -718,7 +717,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 		return nil, fmt.Errorf("failed to get active profile config: %w", err)
 	}
 	s.mutex.Lock()
-	s.config = config
+	s.session.setConfig(config)
 	if switched {
 		s.jwtCache.clear()
 	}
@@ -1145,7 +1144,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 
 	s.session.setActCancel(cancel)
 
-	if s.config == nil {
+	if s.session.currentConfig() == nil {
 		s.mutex.Unlock()
 		return nil, fmt.Errorf("config is not defined, please call login command first")
 	}
@@ -1184,15 +1183,15 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 		log.Errorf("failed to get active profile config: %v", err)
 		return nil, fmt.Errorf("failed to get active profile config: %w", err)
 	}
-	s.config = config
+	s.session.setConfig(config)
 
-	s.statusRecorder.UpdateManagementAddress(s.config.ManagementURL.String())
-	s.statusRecorder.UpdateRosenpass(s.config.RosenpassEnabled, s.config.RosenpassPermissive)
-	s.localMetrics.Reconcile(s.config.LocalMetricsEnabled, s.config.LocalMetricsAddress)
+	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
+	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
+	s.localMetrics.Reconcile(config.LocalMetricsEnabled, config.LocalMetricsAddress)
 
 	runningChan, giveUpChan := s.session.beginRun()
 
-	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), s.config, s.statusRecorder, runningChan, giveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceUpRPC)
 
 	s.mutex.Unlock()
@@ -1391,7 +1390,7 @@ func (s *Server) SwitchProfile(callerCtx context.Context, msg *proto.SwitchProfi
 		return nil, fmt.Errorf("failed to get default profile config: %w", err)
 	}
 
-	s.config = config
+	s.session.setConfig(config)
 	s.localMetrics.Reconcile(config.LocalMetricsEnabled, config.LocalMetricsAddress)
 
 	s.dropPendingAuthFlows()
@@ -1447,8 +1446,8 @@ func (s *Server) Down(ctx context.Context, _ *proto.DownRequest) (*proto.DownRes
 	// statusRecorder and appears in the new profile's initial
 	// SubscribeStatus snapshot, making the new profile look like it also
 	// failed to log in.
-	s.statusRecorder.MarkManagementDisconnected(nil)
-	s.statusRecorder.MarkSignalDisconnected(nil)
+	s.session.statusRecorder.MarkManagementDisconnected(nil)
+	s.session.statusRecorder.MarkSignalDisconnected(nil)
 
 	return &proto.DownResponse{}, nil
 }
@@ -1573,7 +1572,7 @@ func (s *Server) cleanupAfterProfileLogout(id profilemanager.ID, username string
 }
 
 func (s *Server) handleActiveProfileLogout(ctx context.Context) (*proto.LogoutResponse, error) {
-	if s.config == nil {
+	if s.session.currentConfig() == nil {
 		activeProf, err := s.profileManager.GetActiveProfileState()
 		if err != nil {
 			return nil, gstatus.Errorf(codes.FailedPrecondition, "failed to get active profile state: %v", err)
@@ -1583,7 +1582,7 @@ func (s *Server) handleActiveProfileLogout(ctx context.Context) (*proto.LogoutRe
 		if err != nil {
 			return nil, gstatus.Errorf(codes.FailedPrecondition, "not logged in")
 		}
-		s.config = config
+		s.session.setConfig(config)
 	}
 
 	if err := s.sendLogoutRequest(ctx); err != nil {
@@ -1722,7 +1721,7 @@ func (s *Server) logoutFromProfile(ctx context.Context, profile *profilemanager.
 }
 
 func (s *Server) sendLogoutRequest(ctx context.Context) error {
-	return s.sendLogoutRequestWithConfig(ctx, s.config)
+	return s.sendLogoutRequestWithConfig(ctx, s.session.currentConfig())
 }
 
 func (s *Server) sendLogoutRequestWithConfig(ctx context.Context, config *profilemanager.Config) error {
@@ -1856,20 +1855,21 @@ func (s *Server) buildStatusResponse(ctx context.Context, msg *proto.StatusReque
 
 	statusResponse := proto.StatusResponse{Status: string(status), DaemonVersion: version.NetbirdVersion()}
 
-	if deadline := s.statusRecorder.GetSessionExpiresAt(); !deadline.IsZero() {
+	if deadline := s.session.statusRecorder.GetSessionExpiresAt(); !deadline.IsZero() {
 		statusResponse.SessionExpiresAt = timestamppb.New(deadline)
 	}
 
-	s.statusRecorder.UpdateManagementAddress(s.config.ManagementURL.String())
-	s.statusRecorder.UpdateRosenpass(s.config.RosenpassEnabled, s.config.RosenpassPermissive)
+	config := s.session.currentConfig()
+	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
+	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
 	if msg.GetFullPeerStatus {
 		s.runProbes(ctx, msg.ShouldRunProbes)
-		fullStatus := s.statusRecorder.GetFullStatus()
+		fullStatus := s.session.statusRecorder.GetFullStatus()
 		pbFullStatus := fullStatus.ToProto()
-		pbFullStatus.Events = s.statusRecorder.GetEventHistory()
+		pbFullStatus.Events = s.session.statusRecorder.GetEventHistory()
 		pbFullStatus.SshServerState = s.getSSHServerState()
-		pbFullStatus.NetworksRevision = s.statusRecorder.GetNetworksRevision()
+		pbFullStatus.NetworksRevision = s.session.statusRecorder.GetNetworksRevision()
 		statusResponse.FullStatus = pbFullStatus
 	}
 
@@ -1920,7 +1920,7 @@ func (s *Server) GetPeerSSHHostKey(
 
 	s.mutex.Lock()
 	connectClient := s.session.client()
-	statusRecorder := s.statusRecorder
+	statusRecorder := s.session.statusRecorder
 	s.mutex.Unlock()
 
 	if connectClient == nil {
@@ -1964,7 +1964,7 @@ func (s *Server) GetPeerSSHHostKey(
 // getJWTCacheTTL returns the JWT cache TTL from config or default (disabled)
 func (s *Server) getJWTCacheTTL() time.Duration {
 	s.mutex.Lock()
-	config := s.config
+	config := s.session.currentConfig()
 	s.mutex.Unlock()
 
 	if config == nil || config.SSHJWTCacheTTL == nil {
@@ -2011,7 +2011,7 @@ func (s *Server) RequestJWTAuth(
 	// read as the generation this flow belongs to. SwitchProfile holds
 	// s.mutex across its own clear(), so the pair cannot be torn.
 	s.mutex.Lock()
-	config := s.config
+	config := s.session.currentConfig()
 	cacheGeneration := s.jwtCache.currentGeneration()
 	s.mutex.Unlock()
 
@@ -2136,7 +2136,7 @@ func (s *Server) RequestExtendAuthSession(
 	}
 
 	s.mutex.Lock()
-	config := s.config
+	config := s.session.currentConfig()
 	connectClient := s.session.client()
 	s.mutex.Unlock()
 
@@ -2342,7 +2342,7 @@ func (s *Server) runProbes(ctx context.Context, waitForProbeResult bool) {
 		return
 	}
 
-	s.probeThrottle.Run(ctx, engine, s.statusRecorder, waitForProbeResult)
+	s.probeThrottle.Run(ctx, engine, s.session.statusRecorder, waitForProbeResult)
 }
 
 // GetConfig of the daemon.
@@ -2555,7 +2555,7 @@ func (s *Server) RemoveProfile(ctx context.Context, msg *proto.RemoveProfileRequ
 // client/ui/services/daemon_feed.go). userMessage is intentionally empty so this
 // stays a silent refresh signal rather than a user-facing notification.
 func (s *Server) publishProfileListChanged(profileName string) {
-	s.statusRecorder.PublishEvent(
+	s.session.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"Profile list changed",
@@ -2574,7 +2574,7 @@ func (s *Server) publishProfileListChanged(profileName string) {
 // (e.g. "debug", "info") so the UI can parse it directly. See
 // proto.MetadataKindLogLevelChanged, recognised in client/ui/services/daemon_feed.go.
 func (s *Server) publishLogLevelChanged(level string) {
-	s.statusRecorder.PublishEvent(
+	s.session.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"Log level changed",
@@ -2672,10 +2672,11 @@ func (s *Server) WailsUIReady(context.Context, *proto.WailsUIReadyRequest) (*pro
 // &true / &false when MDM explicitly enforces. No CLI flag backs
 // this feature — MDM is the sole source.
 func (s *Server) checkDisableAdvancedView() *bool {
-	if s.config == nil {
+	config := s.session.currentConfig()
+	if config == nil {
 		return nil
 	}
-	if v, ok := s.config.Policy().GetBool(mdm.KeyDisableAdvancedView); ok {
+	if v, ok := config.Policy().GetBool(mdm.KeyDisableAdvancedView); ok {
 		return &v
 	}
 	return nil
@@ -2705,8 +2706,8 @@ func (s *Server) connect(ctx context.Context, key profilemanager.SessionKey, con
 // disableX=false via MDM explicitly re-enables the feature even on a
 // box installed with --disable-X.
 func (s *Server) checkProfilesDisabled() bool {
-	if s.config != nil {
-		if v, ok := s.config.Policy().GetBool(mdm.KeyDisableProfiles); ok {
+	if config := s.session.currentConfig(); config != nil {
+		if v, ok := config.Policy().GetBool(mdm.KeyDisableProfiles); ok {
 			return v
 		}
 	}
@@ -2722,8 +2723,8 @@ func (s *Server) checkProfilesDisabled() bool {
 // silent on the key. Mirrors checkProfilesDisabled and
 // checkUpdateSettingsDisabled.
 func (s *Server) checkNetworksDisabled() bool {
-	if s.config != nil {
-		if v, ok := s.config.Policy().GetBool(mdm.KeyDisableNetworks); ok {
+	if config := s.session.currentConfig(); config != nil {
+		if v, ok := config.Policy().GetBool(mdm.KeyDisableNetworks); ok {
 			return v
 		}
 	}
@@ -2731,8 +2732,8 @@ func (s *Server) checkNetworksDisabled() bool {
 }
 
 func (s *Server) checkUpdateSettingsDisabled() bool {
-	if s.config != nil {
-		if v, ok := s.config.Policy().GetBool(mdm.KeyDisableUpdateSettings); ok {
+	if config := s.session.currentConfig(); config != nil {
+		if v, ok := config.Policy().GetBool(mdm.KeyDisableUpdateSettings); ok {
 			return v
 		}
 	}
@@ -2750,7 +2751,8 @@ func (s *Server) startUpdateManagerForGUI() {
 func (s *Server) onSessionExpire() {
 	if runtime.GOOS != "windows" {
 		isUIActive := internal.CheckUIApp()
-		if !isUIActive && s.config.DisableNotifications != nil && !*s.config.DisableNotifications {
+		config := s.session.currentConfig()
+		if !isUIActive && config.DisableNotifications != nil && !*config.DisableNotifications {
 			if err := sendTerminalNotification(); err != nil {
 				log.Errorf("send session expire terminal notification: %v", err)
 			}

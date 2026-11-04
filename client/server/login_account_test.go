@@ -203,9 +203,9 @@ func TestLogin_ProfileSwitchRejectsJWTObtainedUnderPreviousConfig(t *testing.T) 
 	})
 	require.NoError(t, err)
 
-	// getConfig loads the MDM policy right before Login swaps s.config, so the
+	// getConfig loads the MDM policy right before Login swaps the config, so the
 	// fetcher runs where a RequestJWTAuth racing the login would land: after the
-	// switch dropped the previous profile's state, while s.config still belongs
+	// switch dropped the previous profile's state, while the session's config still belongs
 	// to the previous profile. It caches a token under the generation current at
 	// that point, as WaitJWTToken would.
 	generation := s.jwtCache.currentGeneration()

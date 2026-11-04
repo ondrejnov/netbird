@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
@@ -126,6 +127,20 @@ func TestDown_TakesServerMutexBeforeSessionMu(t *testing.T) {
 	}, &s.mutex)
 }
 
+// SetConfig is where the whole chain is taken: the update-settings gate reads the
+// session's config with guardedConfigMu and Server.mutex already held.
+func TestSetConfig_TakesOuterLocksBeforeSessionMu(t *testing.T) {
+	s, ctx, profName, username, _ := setupServerWithProfile(t)
+
+	requireWaitsOnSessionMu(t, s, func() error {
+		_, err := s.SetConfig(ctx, &proto.SetConfigRequest{
+			ProfileName: profName,
+			Username:    username,
+		})
+		return err
+	}, &s.guardedConfigMu, &s.mutex)
+}
+
 // The other half of the order: nothing that holds session.mu may wait for an outer
 // lock. RPCs hold Server.mutex across slow work such as stopping an engine, so a session
 // method waiting for it would freeze every reader of the session, including the ones
@@ -154,6 +169,8 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.setClient(newDummyConnectClient(internal.CtxInitState(context.Background())))
 		ss.client()
 		ss.clientConnectingOrConnected()
+		ss.setConfig(&profilemanager.Config{})
+		ss.currentConfig()
 	}()
 
 	select {

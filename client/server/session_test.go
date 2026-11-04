@@ -67,7 +67,7 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	s.rootCtx = internal.CtxInitState(context.Background())
 	mgmtURL, err := url.Parse("https://management.example:443")
 	require.NoError(t, err)
-	s.config = &profilemanager.Config{ManagementURL: mgmtURL}
+	s.session.setConfig(&profilemanager.Config{ManagementURL: mgmtURL})
 
 	s.session.beginRun()
 
@@ -90,4 +90,46 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Status kept waiting on the channels of the run that was replaced")
 	}
+}
+
+// Status and the policy checks read the config with no Server.mutex, while SwitchProfile,
+// Login and Up replace it. Run with -race, this fails if a read skips session.mu.
+func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
+	s := newTestServer()
+	s.rootCtx = internal.CtxInitState(context.Background())
+	mgmtURL, err := url.Parse("https://management.example:443")
+	require.NoError(t, err)
+	first := &profilemanager.Config{ManagementURL: mgmtURL}
+	second := &profilemanager.Config{ManagementURL: mgmtURL}
+	s.session.setConfig(first)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, err := s.Status(context.Background(), &proto.StatusRequest{})
+				assert.NoError(t, err)
+				s.checkUpdateSettingsDisabled()
+			}
+		}()
+	}
+
+	for i := 0; i < 500; i++ {
+		s.mutex.Lock()
+		s.session.setConfig(second)
+		s.session.setConfig(first)
+		s.mutex.Unlock()
+	}
+	close(stop)
+	wg.Wait()
+
+	assert.Same(t, first, s.session.currentConfig(), "the last write should be the one a reader sees")
 }
