@@ -173,6 +173,14 @@ func (r *SysOps) CleanupRouting(stateManager *statemanager.Manager, advancedRout
 
 	defer r.sysctlFailed.Store(false)
 
+	if r.sharedRoutes != nil {
+		return r.cleanupSharedRouting()
+	}
+
+	return r.releaseRoutingBase()
+}
+
+func (r *SysOps) releaseRoutingBase() error {
 	if r.coordinator != nil {
 		return r.coordinator.ReleaseRoutingBase(r.sessionKey, func() error {
 			return cleanupRoutingBase(nil)
@@ -234,6 +242,10 @@ func (r *SysOps) AddVPNRoute(prefix netip.Prefix, intf *net.Interface) error {
 		log.Warnf("Default route is configured but sysctl operations failed, VPN traffic may not be routed correctly, consider using NB_USE_LEGACY_ROUTING=true or setting net.ipv4.conf.*.rp_filter to 2 (loose) or 0 (off)")
 	}
 
+	if r.sharedRoutes != nil {
+		return r.addSharedVPNRoute(prefix, intf)
+	}
+
 	// No need to check if routes exist as main table takes precedence over the VPN table via Rule 1
 
 	// When the peer has no IPv6, blackhole v6 to prevent leaking.
@@ -256,6 +268,10 @@ func (r *SysOps) RemoveVPNRoute(prefix netip.Prefix, intf *net.Interface) error 
 
 	if !nbnet.AdvancedRouting() {
 		return r.genericRemoveVPNRoute(prefix, intf)
+	}
+
+	if r.sharedRoutes != nil {
+		return r.removeSharedVPNRoute(prefix)
 	}
 
 	if prefix == vars.Defaultv4 && (r.wgInterface == nil || !r.wgInterface.Address().HasIPv6()) {
