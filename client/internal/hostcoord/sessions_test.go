@@ -52,6 +52,34 @@ func TestSessions_ResultIsACopy(t *testing.T) {
 	assert.Equal(t, []netip.Prefix{netip.MustParsePrefix("100.64.0.0/16")}, s.OverlayPrefixes())
 }
 
+func TestSessions_OverlayPrefixesExcept(t *testing.T) {
+	own := netip.MustParsePrefix("100.64.0.0/16")
+	other := netip.MustParsePrefix("100.65.0.0/16")
+	otherV6 := netip.MustParsePrefix("fd00::/64")
+	s := NewSessions()
+	require.NoError(t, s.Set(sessionKey("a"), "wt0", own))
+	require.NoError(t, s.Set(sessionKey("b"), "wt1", other, otherV6))
+
+	assert.ElementsMatch(t, []netip.Prefix{other, otherV6}, s.OverlayPrefixesExcept(sessionKey("a")),
+		"the own session is left out")
+	assert.Equal(t, []netip.Prefix{own}, s.OverlayPrefixesExcept(sessionKey("b")), "and so is the other one for b")
+	assert.ElementsMatch(t, []netip.Prefix{own, other, otherV6}, s.OverlayPrefixesExcept(sessionKey("unknown")),
+		"a session without a record leaves out nothing")
+	assert.ElementsMatch(t, []netip.Prefix{own, other, otherV6}, s.OverlayPrefixes(),
+		"the full list stays complete for the engine filters")
+
+	sameProfile := SessionKey{Profile: "a", Username: "other-user"}
+	assert.ElementsMatch(t, []netip.Prefix{own, other, otherV6}, s.OverlayPrefixesExcept(sameProfile),
+		"the username is part of the key, legacy profile IDs are not unique across users")
+
+	s.OverlayPrefixesExcept(sessionKey("a"))[0] = netip.MustParsePrefix("10.0.0.0/8")
+	assert.ElementsMatch(t, []netip.Prefix{other, otherV6}, s.OverlayPrefixesExcept(sessionKey("a")),
+		"the result is a copy")
+
+	s.Remove(sessionKey("b"))
+	assert.Empty(t, s.OverlayPrefixesExcept(sessionKey("a")), "the view follows the running sessions")
+}
+
 func TestSessions_RejectsInvalidInput(t *testing.T) {
 	valid := netip.MustParsePrefix("100.64.0.0/16")
 	tests := map[string]struct {
@@ -94,6 +122,7 @@ func TestSessions_ConcurrentUse(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		s.SessionInterfaces()
 		s.OverlayPrefixes()
+		s.OverlayPrefixesExcept(sessionKey("b"))
 	}
 	<-done
 }

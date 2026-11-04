@@ -82,6 +82,19 @@ func (s *Sessions) OverlayPrefixes() []netip.Prefix {
 	return slices.Clone(out)
 }
 
+// OverlayPrefixesExcept returns the overlay prefixes of all sessions other than key.
+func (s *Sessions) OverlayPrefixesExcept(key SessionKey) []netip.Prefix {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []netip.Prefix
+	for other, e := range s.entries {
+		if other != key {
+			out = append(out, e.prefixes...)
+		}
+	}
+	return out
+}
+
 func validateInterfaceName(name string) error {
 	if name == "" {
 		return fmt.Errorf("empty interface name")
