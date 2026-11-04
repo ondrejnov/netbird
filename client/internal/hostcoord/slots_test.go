@@ -783,3 +783,47 @@ func TestStoredRecords_RefusesCorruptFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"profile":"a"`, "a corrupt file should stay in place")
 }
+
+// A session has to be on record before its desired state can be stored, and that must not
+// take its resources: the resources of a session that does not run stay free.
+func TestSlots_EnsureStoresASlotWithoutReserving(t *testing.T) {
+	base := t.TempDir()
+	first := SessionKey{Profile: "first", Username: "u"}
+	second := SessionKey{Profile: "second", Username: "u"}
+
+	s, err := NewSlots(base)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+
+	slot, err := s.Ensure(first)
+	require.NoError(t, err)
+	assert.Equal(t, Slot(0), slot, "the first session gets the lowest slot")
+
+	slot, err = s.Ensure(second)
+	require.NoError(t, err)
+	assert.Equal(t, Slot(1), slot, "the next session gets the next slot")
+
+	slot, err = s.Ensure(first)
+	require.NoError(t, err)
+	assert.Equal(t, Slot(0), slot, "a known session keeps its slot")
+
+	require.NoError(t, s.SetDesired(second, DesiredUp))
+
+	stored, err := StoredRecords(base)
+	require.NoError(t, err)
+	assert.Equal(t, []SlotRecord{
+		{Key: first, Slot: 0, Desired: DesiredDown},
+		{Key: second, Slot: 1, Desired: DesiredUp},
+	}, stored, "the records must reach the disk")
+
+	assert.NoError(t, s.Remove(first), "a session that was only ensured holds no resources")
+}
+
+func TestSlots_EnsureAfterCloseIsRefused(t *testing.T) {
+	s, err := NewSlots(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	_, err = s.Ensure(SessionKey{Profile: "p"})
+	assert.ErrorIs(t, err, ErrSlotsClosed)
+}

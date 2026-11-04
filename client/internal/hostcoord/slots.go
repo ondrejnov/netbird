@@ -278,6 +278,28 @@ func (s *Slots) Remove(key SessionKey) error {
 	return s.commit(next)
 }
 
+// Ensure returns the stored slot of key, storing the lowest free one for a session seen
+// for the first time. Unlike Reserve it holds no interface or port.
+func (s *Slots) Ensure(key SessionKey) (Slot, error) {
+	s.bringUpMu.Lock()
+	defer s.bringUpMu.Unlock()
+
+	if s.closed {
+		return 0, ErrSlotsClosed
+	}
+	if state, known := s.records[key]; known {
+		return state.slot, nil
+	}
+
+	state := slotState{slot: s.lowestFreeSlot(), desired: DesiredDown}
+	next := maps.Clone(s.records)
+	next[key] = state
+	if err := s.commit(next); err != nil {
+		return 0, err
+	}
+	return state.slot, nil
+}
+
 // SetDesired stores whether the session of key should run after a daemon restart.
 func (s *Slots) SetDesired(key SessionKey, desired DesiredState) error {
 	if !desired.valid() {
