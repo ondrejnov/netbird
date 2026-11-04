@@ -150,6 +150,10 @@ type Server struct {
 	loginAttemptFn func(ctx context.Context, setupKey, jwtToken string) (internal.StatusType, error)
 
 	isLoginRequiredFn func(ctx context.Context) (bool, error)
+
+	// flushRoutesFn stands in for flushing the marked routes, which does nothing on Linux.
+	// Tests set it to see when the flush runs; production leaves it nil.
+	flushRoutesFn func() error
 }
 
 type oauthAuthFlow struct {
@@ -238,7 +242,7 @@ func (s *Server) Start() error {
 		log.Warnf("failed to redirect stderr: %v", err)
 	}
 
-	if err := RestoreResidualState(s.rootCtx, s.profileManager.GetStatePath()); err != nil {
+	if err := s.restoreResidualAtStart(s.rootCtx); err != nil {
 		log.Warnf(errRestoreResidualState, err)
 	}
 
@@ -1080,9 +1084,6 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 
 		return s.waitForUp(callerCtx)
 	}
-	if err := RestoreResidualState(callerCtx, s.profileManager.GetStatePath()); err != nil {
-		log.Warnf(errRestoreResidualState, err)
-	}
 
 	state := s.session.state
 
@@ -1158,6 +1159,10 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	}
 
 	log.Infof("active profile: %s for %s", activeProf.ID, activeProf.Username)
+
+	if err := s.restoreOwnResidual(callerCtx, activeProf.SessionKey()); err != nil {
+		log.Warnf(errRestoreResidualState, err)
+	}
 
 	config, _, err := s.getConfig(activeProf)
 	if err != nil {
@@ -2924,10 +2929,6 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 	s.session.setActCancel(cancel)
 	s.mutex.Unlock()
 
-	if err := RestoreResidualState(s.rootCtx, s.profileManager.GetStatePath()); err != nil {
-		log.Warnf(errRestoreResidualState, err)
-	}
-
 	switched := false
 	if msg.ProfileName != nil {
 		switched, err = s.switchProfileIfNeeded(*msg.ProfileName, msg.Username, activeProf)
@@ -2944,6 +2945,10 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 	activeProf, err = s.profileManager.GetActiveProfileState()
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("active profile state: %w", err)
+	}
+
+	if err := s.restoreOwnResidual(s.rootCtx, activeProf.SessionKey()); err != nil {
+		log.Warnf(errRestoreResidualState, err)
 	}
 
 	if err := persistLoginOverrides(activeProf, msg); err != nil {

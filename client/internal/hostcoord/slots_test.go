@@ -730,3 +730,56 @@ func TestSlots_ConcurrentLifecycle(t *testing.T) {
 	closeSlots(t, s)
 	_ = newFakeSlots(t, base) // the file stays valid after concurrent writes
 }
+
+func TestStoredRecords_ReadsWithoutTouchingAnything(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "state")
+
+	records, err := StoredRecords(base)
+	require.NoError(t, err)
+	assert.Empty(t, records, "a missing file should give no sessions")
+	_, err = os.Stat(base)
+	assert.ErrorIs(t, err, os.ErrNotExist, "reading must not create the directory")
+
+	require.NoError(t, os.MkdirAll(base, 0o750))
+	writeSessionsFile(t, base, `{"version":1,"sessions":[
+		{"profile":"second","username":"bob","slot":4,"desired":"up"},
+		{"profile":"first","username":"alice","slot":1,"desired":"down"}
+	]}`)
+
+	records, err = StoredRecords(base)
+	require.NoError(t, err)
+	assert.Equal(t, []SlotRecord{
+		{Key: SessionKey{Profile: "first", Username: "alice"}, Slot: 1, Desired: DesiredDown},
+		{Key: SessionKey{Profile: "second", Username: "bob"}, Slot: 4, Desired: DesiredUp},
+	}, records, "records should come ordered by slot")
+
+	entries, err := os.ReadDir(base)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "reading must not add a lock file next to the sessions file")
+}
+
+// The daemon reads the file before anyone holds the lock, and must not need it: a foreground
+// instance holding the lock would otherwise stop its crash cleanup.
+func TestStoredRecords_WorksWhileLocked(t *testing.T) {
+	base := t.TempDir()
+	slots, err := NewSlots(base, WithSlotZeroOwner(SessionKey{Profile: "owner", Username: "alice"}))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, slots.Close()) })
+
+	records, err := StoredRecords(base)
+	require.NoError(t, err)
+	require.Len(t, records, 1, "the owner should be stored")
+	assert.Equal(t, Slot(0), records[0].Slot, "the owner should hold slot 0")
+}
+
+func TestStoredRecords_RefusesCorruptFile(t *testing.T) {
+	base := t.TempDir()
+	path := writeSessionsFile(t, base, `{"version":1,"sessions":[{"profile":"a","slot":0}]}`)
+
+	_, err := StoredRecords(base)
+	assert.ErrorIs(t, err, ErrCorruptSessions)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"profile":"a"`, "a corrupt file should stay in place")
+}

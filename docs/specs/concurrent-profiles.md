@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem) a PR 10 (extrakce `session`) jsou hotové, viz 2.4. Další krok je PR 11 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. Další krok je F3, PR 12 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -145,8 +145,8 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   starého. Teď používá parametry.
 - `NB_DNS_STATE_FILE` přebíjí state soubor všech profilů, takže se session v F3 o jeden soubor dělí (Q3). Není
   rozhodnuto.
-- Aktivní profil dál čtou jen RPC na úrovni daemonu: residual restore v `Start`, `Up`, `Login` (PR 11), `ListStates`,
-  `CleanState`, `DeleteState`, debug bundle (5.4 bod 6) a state manager `updateManager` (5.4 bod 5).
+- Aktivní profil dál čtou jen RPC na úrovni daemonu: residual restore v `Start`, `ListStates`, `CleanState`,
+  `DeleteState`, debug bundle (5.4 bod 6) a state manager `updateManager` (5.4 bod 5). `Up` a `Login` od PR 11 ne.
 
 **PR 10, extrakce `session`:**
 
@@ -174,6 +174,28 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   používá značené sockety stejně jako po `down`.
 - `EEXIST` na probe pravidle znamená, že pravidla fungují. Cizí pravidlo sonda nemaže, zbytek po pádu tedy zůstane
   (není rozhodnuto, viz I7). Hledá v main stejně jako výchozí 32766, zastíní jen cizí pravidla s prioritou mezi nimi.
+
+**PR 11, `f2/context-residual`:**
+
+- `contextState` je na session jako `session.state`. Connect client a engine ho dál čtou přes `CtxGetState`, kontext běhu
+  staví `session.runContext`. `rootCtx` žádný stav nenese, foreground, embed a mobilní klienti si ho zakládají sami.
+- **Start:** `restoreResidualAtStart` uklidí state soubory všech profilů ze `sessions.json` a aktivního profilu, pak jednou
+  zavolá `FlushMarkedRoutes`. `sessions.json` (`<DefaultConfigPathDir>/sessions.json`) jen čte přes
+  `hostcoord.StoredRecords`, bez zámku, takže instalace bez něj zůstane beze změny. Soubor z dřívějšího běhu s gate se
+  uklidí i po jejím vypnutí. Poškozený soubor zůstane na místě, zaloguje se a aktivní profil se uklidí jako dnes.
+- **`Up` a `Login`:** `restoreOwnResidual` čistí jen soubor profilu, který se spouští, a `FlushMarkedRoutes` volá, jen když
+  neběží session jiného profilu.
+- **Rozdíl pro jednu session, vynucený 5.2:** úklid běží až po přepnutí profilu. `Up(work)` s aktivním `default` čistí
+  `work`, ne `default` jako dřív. Zbytek v `default` počká na jeho `Up` nebo restart služby. `Up`, který skončí chybou před
+  výběrem profilu (`up already in progress`, chybí config), už nečistí nic. `Login(work)`, zatímco zrušený běh `default`
+  ještě nedoběhl, neflushuje; flush udělá `Up`, který po něm následuje (flush dělá něco jen na macOS a BSD).
+- **Migrace:** `openSlots` přes `hostcoord.WithSlotZeroOwner` předá slot 0 aktivnímu profilu, pokud existuje jeho state
+  soubor a chybí `sessions.json`. Nezjistitelná existence souboru znamená odmítnutí, ne „nikdo". Bez gate se nevolá, proto
+  v produkci zatím nemá volajícího: PR 13 ho zavolá při zapnuté gate před `restoreResidualAtStart`.
+- **Rozhodnutí vlastníka:** `ListStates`, `CleanState` a `DeleteState` v F3 cílí na `focused` session, v F2 se nemění.
+  `NB_DNS_STATE_FILE` se v F2 nemění, v F3 ho gate odmítne.
+- `TestUpDaemon` nikdy neověřoval stav: daemon testu zůstává v `NeedsLogin`, stará podmínka padala jen na chybě, která
+  nepřišla. Teď se ptá přes RPC a odmítá `LoginFailed`.
 
 ## 3. Architektura: proč jeden daemon
 
