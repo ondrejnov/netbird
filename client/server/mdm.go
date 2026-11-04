@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
 
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/mdm"
 	"github.com/netbirdio/netbird/client/proto"
 )
@@ -44,6 +45,9 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 		// The client is not running, so there's no engine to restart.
 		return nil
 	}
+
+	// Read before the cancel: the restart itself ends the run it has to bring back.
+	runKey, running := s.session.runningKey()
 	s.session.cancelAct()
 
 	// Wait for previous connectWithRetryRuns to exit so we don't end up
@@ -61,7 +65,7 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 		}
 	}
 
-	if err := s.restartEngineForMDMLocked(); err != nil {
+	if err := s.restartEngineForMDMLocked(runKey, running); err != nil {
 		log.Errorf("MDM restart failed: %v", err)
 		return err
 	}
@@ -109,34 +113,42 @@ func (s *Server) publishConfigChangedEvent(source string) {
 	)
 }
 
-// restartEngineForMDMLocked re-resolves the active profile config
-// (re-running applyMDMPolicy via Config.apply) and re-spawns
+// restartEngineForMDMLocked re-resolves the config of the profile the
+// session runs (re-running applyMDMPolicy via Config.apply) and re-spawns
 // connectWithRetryRuns. Mirrors the tail of Server.Start so a runtime
 // MDM change behaves identically to a fresh boot under the new policy.
+// A profile selected without a Down stays selected: the policy change is
+// no request to connect it. When no run was alive, running is false and
+// the active profile is the one started.
 //
 // MUST be called with s.mutex held — onMDMPolicyChange holds the lock
 // for the entire restart sequence (cancel + quiescence wait + re-spawn)
 // so concurrent Up/Down/Status RPCs observe a coherent post-restart
 // state.
-func (s *Server) restartEngineForMDMLocked() error {
-	activeProf, err := s.profileManager.GetActiveProfileState()
-	if err != nil {
-		return fmt.Errorf("get active profile state: %w", err)
+func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, running bool) error {
+	profile := profileStateOf(runKey)
+	if !running {
+		activeProf, err := s.profileManager.GetActiveProfileState()
+		if err != nil {
+			return fmt.Errorf("get active profile state: %w", err)
+		}
+		profile = activeProf
 	}
-	config, _, err := s.getConfig(activeProf)
+	config, _, err := s.getConfig(profile)
 	if err != nil {
-		return fmt.Errorf("get active profile config: %w", err)
+		return fmt.Errorf("get profile config: %w", err)
 	}
 
-	s.session.setConfig(config)
+	key := profile.SessionKey()
+	s.session.setConfig(key, config)
 	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
 	ctx, cancel := context.WithCancel(s.rootCtx)
 	s.session.setActCancel(cancel)
-	runningChan, giveUpChan := s.session.beginRun()
+	runningChan, giveUpChan := s.session.beginRun(key)
 	log.Info("MDM restart: spawning connectWithRetryRuns with re-resolved config")
-	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.session.statusRecorder, runningChan, giveUpChan)
+	go s.connectWithRetryRuns(ctx, key, config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
 }

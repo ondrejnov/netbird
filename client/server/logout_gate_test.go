@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
@@ -131,7 +132,7 @@ func TestLogout_ForeignUserProfileDoesNotUseTheRunningConfig(t *testing.T) {
 	enableSSHOnProfile(t, cfgPath)
 	running, err := profilemanager.GetExistingConfig(cfgPath)
 	require.NoError(t, err)
-	s.session.setConfig(running)
+	s.session.setConfig(profilemanager.SessionKey{}, running)
 	s.session.connectClient = newDummyConnectClient(context.Background())
 
 	shared := "shared-legacy-name"
@@ -197,4 +198,152 @@ func TestLogout_ActiveProfileAllowedWhenProfilesEnabled(t *testing.T) {
 
 	require.Error(t, err, "the SSH privilege gate is expected to refuse this unprivileged caller")
 	require.Equal(t, codes.PermissionDenied, gstatus.Code(err), "want the privilege refusal, got %v", err)
+}
+
+// writeLogoutProfile writes a profile config. A profile without identity deregisters as
+// a no-op, which lets a logout finish offline and reach the teardown decision. A profile
+// with the SSH server enabled is refused for an unprivileged caller, which shows whose
+// config a deregistration went out with.
+func writeLogoutProfile(t *testing.T, path string, identity, sshEnabled bool) *profilemanager.Config {
+	t.Helper()
+	cfg, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
+		ConfigPath:       path,
+		ManagementURL:    unreachableManagementURL,
+		ServerSSHAllowed: boolPtr(sshEnabled),
+	})
+	require.NoError(t, err)
+	if !identity {
+		cfg.PrivateKey = ""
+		require.NoError(t, profilemanager.WriteOutConfig(path, cfg))
+	}
+	return cfg
+}
+
+type switchedDaemon struct {
+	s        *Server
+	username string
+	work     string
+	defName  string
+}
+
+// setupSwitchedWithoutDown builds the state SwitchProfile leaves when no Down follows: the
+// session runs on default, while the active profile and the session config are work's.
+func setupSwitchedWithoutDown(t *testing.T, def, work func(path string) *profilemanager.Config) switchedDaemon {
+	t.Helper()
+	s, _, _, username, _ := setupServerWithProfile(t)
+	s.rootCtx = internal.CtxInitState(context.Background())
+
+	workName := "work"
+	def(profilemanager.DefaultConfigPath)
+	workCfg := work(filepath.Join(profilemanager.DefaultConfigPathDir, workName+".json"))
+
+	workKey := profilemanager.SessionKey{Profile: profilemanager.ID(workName), Username: username}
+	require.NoError(t, s.profileManager.SetActiveProfileState(&profilemanager.ActiveProfileState{
+		ID:       workKey.Profile,
+		Username: workKey.Username,
+	}))
+
+	s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	s.session.setActCancel(func() {})
+	s.session.setClient(newDummyConnectClient(s.rootCtx))
+	s.session.setConfig(workKey, workCfg)
+
+	return switchedDaemon{s: s, username: username, work: workName, defName: profilemanager.DefaultProfileName}
+}
+
+func (d switchedDaemon) status(t *testing.T) internal.StatusType {
+	t.Helper()
+	status, err := internal.CtxGetState(d.s.rootCtx).Status()
+	require.NoError(t, err)
+	return status
+}
+
+// Logging out the profile that is only selected deregisters that profile and has to leave
+// the connection of the running one alone.
+func TestLogout_SelectedProfileLeavesRunningSessionUp(t *testing.T) {
+	d := setupSwitchedWithoutDown(t,
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, true, false) },
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
+	)
+
+	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.work, Username: &d.username})
+	require.NoError(t, err)
+
+	assert.True(t, d.s.session.isClientRunning(), "a logout of the selected profile must not stop the session of default")
+	assert.NotEqual(t, internal.StatusNeedsLogin, d.status(t), "the running session did not lose its login")
+}
+
+// Logging out the running profile tears its connection down, and the deregistration goes
+// out with that profile's own config, not with the config of the selected one. The work
+// config would be refused for this caller, so a reuse of it fails the logout.
+func TestLogout_RunningProfileTearsDownWithItsOwnConfig(t *testing.T) {
+	d := setupSwitchedWithoutDown(t,
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, true, true) },
+	)
+
+	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.defName, Username: &d.username})
+	require.NoError(t, err, "the logout must not go out with the config of the selected profile")
+
+	assert.False(t, d.s.session.isClientRunning(), "the logout of the running profile must stop its session")
+	assert.Equal(t, internal.StatusNeedsLogin, d.status(t), "the deregistered session needs a new login")
+}
+
+// A logout that names no profile acts on the session that runs.
+func TestLogout_WithoutProfileTargetsRunningSession(t *testing.T) {
+	t.Run("deregisters with the config of the running profile", func(t *testing.T) {
+		d := setupSwitchedWithoutDown(t,
+			func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
+			func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, true, true) },
+		)
+
+		_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{})
+		require.NoError(t, err, "the logout must not go out with the config of the selected profile")
+
+		assert.False(t, d.s.session.isClientRunning(), "the logout must stop the running session")
+		assert.Equal(t, internal.StatusNeedsLogin, d.status(t), "the deregistered session needs a new login")
+	})
+
+	t.Run("the privilege gate judges the running profile", func(t *testing.T) {
+		d := setupSwitchedWithoutDown(t,
+			func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, true, true) },
+			func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
+		)
+
+		_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{})
+		require.Equal(t, codes.PermissionDenied, gstatus.Code(err), "want the refusal for the SSH enabled running profile, got %v", err)
+		assert.True(t, d.s.session.isClientRunning(), "a refused logout must leave the session up")
+	})
+}
+
+// The profiles kill switch lets through only the profile the daemon runs.
+func TestLogout_ProfilesDisabledGateFollowsRunningSession(t *testing.T) {
+	d := setupSwitchedWithoutDown(t,
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
+	)
+	d.s.profilesDisabled = true
+
+	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.work, Username: &d.username})
+	require.Equal(t, codes.Unavailable, gstatus.Code(err), "the selected profile is profile management here, got %v", err)
+
+	_, err = d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.defName, Username: &d.username})
+	require.NoError(t, err, "the running profile must stay deregistrable with profiles disabled")
+}
+
+// Once the retry goroutine is gone nothing runs, so the decision is the active profile's,
+// as it is with a daemon that never connected.
+func TestLogout_FollowsActiveProfileWhenRunIsOver(t *testing.T) {
+	d := setupSwitchedWithoutDown(t,
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, true, false) },
+		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
+	)
+	_, giveUp := d.s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	close(giveUp)
+
+	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.work, Username: &d.username})
+	require.NoError(t, err)
+
+	assert.False(t, d.s.session.isClientRunning(), "the active profile owns the teardown once no run is alive")
+	assert.Equal(t, internal.StatusNeedsLogin, d.status(t), "the deregistered active profile needs a new login")
 }

@@ -122,7 +122,7 @@ func TestConnectStopsRetryOnPermissionDenied(t *testing.T) {
 
 	s := New(ctx, "debug", "", false, false, false, false)
 
-	s.session.setConfig(config)
+	s.session.setConfig(profilemanager.SessionKey{Profile: "test-profile", Username: currUser.Username}, config)
 
 	s.session.statusRecorder = peer.NewRecorder(config.ManagementURL.String())
 	t.Setenv(retryInitialIntervalVar, "1s")

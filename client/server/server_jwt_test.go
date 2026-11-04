@@ -170,7 +170,7 @@ func TestWaitJWTToken_DropsTokenFromASessionThatEndedBeforeTheWait(t *testing.T)
 	s := newTestServer()
 	owner := unprivilegedIdentity()
 	ttl := int(testTTL.Seconds())
-	s.session.setConfig(&profilemanager.Config{SSHJWTCacheTTL: &ttl})
+	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{SSHJWTCacheTTL: &ttl})
 
 	// RequestJWTAuth ran under the previous session and recorded its generation.
 	s.session.oauthAuthFlow.flow = &fakeOAuthFlow{token: "token-from-the-old-session"}
@@ -185,4 +185,57 @@ func TestWaitJWTToken_DropsTokenFromASessionThatEndedBeforeTheWait(t *testing.T)
 
 	_, found := s.session.jwtCache.get(owner)
 	assert.False(t, found, "a token whose flow started under the previous session must not be cached")
+}
+
+// replacingOAuthFlow stands for a flow whose record is replaced while the IdP is polled.
+type replacingOAuthFlow struct {
+	fakeOAuthFlow
+	onWait func()
+}
+
+func (f *replacingOAuthFlow) WaitToken(ctx context.Context, info auth.AuthFlowInfo) (auth.TokenInfo, error) {
+	f.onWait()
+	return f.fakeOAuthFlow.WaitToken(ctx, info)
+}
+
+// A login that starts during the SSH JWT polling installs its own flow, and the polling
+// ending later must not take it away from the WaitSSOLogin that is about to claim it.
+func TestWaitJWTToken_KeepsAFlowInstalledDuringTheWait(t *testing.T) {
+	s := newTestServer()
+	newer := &fakeOAuthFlow{token: "login-token"}
+	cancelled := false
+
+	polling := &replacingOAuthFlow{fakeOAuthFlow: fakeOAuthFlow{token: "ssh-token"}}
+	polling.onWait = func() {
+		s.session.swapOAuthFlow(oauthAuthFlow{
+			flow:       newer,
+			info:       auth.AuthFlowInfo{DeviceCode: "login-device-code"},
+			waitCancel: func() { cancelled = true },
+		})
+	}
+	s.session.swapOAuthFlow(oauthAuthFlow{flow: polling, info: auth.AuthFlowInfo{DeviceCode: "device-code"}})
+
+	resp, err := s.WaitJWTToken(context.Background(), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
+	require.NoError(t, err)
+	assert.Equal(t, "ssh-token", resp.Token, "the polling itself still returns its token")
+
+	pending := s.session.oauthFlow()
+	assert.Same(t, newer, pending.flow, "the flow installed during the wait must stay pending")
+	require.NotNil(t, pending.waitCancel, "the wait of the newer flow must stay cancellable")
+	pending.waitCancel()
+	assert.True(t, cancelled, "the kept cancel must be the one of the newer flow")
+}
+
+// With nothing newer installed the finished flow is done and its record goes away.
+func TestWaitJWTToken_ClearsItsOwnFlow(t *testing.T) {
+	s := newTestServer()
+	s.session.swapOAuthFlow(oauthAuthFlow{
+		flow: &fakeOAuthFlow{token: "ssh-token"},
+		info: auth.AuthFlowInfo{DeviceCode: "device-code"},
+	})
+
+	_, err := s.WaitJWTToken(context.Background(), &proto.WaitJWTTokenRequest{DeviceCode: "device-code"})
+	require.NoError(t, err)
+
+	assert.Nil(t, s.session.oauthFlow().flow, "the finished flow must be cleared")
 }

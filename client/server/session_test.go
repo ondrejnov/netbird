@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
@@ -61,10 +63,13 @@ func TestSessionLifecycle_ConcurrentAccess(t *testing.T) {
 		ss.hasActCancel()
 		ss.cancelAct()
 		ss.clientConnectingOrConnected()
+		ss.runningKey()
+		ss.configBelongsTo(profilemanager.SessionKey{})
+		ss.configBelongsToRun()
 	}, func() {
 		ss.setActCancel(func() {})
 		ss.setClient(client)
-		_, giveUp := ss.beginRun()
+		_, giveUp := ss.beginRun(profilemanager.SessionKey{})
 		close(giveUp)
 		ss.markClientDown()
 		ss.setClient(nil)
@@ -82,9 +87,9 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	s.rootCtx = internal.CtxInitState(context.Background())
 	mgmtURL, err := url.Parse("https://management.example:443")
 	require.NoError(t, err)
-	s.session.setConfig(&profilemanager.Config{ManagementURL: mgmtURL})
+	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: mgmtURL})
 
-	s.session.beginRun()
+	s.session.beginRun(profilemanager.SessionKey{})
 
 	waitForReady := true
 	done := make(chan error, 1)
@@ -96,7 +101,7 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	// Long enough for Status to park on the first run's channels.
 	time.Sleep(100 * time.Millisecond)
 
-	restarted, _ := s.session.beginRun()
+	restarted, _ := s.session.beginRun(profilemanager.SessionKey{})
 	close(restarted)
 
 	select {
@@ -116,7 +121,7 @@ func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
 	require.NoError(t, err)
 	first := &profilemanager.Config{ManagementURL: mgmtURL}
 	second := &profilemanager.Config{ManagementURL: mgmtURL}
-	s.session.setConfig(first)
+	s.session.setConfig(profilemanager.SessionKey{}, first)
 
 	hammerWithReaders(func() {
 		_, err := s.Status(context.Background(), &proto.StatusRequest{})
@@ -124,8 +129,8 @@ func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
 		s.checkUpdateSettingsDisabled()
 	}, func() {
 		s.mutex.Lock()
-		s.session.setConfig(second)
-		s.session.setConfig(first)
+		s.session.setConfig(profilemanager.SessionKey{}, second)
+		s.session.setConfig(profilemanager.SessionKey{}, first)
 		s.mutex.Unlock()
 	})
 
@@ -214,4 +219,80 @@ func TestSessions_DoNotShareAuthState(t *testing.T) {
 	_, _, pending := second.extendAuthSessionFlow.Get()
 	assert.False(t, pending, "an extend-session flow of one session showed up on another")
 	assert.Nil(t, second.currentCapture(), "a capture of one session showed up on another")
+}
+
+// The key names what runs, so it has to stop answering as soon as nothing does, and it
+// must follow a restart.
+func TestRunningKey_FollowsTheRun(t *testing.T) {
+	first := profilemanager.SessionKey{Profile: "first", Username: "alice"}
+	second := profilemanager.SessionKey{Profile: "second", Username: "alice"}
+	ss := newSession()
+
+	_, running := ss.runningKey()
+	assert.False(t, running, "no run was ever started")
+
+	_, giveUp := ss.beginRun(first)
+	key, running := ss.runningKey()
+	assert.True(t, running, "the goroutine of the run is alive")
+	assert.Equal(t, first, key, "the key must be the one the run started with")
+
+	close(giveUp)
+	_, running = ss.runningKey()
+	assert.False(t, running, "the goroutine gave up, nothing runs")
+
+	ss.beginRun(second)
+	key, running = ss.runningKey()
+	assert.True(t, running, "the restarted goroutine is alive")
+	assert.Equal(t, second, key, "the key must follow the restart")
+
+	ss.markClientDown()
+	_, running = ss.runningKey()
+	assert.False(t, running, "the daemon no longer wants to be connected")
+}
+
+func TestSameSessionProfile(t *testing.T) {
+	alice := "alice"
+	tests := []struct {
+		name string
+		a, b profilemanager.SessionKey
+		want bool
+	}{
+		{"same profile and user", profilemanager.SessionKey{Profile: "work", Username: alice}, profilemanager.SessionKey{Profile: "work", Username: alice}, true},
+		{"legacy namesake of another user", profilemanager.SessionKey{Profile: "work", Username: alice}, profilemanager.SessionKey{Profile: "work", Username: "bob"}, false},
+		{"other profile", profilemanager.SessionKey{Profile: "work", Username: alice}, profilemanager.SessionKey{Profile: "home", Username: alice}, false},
+		// Switching to default drops the username the active state held, and a single
+		// session must not read that as a config of another profile.
+		{"default is shared by every user", profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName, Username: alice}, profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, true},
+		{"nothing resolved against a run", profilemanager.SessionKey{}, profilemanager.SessionKey{Profile: "work", Username: alice}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sameSessionProfile(tt.a, tt.b), "keys %+v and %+v", tt.a, tt.b)
+		})
+	}
+}
+
+// The hint of a session extend is the account of the profile the token will go to, so it
+// has to come from the running profile however the local active profile moved.
+func TestExtendSessionLoginHint_FollowsRunningProfile(t *testing.T) {
+	s, _, _, username, _ := setupServerWithProfile(t)
+	dir := profilemanager.DefaultConfigPathDir
+
+	writeState := func(id, email string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, id+".state.json"), []byte(`{"email":"`+email+`"}`), 0o600))
+	}
+	writeState(profilemanager.DefaultProfileName, "default@example.com")
+	writeState("work", "work@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "active_profile.txt"), []byte("work"), 0o600))
+
+	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "with nothing running the hint stays the local active profile's")
+
+	_, giveUp := s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	assert.Equal(t, "default@example.com", s.extendSessionLoginHint(), "the hint must be the running profile's")
+
+	close(giveUp)
+	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "a finished run must not decide the hint")
+
+	s.session.beginRun(profilemanager.SessionKey{Profile: "gone", Username: username})
+	assert.Empty(t, s.extendSessionLoginHint(), "a running profile with no recorded account has no hint")
 }
