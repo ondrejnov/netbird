@@ -64,7 +64,7 @@ func TestWaitSSOLogin_WrongAccountArmsPromptAndFails(t *testing.T) {
 	require.True(t, s.forceAccountPrompt, "the next login was not armed to ask for the account")
 	require.Nil(t, s.session.oauthAuthFlow.flow, "the mismatched flow stayed cached for reuse")
 
-	status, stateErr := internal.CtxGetState(s.rootCtx).Status()
+	status, stateErr := s.session.state.Status()
 	require.NoError(t, stateErr)
 	require.Equal(t, internal.StatusNeedsLogin, status, "the mismatch must stay retryable")
 }
@@ -142,7 +142,7 @@ func TestSwitchProfile_DropsAccountPromptAndPendingFlow(t *testing.T) {
 
 func TestLogin_ProfileSwitchDropsAccountPromptAndPendingFlow(t *testing.T) {
 	s, _, _, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	s.isLoginRequiredFn = func(context.Context) (bool, error) {
 		return true, nil
 	}
@@ -191,7 +191,7 @@ func TestLogin_ProfileSwitchDropsAccountPromptAndPendingFlow(t *testing.T) {
 
 func TestLogin_ProfileSwitchRejectsJWTObtainedUnderPreviousConfig(t *testing.T) {
 	s, _, _, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	s.isLoginRequiredFn = func(context.Context) (bool, error) {
 		return false, errors.New("stop once the config is swapped")
 	}
@@ -222,7 +222,7 @@ func TestLogin_ProfileSwitchRejectsJWTObtainedUnderPreviousConfig(t *testing.T) 
 
 func TestLogin_SameProfileKeepsPendingFlow(t *testing.T) {
 	s, _, profName, username, cfgPath := setupServerWithProfile(t)
-	s.rootCtx = internal.CtxInitState(context.Background())
+	s.rootCtx = context.Background()
 	s.isLoginRequiredFn = func(context.Context) (bool, error) {
 		return true, nil
 	}
@@ -267,7 +267,7 @@ func TestWaitSSOLogin_JudgesTheFlowThatProducedTheToken(t *testing.T) {
 }
 
 func TestReuseOAuthFlow_ForcedPromptRefusesTheCachedFlow(t *testing.T) {
-	s := New(internal.CtxInitState(context.Background()), "console", "", false, false, false, false)
+	s := New(context.Background(), "console", "", false, false, false, false)
 	cancelled := false
 	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:       &stubOAuthFlow{},
@@ -276,7 +276,7 @@ func TestReuseOAuthFlow_ForcedPromptRefusesTheCachedFlow(t *testing.T) {
 		waitCancel: func() { cancelled = true },
 	}
 
-	state := internal.CtxGetState(s.rootCtx)
+	state := s.session.state
 	resp := s.reuseOAuthFlow(context.Background(), &stubOAuthFlow{}, state, true)
 	require.Nil(t, resp, "a forced account prompt reused the flow that skipped it")
 	require.True(t, cancelled, "the predecessor wait was orphaned")
@@ -287,7 +287,7 @@ func TestReuseOAuthFlow_ForcedPromptRefusesTheCachedFlow(t *testing.T) {
 }
 
 func TestReplaceOAuthFlow_CancelsTheDisplacedWait(t *testing.T) {
-	s := New(internal.CtxInitState(context.Background()), "console", "", false, false, false, false)
+	s := New(context.Background(), "console", "", false, false, false, false)
 	cancelled := false
 	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:            &stubOAuthFlow{},
@@ -311,7 +311,7 @@ func TestReplaceOAuthFlow_CancelsTheDisplacedWait(t *testing.T) {
 
 func newSSOTestServer(t *testing.T, hint string, accountPrompted bool, tokenEmail string) *Server {
 	t.Helper()
-	s := New(internal.CtxInitState(context.Background()), "console", "", false, false, false, false)
+	s := New(context.Background(), "console", "", false, false, false, false)
 	s.session.oauthAuthFlow = oauthAuthFlow{
 		flow:            &stubOAuthFlow{token: auth.TokenInfo{Email: tokenEmail, EmailClaim: tokenEmail}},
 		info:            auth.AuthFlowInfo{UserCode: "code"},

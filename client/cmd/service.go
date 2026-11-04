@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
-	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/server"
 )
 
@@ -100,7 +99,6 @@ func init() {
 }
 
 func newProgram(ctx context.Context, cancel context.CancelFunc) *program {
-	ctx = internal.CtxInitState(ctx)
 	return &program{ctx: ctx, cancel: cancel}
 }
 
