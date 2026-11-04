@@ -753,9 +753,11 @@ func (x *LoginResponse) GetVerificationURIComplete() string {
 }
 
 type WaitSSOLoginRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	UserCode      string                 `protobuf:"bytes,1,opt,name=userCode,proto3" json:"userCode,omitempty"`
-	Hostname      string                 `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	UserCode string                 `protobuf:"bytes,1,opt,name=userCode,proto3" json:"userCode,omitempty"`
+	Hostname string                 `protobuf:"bytes,2,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -802,6 +804,13 @@ func (x *WaitSSOLoginRequest) GetHostname() string {
 		return x.Hostname
 	}
 	return ""
+}
+
+func (x *WaitSSOLoginRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type WaitSSOLoginResponse struct {
@@ -954,7 +963,9 @@ type StatusRequest struct {
 	GetFullPeerStatus bool                   `protobuf:"varint,1,opt,name=getFullPeerStatus,proto3" json:"getFullPeerStatus,omitempty"`
 	ShouldRunProbes   bool                   `protobuf:"varint,2,opt,name=shouldRunProbes,proto3" json:"shouldRunProbes,omitempty"`
 	// the UI do not using this yet, but CLIs could use it to wait until the status is ready
-	WaitForReady  *bool `protobuf:"varint,3,opt,name=waitForReady,proto3,oneof" json:"waitForReady,omitempty"`
+	WaitForReady *bool `protobuf:"varint,3,opt,name=waitForReady,proto3,oneof" json:"waitForReady,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1010,6 +1021,13 @@ func (x *StatusRequest) GetWaitForReady() bool {
 	return false
 }
 
+func (x *StatusRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
 type StatusResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// status of the server.
@@ -1021,8 +1039,11 @@ type StatusResponse struct {
 	// Unset when the peer is not SSO-registered or login expiration is disabled.
 	// The UI derives "warning active" from this value and its own clock.
 	SessionExpiresAt *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=sessionExpiresAt,proto3" json:"sessionExpiresAt,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// sessions lists every session. The fields above always describe the focused
+	// session, so a client that does not know this field sees one network as before.
+	Sessions      []*SessionStatus `protobuf:"bytes,1000,rep,name=sessions,proto3" json:"sessions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StatusResponse) Reset() {
@@ -1083,8 +1104,19 @@ func (x *StatusResponse) GetSessionExpiresAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *StatusResponse) GetSessions() []*SessionStatus {
+	if x != nil {
+		return x.Sessions
+	}
+	return nil
+}
+
 type DownRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session selects the session to bring down. Absent means the focused session.
+	Session *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
+	// all brings down every session.
+	All           bool `protobuf:"varint,1001,opt,name=all,proto3" json:"all,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1117,6 +1149,20 @@ func (x *DownRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use DownRequest.ProtoReflect.Descriptor instead.
 func (*DownRequest) Descriptor() ([]byte, []int) {
 	return file_daemon_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *DownRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
+func (x *DownRequest) GetAll() bool {
+	if x != nil {
+		return x.All
+	}
+	return false
 }
 
 type DownResponse struct {
@@ -2309,7 +2355,9 @@ func (x *FullStatus) GetNetworksRevision() uint64 {
 
 // Networks
 type ListNetworksRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2342,6 +2390,13 @@ func (x *ListNetworksRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ListNetworksRequest.ProtoReflect.Descriptor instead.
 func (*ListNetworksRequest) Descriptor() ([]byte, []int) {
 	return file_daemon_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ListNetworksRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type ListNetworksResponse struct {
@@ -2389,10 +2444,12 @@ func (x *ListNetworksResponse) GetRoutes() []*Network {
 }
 
 type SelectNetworksRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NetworkIDs    []string               `protobuf:"bytes,1,rep,name=networkIDs,proto3" json:"networkIDs,omitempty"`
-	Append        bool                   `protobuf:"varint,2,opt,name=append,proto3" json:"append,omitempty"`
-	All           bool                   `protobuf:"varint,3,opt,name=all,proto3" json:"all,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	NetworkIDs []string               `protobuf:"bytes,1,rep,name=networkIDs,proto3" json:"networkIDs,omitempty"`
+	Append     bool                   `protobuf:"varint,2,opt,name=append,proto3" json:"append,omitempty"`
+	All        bool                   `protobuf:"varint,3,opt,name=all,proto3" json:"all,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2446,6 +2503,13 @@ func (x *SelectNetworksRequest) GetAll() bool {
 		return x.All
 	}
 	return false
+}
+
+func (x *SelectNetworksRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type SelectNetworksResponse struct {
@@ -2829,8 +2893,10 @@ type DebugBundleRequest struct {
 	// Unknown values are treated as "strict". Only meaningful with anonymize;
 	// "strict" implies it.
 	AnonymizeLevel string `protobuf:"bytes,8,opt,name=anonymizeLevel,proto3" json:"anonymizeLevel,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DebugBundleRequest) Reset() {
@@ -2910,6 +2976,13 @@ func (x *DebugBundleRequest) GetAnonymizeLevel() string {
 		return x.AnonymizeLevel
 	}
 	return ""
+}
+
+func (x *DebugBundleRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type DebugBundleResponse struct {
@@ -3257,9 +3330,11 @@ func (x *State) GetName() string {
 	return ""
 }
 
-// ListStatesRequest is empty as it requires no parameters
+// ListStatesRequest selects the session whose states are listed
 type ListStatesRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3292,6 +3367,13 @@ func (x *ListStatesRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ListStatesRequest.ProtoReflect.Descriptor instead.
 func (*ListStatesRequest) Descriptor() ([]byte, []int) {
 	return file_daemon_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *ListStatesRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // ListStatesResponse contains a list of states
@@ -3341,9 +3423,11 @@ func (x *ListStatesResponse) GetStates() []*State {
 
 // CleanStateRequest for cleaning states
 type CleanStateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StateName     string                 `protobuf:"bytes,1,opt,name=state_name,json=stateName,proto3" json:"state_name,omitempty"`
-	All           bool                   `protobuf:"varint,2,opt,name=all,proto3" json:"all,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StateName string                 `protobuf:"bytes,1,opt,name=state_name,json=stateName,proto3" json:"state_name,omitempty"`
+	All       bool                   `protobuf:"varint,2,opt,name=all,proto3" json:"all,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3390,6 +3474,13 @@ func (x *CleanStateRequest) GetAll() bool {
 		return x.All
 	}
 	return false
+}
+
+func (x *CleanStateRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // CleanStateResponse contains the result of the clean operation
@@ -3439,9 +3530,11 @@ func (x *CleanStateResponse) GetCleanedStates() int32 {
 
 // DeleteStateRequest for deleting states
 type DeleteStateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	StateName     string                 `protobuf:"bytes,1,opt,name=state_name,json=stateName,proto3" json:"state_name,omitempty"`
-	All           bool                   `protobuf:"varint,2,opt,name=all,proto3" json:"all,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	StateName string                 `protobuf:"bytes,1,opt,name=state_name,json=stateName,proto3" json:"state_name,omitempty"`
+	All       bool                   `protobuf:"varint,2,opt,name=all,proto3" json:"all,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3490,6 +3583,13 @@ func (x *DeleteStateRequest) GetAll() bool {
 	return false
 }
 
+func (x *DeleteStateRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
 // DeleteStateResponse contains the result of the delete operation
 type DeleteStateResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -3536,8 +3636,10 @@ func (x *DeleteStateResponse) GetDeletedStates() int32 {
 }
 
 type SetSyncResponsePersistenceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Enabled       bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Enabled bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3577,6 +3679,13 @@ func (x *SetSyncResponsePersistenceRequest) GetEnabled() bool {
 		return x.Enabled
 	}
 	return false
+}
+
+func (x *SetSyncResponsePersistenceRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type SetSyncResponsePersistenceResponse struct {
@@ -3710,8 +3819,10 @@ type TracePacketRequest struct {
 	TcpFlags        *TCPFlags              `protobuf:"bytes,7,opt,name=tcp_flags,json=tcpFlags,proto3,oneof" json:"tcp_flags,omitempty"`
 	IcmpType        *uint32                `protobuf:"varint,8,opt,name=icmp_type,json=icmpType,proto3,oneof" json:"icmp_type,omitempty"`
 	IcmpCode        *uint32                `protobuf:"varint,9,opt,name=icmp_code,json=icmpCode,proto3,oneof" json:"icmp_code,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *TracePacketRequest) Reset() {
@@ -3805,6 +3916,13 @@ func (x *TracePacketRequest) GetIcmpCode() uint32 {
 		return *x.IcmpCode
 	}
 	return 0
+}
+
+func (x *TracePacketRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type TraceStage struct {
@@ -3928,7 +4046,9 @@ func (x *TracePacketResponse) GetFinalDisposition() bool {
 }
 
 type SubscribeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3963,15 +4083,24 @@ func (*SubscribeRequest) Descriptor() ([]byte, []int) {
 	return file_daemon_proto_rawDescGZIP(), []int{52}
 }
 
+func (x *SubscribeRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
 type SystemEvent struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Severity      SystemEvent_Severity   `protobuf:"varint,2,opt,name=severity,proto3,enum=daemon.SystemEvent_Severity" json:"severity,omitempty"`
-	Category      SystemEvent_Category   `protobuf:"varint,3,opt,name=category,proto3,enum=daemon.SystemEvent_Category" json:"category,omitempty"`
-	Message       string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
-	UserMessage   string                 `protobuf:"bytes,5,opt,name=userMessage,proto3" json:"userMessage,omitempty"`
-	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
-	Metadata      map[string]string      `protobuf:"bytes,7,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Id          string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Severity    SystemEvent_Severity   `protobuf:"varint,2,opt,name=severity,proto3,enum=daemon.SystemEvent_Severity" json:"severity,omitempty"`
+	Category    SystemEvent_Category   `protobuf:"varint,3,opt,name=category,proto3,enum=daemon.SystemEvent_Category" json:"category,omitempty"`
+	Message     string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	UserMessage string                 `protobuf:"bytes,5,opt,name=userMessage,proto3" json:"userMessage,omitempty"`
+	Timestamp   *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Metadata    map[string]string      `protobuf:"bytes,7,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// profile_id is the ID of the profile whose session raised the event.
+	ProfileId     string `protobuf:"bytes,1000,opt,name=profile_id,json=profileId,proto3" json:"profile_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4053,6 +4182,13 @@ func (x *SystemEvent) GetMetadata() map[string]string {
 		return x.Metadata
 	}
 	return nil
+}
+
+func (x *SystemEvent) GetProfileId() string {
+	if x != nil {
+		return x.ProfileId
+	}
+	return ""
 }
 
 type GetEventsRequest struct {
@@ -5013,12 +5149,15 @@ func (x *ListProfilesResponse) GetProfiles() []*Profile {
 }
 
 type Profile struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	IsActive      bool                   `protobuf:"varint,2,opt,name=is_active,json=isActive,proto3" json:"is_active,omitempty"`
-	Id            string                 `protobuf:"bytes,3,opt,name=id,proto3" json:"id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Name     string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	IsActive bool                   `protobuf:"varint,2,opt,name=is_active,json=isActive,proto3" json:"is_active,omitempty"`
+	Id       string                 `protobuf:"bytes,3,opt,name=id,proto3" json:"id,omitempty"`
+	// connection_status is the status of the profile's session, empty when it has none.
+	// is_active keeps meaning the focused profile.
+	ConnectionStatus string `protobuf:"bytes,1000,opt,name=connection_status,json=connectionStatus,proto3" json:"connection_status,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Profile) Reset() {
@@ -5068,6 +5207,13 @@ func (x *Profile) GetIsActive() bool {
 func (x *Profile) GetId() string {
 	if x != nil {
 		return x.Id
+	}
+	return ""
+}
+
+func (x *Profile) GetConnectionStatus() string {
+	if x != nil {
+		return x.ConnectionStatus
 	}
 	return ""
 }
@@ -5375,8 +5521,12 @@ type GetFeaturesResponse struct {
 	// enable. Sourced exclusively from the MDM policy — no CLI /
 	// config flag backs this value.
 	DisableAdvancedView *bool `protobuf:"varint,4,opt,name=disable_advanced_view,json=disableAdvancedView,proto3,oneof" json:"disable_advanced_view,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// concurrent_profiles_enabled reports the concurrent profiles feature gate.
+	ConcurrentProfilesEnabled bool `protobuf:"varint,1000,opt,name=concurrent_profiles_enabled,json=concurrentProfilesEnabled,proto3" json:"concurrent_profiles_enabled,omitempty"`
+	// max_sessions is the limit of concurrent sessions, 0 means no limit.
+	MaxSessions   uint32 `protobuf:"varint,1001,opt,name=max_sessions,json=maxSessions,proto3" json:"max_sessions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetFeaturesResponse) Reset() {
@@ -5435,6 +5585,20 @@ func (x *GetFeaturesResponse) GetDisableAdvancedView() bool {
 		return *x.DisableAdvancedView
 	}
 	return false
+}
+
+func (x *GetFeaturesResponse) GetConcurrentProfilesEnabled() bool {
+	if x != nil {
+		return x.ConcurrentProfilesEnabled
+	}
+	return false
+}
+
+func (x *GetFeaturesResponse) GetMaxSessions() uint32 {
+	if x != nil {
+		return x.MaxSessions
+	}
+	return 0
 }
 
 // MDMManagedFieldsViolation is attached as a gRPC error detail on a
@@ -5578,7 +5742,9 @@ func (x *TriggerUpdateResponse) GetErrorMsg() string {
 type GetPeerSSHHostKeyRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// peer IP address or FQDN to get SSH host key for
-	PeerAddress   string `protobuf:"bytes,1,opt,name=peerAddress,proto3" json:"peerAddress,omitempty"`
+	PeerAddress string `protobuf:"bytes,1,opt,name=peerAddress,proto3" json:"peerAddress,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5618,6 +5784,13 @@ func (x *GetPeerSSHHostKeyRequest) GetPeerAddress() string {
 		return x.PeerAddress
 	}
 	return ""
+}
+
+func (x *GetPeerSSHHostKeyRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // GetPeerSSHHostKeyResponse contains the SSH host key for the requested peer
@@ -5702,8 +5875,10 @@ type RequestJWTAuthRequest struct {
 	// which decides whether PKCE or the device code flow is preferred. The daemon
 	// cannot detect this itself: it does not inherit the session environment.
 	HasGraphicalSession bool `protobuf:"varint,2,opt,name=hasGraphicalSession,proto3" json:"hasGraphicalSession,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RequestJWTAuthRequest) Reset() {
@@ -5748,6 +5923,13 @@ func (x *RequestJWTAuthRequest) GetHasGraphicalSession() bool {
 		return x.HasGraphicalSession
 	}
 	return false
+}
+
+func (x *RequestJWTAuthRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // RequestJWTAuthResponse contains authentication flow information
@@ -5856,7 +6038,9 @@ type WaitJWTTokenRequest struct {
 	// device code from RequestJWTAuthResponse
 	DeviceCode string `protobuf:"bytes,1,opt,name=deviceCode,proto3" json:"deviceCode,omitempty"`
 	// user code for verification
-	UserCode      string `protobuf:"bytes,2,opt,name=userCode,proto3" json:"userCode,omitempty"`
+	UserCode string `protobuf:"bytes,2,opt,name=userCode,proto3" json:"userCode,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5903,6 +6087,13 @@ func (x *WaitJWTTokenRequest) GetUserCode() string {
 		return x.UserCode
 	}
 	return ""
+}
+
+func (x *WaitJWTTokenRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // WaitJWTTokenResponse contains the JWT token after authentication
@@ -5979,8 +6170,10 @@ type RequestExtendAuthSessionRequest struct {
 	// which decides whether PKCE or the device code flow is preferred. The daemon
 	// cannot detect this itself: it does not inherit the session environment.
 	HasGraphicalSession bool `protobuf:"varint,2,opt,name=hasGraphicalSession,proto3" json:"hasGraphicalSession,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RequestExtendAuthSessionRequest) Reset() {
@@ -6025,6 +6218,13 @@ func (x *RequestExtendAuthSessionRequest) GetHasGraphicalSession() bool {
 		return x.HasGraphicalSession
 	}
 	return false
+}
+
+func (x *RequestExtendAuthSessionRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // RequestExtendAuthSessionResponse carries the verification URI the UI
@@ -6119,7 +6319,9 @@ type WaitExtendAuthSessionRequest struct {
 	// device code returned by RequestExtendAuthSession
 	DeviceCode string `protobuf:"bytes,1,opt,name=deviceCode,proto3" json:"deviceCode,omitempty"`
 	// user code for verification
-	UserCode      string `protobuf:"bytes,2,opt,name=userCode,proto3" json:"userCode,omitempty"`
+	UserCode string `protobuf:"bytes,2,opt,name=userCode,proto3" json:"userCode,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6166,6 +6368,13 @@ func (x *WaitExtendAuthSessionRequest) GetUserCode() string {
 		return x.UserCode
 	}
 	return ""
+}
+
+func (x *WaitExtendAuthSessionRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // WaitExtendAuthSessionResponse carries the refreshed deadline returned
@@ -6218,7 +6427,9 @@ func (x *WaitExtendAuthSessionResponse) GetSessionExpiresAt() *timestamppb.Times
 // DismissSessionWarningRequest is sent by the UI when the user clicks
 // "Dismiss" on the T-WarningLead notification.
 type DismissSessionWarningRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6251,6 +6462,13 @@ func (x *DismissSessionWarningRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use DismissSessionWarningRequest.ProtoReflect.Descriptor instead.
 func (*DismissSessionWarningRequest) Descriptor() ([]byte, []int) {
 	return file_daemon_proto_rawDescGZIP(), []int{90}
+}
+
+func (x *DismissSessionWarningRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 // DismissSessionWarningResponse acknowledges the dismissal. Carries no
@@ -6529,15 +6747,17 @@ func (x *InstallerResultResponse) GetErrorMsg() string {
 }
 
 type ExposeServiceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Port          uint32                 `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
-	Protocol      ExposeProtocol         `protobuf:"varint,2,opt,name=protocol,proto3,enum=daemon.ExposeProtocol" json:"protocol,omitempty"`
-	Pin           string                 `protobuf:"bytes,3,opt,name=pin,proto3" json:"pin,omitempty"`
-	Password      string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
-	UserGroups    []string               `protobuf:"bytes,5,rep,name=user_groups,json=userGroups,proto3" json:"user_groups,omitempty"`
-	Domain        string                 `protobuf:"bytes,6,opt,name=domain,proto3" json:"domain,omitempty"`
-	NamePrefix    string                 `protobuf:"bytes,7,opt,name=name_prefix,json=namePrefix,proto3" json:"name_prefix,omitempty"`
-	ListenPort    uint32                 `protobuf:"varint,8,opt,name=listen_port,json=listenPort,proto3" json:"listen_port,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Port       uint32                 `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
+	Protocol   ExposeProtocol         `protobuf:"varint,2,opt,name=protocol,proto3,enum=daemon.ExposeProtocol" json:"protocol,omitempty"`
+	Pin        string                 `protobuf:"bytes,3,opt,name=pin,proto3" json:"pin,omitempty"`
+	Password   string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
+	UserGroups []string               `protobuf:"bytes,5,rep,name=user_groups,json=userGroups,proto3" json:"user_groups,omitempty"`
+	Domain     string                 `protobuf:"bytes,6,opt,name=domain,proto3" json:"domain,omitempty"`
+	NamePrefix string                 `protobuf:"bytes,7,opt,name=name_prefix,json=namePrefix,proto3" json:"name_prefix,omitempty"`
+	ListenPort uint32                 `protobuf:"varint,8,opt,name=listen_port,json=listenPort,proto3" json:"listen_port,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6626,6 +6846,13 @@ func (x *ExposeServiceRequest) GetListenPort() uint32 {
 		return x.ListenPort
 	}
 	return 0
+}
+
+func (x *ExposeServiceRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type ExposeServiceEvent struct {
@@ -6763,13 +6990,15 @@ func (x *ExposeServiceReady) GetPortAutoAssigned() bool {
 }
 
 type StartCaptureRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TextOutput    bool                   `protobuf:"varint,1,opt,name=text_output,json=textOutput,proto3" json:"text_output,omitempty"`
-	SnapLen       uint32                 `protobuf:"varint,2,opt,name=snap_len,json=snapLen,proto3" json:"snap_len,omitempty"`
-	Duration      *durationpb.Duration   `protobuf:"bytes,3,opt,name=duration,proto3" json:"duration,omitempty"`
-	FilterExpr    string                 `protobuf:"bytes,4,opt,name=filter_expr,json=filterExpr,proto3" json:"filter_expr,omitempty"`
-	Verbose       bool                   `protobuf:"varint,5,opt,name=verbose,proto3" json:"verbose,omitempty"`
-	Ascii         bool                   `protobuf:"varint,6,opt,name=ascii,proto3" json:"ascii,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	TextOutput bool                   `protobuf:"varint,1,opt,name=text_output,json=textOutput,proto3" json:"text_output,omitempty"`
+	SnapLen    uint32                 `protobuf:"varint,2,opt,name=snap_len,json=snapLen,proto3" json:"snap_len,omitempty"`
+	Duration   *durationpb.Duration   `protobuf:"bytes,3,opt,name=duration,proto3" json:"duration,omitempty"`
+	FilterExpr string                 `protobuf:"bytes,4,opt,name=filter_expr,json=filterExpr,proto3" json:"filter_expr,omitempty"`
+	Verbose    bool                   `protobuf:"varint,5,opt,name=verbose,proto3" json:"verbose,omitempty"`
+	Ascii      bool                   `protobuf:"varint,6,opt,name=ascii,proto3" json:"ascii,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6846,6 +7075,13 @@ func (x *StartCaptureRequest) GetAscii() bool {
 	return false
 }
 
+func (x *StartCaptureRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
 type CapturePacket struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
@@ -6894,7 +7130,9 @@ type StartBundleCaptureRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// timeout auto-stops the capture after this duration.
 	// Clamped to a server-side maximum (10 minutes). Zero or unset defaults to the maximum.
-	Timeout       *durationpb.Duration `protobuf:"bytes,1,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	Timeout *durationpb.Duration `protobuf:"bytes,1,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6936,6 +7174,13 @@ func (x *StartBundleCaptureRequest) GetTimeout() *durationpb.Duration {
 	return nil
 }
 
+func (x *StartBundleCaptureRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
+}
+
 type StartBundleCaptureResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -6973,7 +7218,9 @@ func (*StartBundleCaptureResponse) Descriptor() ([]byte, []int) {
 }
 
 type StopBundleCaptureRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// session selects the session the call applies to. Absent means the focused session.
+	Session       *SessionSelector `protobuf:"bytes,1000,opt,name=session,proto3,oneof" json:"session,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7006,6 +7253,13 @@ func (x *StopBundleCaptureRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use StopBundleCaptureRequest.ProtoReflect.Descriptor instead.
 func (*StopBundleCaptureRequest) Descriptor() ([]byte, []int) {
 	return file_daemon_proto_rawDescGZIP(), []int{105}
+}
+
+func (x *StopBundleCaptureRequest) GetSession() *SessionSelector {
+	if x != nil {
+		return x.Session
+	}
+	return nil
 }
 
 type StopBundleCaptureResponse struct {
@@ -7044,6 +7298,164 @@ func (*StopBundleCaptureResponse) Descriptor() ([]byte, []int) {
 	return file_daemon_proto_rawDescGZIP(), []int{106}
 }
 
+// SessionSelector addresses one session by its profile.
+type SessionSelector struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// profile is a handle: an exact ID, a unique ID prefix or a unique display name.
+	Profile       string `protobuf:"bytes,1,opt,name=profile,proto3" json:"profile,omitempty"`
+	Username      string `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionSelector) Reset() {
+	*x = SessionSelector{}
+	mi := &file_daemon_proto_msgTypes[107]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionSelector) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionSelector) ProtoMessage() {}
+
+func (x *SessionSelector) ProtoReflect() protoreflect.Message {
+	mi := &file_daemon_proto_msgTypes[107]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionSelector.ProtoReflect.Descriptor instead.
+func (*SessionSelector) Descriptor() ([]byte, []int) {
+	return file_daemon_proto_rawDescGZIP(), []int{107}
+}
+
+func (x *SessionSelector) GetProfile() string {
+	if x != nil {
+		return x.Profile
+	}
+	return ""
+}
+
+func (x *SessionSelector) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+// SessionStatus is the state of one session.
+type SessionStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ProfileId     string                 `protobuf:"bytes,1,opt,name=profile_id,json=profileId,proto3" json:"profile_id,omitempty"`
+	ProfileName   string                 `protobuf:"bytes,2,opt,name=profile_name,json=profileName,proto3" json:"profile_name,omitempty"`
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	InterfaceName string                 `protobuf:"bytes,4,opt,name=interface_name,json=interfaceName,proto3" json:"interface_name,omitempty"`
+	OverlayIp     string                 `protobuf:"bytes,5,opt,name=overlay_ip,json=overlayIp,proto3" json:"overlay_ip,omitempty"`
+	Focused       bool                   `protobuf:"varint,6,opt,name=focused,proto3" json:"focused,omitempty"`
+	// conflict names the resource that keeps the session from running:
+	// overlay, exit_node, dns or interface.
+	Conflict *string `protobuf:"bytes,7,opt,name=conflict,proto3,oneof" json:"conflict,omitempty"`
+	// full_status is set only when the request asked for getFullPeerStatus.
+	FullStatus    *FullStatus `protobuf:"bytes,8,opt,name=full_status,json=fullStatus,proto3" json:"full_status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionStatus) Reset() {
+	*x = SessionStatus{}
+	mi := &file_daemon_proto_msgTypes[108]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionStatus) ProtoMessage() {}
+
+func (x *SessionStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_daemon_proto_msgTypes[108]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionStatus.ProtoReflect.Descriptor instead.
+func (*SessionStatus) Descriptor() ([]byte, []int) {
+	return file_daemon_proto_rawDescGZIP(), []int{108}
+}
+
+func (x *SessionStatus) GetProfileId() string {
+	if x != nil {
+		return x.ProfileId
+	}
+	return ""
+}
+
+func (x *SessionStatus) GetProfileName() string {
+	if x != nil {
+		return x.ProfileName
+	}
+	return ""
+}
+
+func (x *SessionStatus) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *SessionStatus) GetInterfaceName() string {
+	if x != nil {
+		return x.InterfaceName
+	}
+	return ""
+}
+
+func (x *SessionStatus) GetOverlayIp() string {
+	if x != nil {
+		return x.OverlayIp
+	}
+	return ""
+}
+
+func (x *SessionStatus) GetFocused() bool {
+	if x != nil {
+		return x.Focused
+	}
+	return false
+}
+
+func (x *SessionStatus) GetConflict() string {
+	if x != nil && x.Conflict != nil {
+		return *x.Conflict
+	}
+	return ""
+}
+
+func (x *SessionStatus) GetFullStatus() *FullStatus {
+	if x != nil {
+		return x.FullStatus
+	}
+	return nil
+}
+
 type PortInfo_Range struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Start         uint32                 `protobuf:"varint,1,opt,name=start,proto3" json:"start,omitempty"`
@@ -7054,7 +7466,7 @@ type PortInfo_Range struct {
 
 func (x *PortInfo_Range) Reset() {
 	*x = PortInfo_Range{}
-	mi := &file_daemon_proto_msgTypes[108]
+	mi := &file_daemon_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7066,7 +7478,7 @@ func (x *PortInfo_Range) String() string {
 func (*PortInfo_Range) ProtoMessage() {}
 
 func (x *PortInfo_Range) ProtoReflect() protoreflect.Message {
-	mi := &file_daemon_proto_msgTypes[108]
+	mi := &file_daemon_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7185,10 +7597,13 @@ const file_daemon_proto_rawDesc = "" +
 	"\rneedsSSOLogin\x18\x01 \x01(\bR\rneedsSSOLogin\x12\x1a\n" +
 	"\buserCode\x18\x02 \x01(\tR\buserCode\x12(\n" +
 	"\x0fverificationURI\x18\x03 \x01(\tR\x0fverificationURI\x128\n" +
-	"\x17verificationURIComplete\x18\x04 \x01(\tR\x17verificationURIComplete\"M\n" +
+	"\x17verificationURIComplete\x18\x04 \x01(\tR\x17verificationURIComplete\"\x92\x01\n" +
 	"\x13WaitSSOLoginRequest\x12\x1a\n" +
 	"\buserCode\x18\x01 \x01(\tR\buserCode\x12\x1a\n" +
-	"\bhostname\x18\x02 \x01(\tR\bhostname\",\n" +
+	"\bhostname\x18\x02 \x01(\tR\bhostname\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\",\n" +
 	"\x14WaitSSOLoginResponse\x12\x14\n" +
 	"\x05email\x18\x01 \x01(\tR\x05email\"\x8c\x01\n" +
 	"\tUpRequest\x12%\n" +
@@ -7198,20 +7613,28 @@ const file_daemon_proto_rawDesc = "" +
 	"\f_profileNameB\v\n" +
 	"\t_usernameJ\x04\b\x03\x10\x04\"\f\n" +
 	"\n" +
-	"UpResponse\"\xa1\x01\n" +
+	"UpResponse\"\xe6\x01\n" +
 	"\rStatusRequest\x12,\n" +
 	"\x11getFullPeerStatus\x18\x01 \x01(\bR\x11getFullPeerStatus\x12(\n" +
 	"\x0fshouldRunProbes\x18\x02 \x01(\bR\x0fshouldRunProbes\x12'\n" +
-	"\fwaitForReady\x18\x03 \x01(\bH\x00R\fwaitForReady\x88\x01\x01B\x0f\n" +
-	"\r_waitForReady\"\xca\x01\n" +
+	"\fwaitForReady\x18\x03 \x01(\bH\x00R\fwaitForReady\x88\x01\x01\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x01R\asession\x88\x01\x01B\x0f\n" +
+	"\r_waitForReadyB\n" +
+	"\n" +
+	"\b_session\"\xfe\x01\n" +
 	"\x0eStatusResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x122\n" +
 	"\n" +
 	"fullStatus\x18\x02 \x01(\v2\x12.daemon.FullStatusR\n" +
 	"fullStatus\x12$\n" +
 	"\rdaemonVersion\x18\x03 \x01(\tR\rdaemonVersion\x12F\n" +
-	"\x10sessionExpiresAt\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x10sessionExpiresAt\"\r\n" +
-	"\vDownRequest\"\x0e\n" +
+	"\x10sessionExpiresAt\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x10sessionExpiresAt\x122\n" +
+	"\bsessions\x18\xe8\a \x03(\v2\x15.daemon.SessionStatusR\bsessions\"e\n" +
+	"\vDownRequest\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01\x12\x11\n" +
+	"\x03all\x18\xe9\a \x01(\bR\x03allB\n" +
+	"\n" +
+	"\b_session\"\x0e\n" +
 	"\fDownResponse\"P\n" +
 	"\x10GetConfigRequest\x12 \n" +
 	"\vprofileName\x18\x01 \x01(\tR\vprofileName\x12\x1a\n" +
@@ -7327,16 +7750,22 @@ const file_daemon_proto_rawDesc = "" +
 	"\x15lazyConnectionEnabled\x18\t \x01(\bR\x15lazyConnectionEnabled\x12>\n" +
 	"\x0esshServerState\x18\n" +
 	" \x01(\v2\x16.daemon.SSHServerStateR\x0esshServerState\x12*\n" +
-	"\x10networksRevision\x18\v \x01(\x04R\x10networksRevision\"\x15\n" +
-	"\x13ListNetworksRequest\"?\n" +
+	"\x10networksRevision\x18\v \x01(\x04R\x10networksRevision\"Z\n" +
+	"\x13ListNetworksRequest\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"?\n" +
 	"\x14ListNetworksResponse\x12'\n" +
-	"\x06routes\x18\x01 \x03(\v2\x0f.daemon.NetworkR\x06routes\"a\n" +
+	"\x06routes\x18\x01 \x03(\v2\x0f.daemon.NetworkR\x06routes\"\xa6\x01\n" +
 	"\x15SelectNetworksRequest\x12\x1e\n" +
 	"\n" +
 	"networkIDs\x18\x01 \x03(\tR\n" +
 	"networkIDs\x12\x16\n" +
 	"\x06append\x18\x02 \x01(\bR\x06append\x12\x10\n" +
-	"\x03all\x18\x03 \x01(\bR\x03all\"\x18\n" +
+	"\x03all\x18\x03 \x01(\bR\x03all\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"\x18\n" +
 	"\x16SelectNetworksResponse\"\x1a\n" +
 	"\x06IPList\x12\x10\n" +
 	"\x03ips\x18\x01 \x03(\tR\x03ips\"\xf9\x01\n" +
@@ -7363,7 +7792,7 @@ const file_daemon_proto_rawDesc = "" +
 	"\x12translatedHostname\x18\x04 \x01(\tR\x12translatedHostname\x128\n" +
 	"\x0etranslatedPort\x18\x05 \x01(\v2\x10.daemon.PortInfoR\x0etranslatedPort:\x02\x18\x01\"K\n" +
 	"\x17ForwardingRulesResponse\x12,\n" +
-	"\x05rules\x18\x01 \x03(\v2\x16.daemon.ForwardingRuleR\x05rules:\x02\x18\x01\"\x84\x02\n" +
+	"\x05rules\x18\x01 \x03(\v2\x16.daemon.ForwardingRuleR\x05rules:\x02\x18\x01\"\xc9\x02\n" +
 	"\x12DebugBundleRequest\x12\x1c\n" +
 	"\tanonymize\x18\x01 \x01(\bR\tanonymize\x12\x1e\n" +
 	"\n" +
@@ -7375,7 +7804,10 @@ const file_daemon_proto_rawDesc = "" +
 	"cliVersion\x18\x06 \x01(\tR\n" +
 	"cliVersion\x12&\n" +
 	"\x0euploadInsecure\x18\a \x01(\bR\x0euploadInsecure\x12&\n" +
-	"\x0eanonymizeLevel\x18\b \x01(\tR\x0eanonymizeLevel\"}\n" +
+	"\x0eanonymizeLevel\x18\b \x01(\tR\x0eanonymizeLevel\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"}\n" +
 	"\x13DebugBundleResponse\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12 \n" +
 	"\vuploadedKey\x18\x02 \x01(\tR\vuploadedKey\x120\n" +
@@ -7390,24 +7822,36 @@ const file_daemon_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x17\n" +
 	"\x15RegisterUILogResponse\"\x1b\n" +
 	"\x05State\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"\x13\n" +
-	"\x11ListStatesRequest\";\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"X\n" +
+	"\x11ListStatesRequest\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\";\n" +
 	"\x12ListStatesResponse\x12%\n" +
-	"\x06states\x18\x01 \x03(\v2\r.daemon.StateR\x06states\"D\n" +
+	"\x06states\x18\x01 \x03(\v2\r.daemon.StateR\x06states\"\x89\x01\n" +
 	"\x11CleanStateRequest\x12\x1d\n" +
 	"\n" +
 	"state_name\x18\x01 \x01(\tR\tstateName\x12\x10\n" +
-	"\x03all\x18\x02 \x01(\bR\x03all\";\n" +
+	"\x03all\x18\x02 \x01(\bR\x03all\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\";\n" +
 	"\x12CleanStateResponse\x12%\n" +
-	"\x0ecleaned_states\x18\x01 \x01(\x05R\rcleanedStates\"E\n" +
+	"\x0ecleaned_states\x18\x01 \x01(\x05R\rcleanedStates\"\x8a\x01\n" +
 	"\x12DeleteStateRequest\x12\x1d\n" +
 	"\n" +
 	"state_name\x18\x01 \x01(\tR\tstateName\x12\x10\n" +
-	"\x03all\x18\x02 \x01(\bR\x03all\"<\n" +
+	"\x03all\x18\x02 \x01(\bR\x03all\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"<\n" +
 	"\x13DeleteStateResponse\x12%\n" +
-	"\x0edeleted_states\x18\x01 \x01(\x05R\rdeletedStates\"=\n" +
+	"\x0edeleted_states\x18\x01 \x01(\x05R\rdeletedStates\"\x82\x01\n" +
 	"!SetSyncResponsePersistenceRequest\x12\x18\n" +
-	"\aenabled\x18\x01 \x01(\bR\aenabled\"$\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"$\n" +
 	"\"SetSyncResponsePersistenceResponse\"v\n" +
 	"\bTCPFlags\x12\x10\n" +
 	"\x03syn\x18\x01 \x01(\bR\x03syn\x12\x10\n" +
@@ -7415,7 +7859,7 @@ const file_daemon_proto_rawDesc = "" +
 	"\x03fin\x18\x03 \x01(\bR\x03fin\x12\x10\n" +
 	"\x03rst\x18\x04 \x01(\bR\x03rst\x12\x10\n" +
 	"\x03psh\x18\x05 \x01(\bR\x03psh\x12\x10\n" +
-	"\x03urg\x18\x06 \x01(\bR\x03urg\"\x80\x03\n" +
+	"\x03urg\x18\x06 \x01(\bR\x03urg\"\xc5\x03\n" +
 	"\x12TracePacketRequest\x12\x1b\n" +
 	"\tsource_ip\x18\x01 \x01(\tR\bsourceIp\x12%\n" +
 	"\x0edestination_ip\x18\x02 \x01(\tR\rdestinationIp\x12\x1a\n" +
@@ -7426,13 +7870,16 @@ const file_daemon_proto_rawDesc = "" +
 	"\tdirection\x18\x06 \x01(\tR\tdirection\x122\n" +
 	"\ttcp_flags\x18\a \x01(\v2\x10.daemon.TCPFlagsH\x00R\btcpFlags\x88\x01\x01\x12 \n" +
 	"\ticmp_type\x18\b \x01(\rH\x01R\bicmpType\x88\x01\x01\x12 \n" +
-	"\ticmp_code\x18\t \x01(\rH\x02R\bicmpCode\x88\x01\x01B\f\n" +
+	"\ticmp_code\x18\t \x01(\rH\x02R\bicmpCode\x88\x01\x01\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x03R\asession\x88\x01\x01B\f\n" +
 	"\n" +
 	"_tcp_flagsB\f\n" +
 	"\n" +
 	"_icmp_typeB\f\n" +
 	"\n" +
-	"_icmp_code\"\x9f\x01\n" +
+	"_icmp_codeB\n" +
+	"\n" +
+	"\b_session\"\x9f\x01\n" +
 	"\n" +
 	"TraceStage\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
@@ -7442,8 +7889,11 @@ const file_daemon_proto_rawDesc = "" +
 	"\x13_forwarding_details\"n\n" +
 	"\x13TracePacketResponse\x12*\n" +
 	"\x06stages\x18\x01 \x03(\v2\x12.daemon.TraceStageR\x06stages\x12+\n" +
-	"\x11final_disposition\x18\x02 \x01(\bR\x10finalDisposition\"\x12\n" +
-	"\x10SubscribeRequest\"\x93\x04\n" +
+	"\x11final_disposition\x18\x02 \x01(\bR\x10finalDisposition\"W\n" +
+	"\x10SubscribeRequest\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"\xb3\x04\n" +
 	"\vSystemEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x128\n" +
 	"\bseverity\x18\x02 \x01(\x0e2\x1c.daemon.SystemEvent.SeverityR\bseverity\x128\n" +
@@ -7451,7 +7901,9 @@ const file_daemon_proto_rawDesc = "" +
 	"\amessage\x18\x04 \x01(\tR\amessage\x12 \n" +
 	"\vuserMessage\x18\x05 \x01(\tR\vuserMessage\x128\n" +
 	"\ttimestamp\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12=\n" +
-	"\bmetadata\x18\a \x03(\v2!.daemon.SystemEvent.MetadataEntryR\bmetadata\x1a;\n" +
+	"\bmetadata\x18\a \x03(\v2!.daemon.SystemEvent.MetadataEntryR\bmetadata\x12\x1e\n" +
+	"\n" +
+	"profile_id\x18\xe8\a \x01(\tR\tprofileId\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\":\n" +
@@ -7568,11 +8020,12 @@ const file_daemon_proto_rawDesc = "" +
 	"\x13ListProfilesRequest\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\"C\n" +
 	"\x14ListProfilesResponse\x12+\n" +
-	"\bprofiles\x18\x01 \x03(\v2\x0f.daemon.ProfileR\bprofiles\"J\n" +
+	"\bprofiles\x18\x01 \x03(\v2\x0f.daemon.ProfileR\bprofiles\"x\n" +
 	"\aProfile\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
 	"\tis_active\x18\x02 \x01(\bR\bisActive\x12\x0e\n" +
-	"\x02id\x18\x03 \x01(\tR\x02id\"\x19\n" +
+	"\x02id\x18\x03 \x01(\tR\x02id\x12,\n" +
+	"\x11connection_status\x18\xe8\a \x01(\tR\x10connectionStatus\"\x19\n" +
 	"\x17GetActiveProfileRequest\"h\n" +
 	"\x18GetActiveProfileResponse\x12 \n" +
 	"\vprofileName\x18\x01 \x01(\tR\vprofileName\x12\x1a\n" +
@@ -7586,32 +8039,40 @@ const file_daemon_proto_rawDesc = "" +
 	"\x0eLogoutResponse\"\x15\n" +
 	"\x13WailsUIReadyRequest\"\x16\n" +
 	"\x14WailsUIReadyResponse\"\x14\n" +
-	"\x12GetFeaturesRequest\"\xf6\x01\n" +
+	"\x12GetFeaturesRequest\"\xdb\x02\n" +
 	"\x13GetFeaturesResponse\x12)\n" +
 	"\x10disable_profiles\x18\x01 \x01(\bR\x0fdisableProfiles\x126\n" +
 	"\x17disable_update_settings\x18\x02 \x01(\bR\x15disableUpdateSettings\x12)\n" +
 	"\x10disable_networks\x18\x03 \x01(\bR\x0fdisableNetworks\x127\n" +
-	"\x15disable_advanced_view\x18\x04 \x01(\bH\x00R\x13disableAdvancedView\x88\x01\x01B\x18\n" +
+	"\x15disable_advanced_view\x18\x04 \x01(\bH\x00R\x13disableAdvancedView\x88\x01\x01\x12?\n" +
+	"\x1bconcurrent_profiles_enabled\x18\xe8\a \x01(\bR\x19concurrentProfilesEnabled\x12\"\n" +
+	"\fmax_sessions\x18\xe9\a \x01(\rR\vmaxSessionsB\x18\n" +
 	"\x16_disable_advanced_view\"3\n" +
 	"\x19MDMManagedFieldsViolation\x12\x16\n" +
 	"\x06fields\x18\x01 \x03(\tR\x06fields\"\x16\n" +
 	"\x14TriggerUpdateRequest\"M\n" +
 	"\x15TriggerUpdateResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1a\n" +
-	"\berrorMsg\x18\x02 \x01(\tR\berrorMsg\"<\n" +
+	"\berrorMsg\x18\x02 \x01(\tR\berrorMsg\"\x81\x01\n" +
 	"\x18GetPeerSSHHostKeyRequest\x12 \n" +
-	"\vpeerAddress\x18\x01 \x01(\tR\vpeerAddress\"\x85\x01\n" +
+	"\vpeerAddress\x18\x01 \x01(\tR\vpeerAddress\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"\x85\x01\n" +
 	"\x19GetPeerSSHHostKeyResponse\x12\x1e\n" +
 	"\n" +
 	"sshHostKey\x18\x01 \x01(\fR\n" +
 	"sshHostKey\x12\x16\n" +
 	"\x06peerIP\x18\x02 \x01(\tR\x06peerIP\x12\x1a\n" +
 	"\bpeerFQDN\x18\x03 \x01(\tR\bpeerFQDN\x12\x14\n" +
-	"\x05found\x18\x04 \x01(\bR\x05found\"k\n" +
+	"\x05found\x18\x04 \x01(\bR\x05found\"\xb0\x01\n" +
 	"\x15RequestJWTAuthRequest\x12\x17\n" +
 	"\x04hint\x18\x01 \x01(\tH\x00R\x04hint\x88\x01\x01\x120\n" +
-	"\x13hasGraphicalSession\x18\x02 \x01(\bR\x13hasGraphicalSessionB\a\n" +
-	"\x05_hint\"\x9a\x02\n" +
+	"\x13hasGraphicalSession\x18\x02 \x01(\bR\x13hasGraphicalSession\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x01R\asession\x88\x01\x01B\a\n" +
+	"\x05_hintB\n" +
+	"\n" +
+	"\b_session\"\x9a\x02\n" +
 	"\x16RequestJWTAuthResponse\x12(\n" +
 	"\x0fverificationURI\x18\x01 \x01(\tR\x0fverificationURI\x128\n" +
 	"\x17verificationURIComplete\x18\x02 \x01(\tR\x17verificationURIComplete\x12\x1a\n" +
@@ -7621,20 +8082,26 @@ const file_daemon_proto_rawDesc = "" +
 	"deviceCode\x12\x1c\n" +
 	"\texpiresIn\x18\x05 \x01(\x03R\texpiresIn\x12 \n" +
 	"\vcachedToken\x18\x06 \x01(\tR\vcachedToken\x12 \n" +
-	"\vmaxTokenAge\x18\a \x01(\x03R\vmaxTokenAge\"Q\n" +
+	"\vmaxTokenAge\x18\a \x01(\x03R\vmaxTokenAge\"\x96\x01\n" +
 	"\x13WaitJWTTokenRequest\x12\x1e\n" +
 	"\n" +
 	"deviceCode\x18\x01 \x01(\tR\n" +
 	"deviceCode\x12\x1a\n" +
-	"\buserCode\x18\x02 \x01(\tR\buserCode\"h\n" +
+	"\buserCode\x18\x02 \x01(\tR\buserCode\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"h\n" +
 	"\x14WaitJWTTokenResponse\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1c\n" +
 	"\ttokenType\x18\x02 \x01(\tR\ttokenType\x12\x1c\n" +
-	"\texpiresIn\x18\x03 \x01(\x03R\texpiresIn\"u\n" +
+	"\texpiresIn\x18\x03 \x01(\x03R\texpiresIn\"\xba\x01\n" +
 	"\x1fRequestExtendAuthSessionRequest\x12\x17\n" +
 	"\x04hint\x18\x01 \x01(\tH\x00R\x04hint\x88\x01\x01\x120\n" +
-	"\x13hasGraphicalSession\x18\x02 \x01(\bR\x13hasGraphicalSessionB\a\n" +
-	"\x05_hint\"\xe0\x01\n" +
+	"\x13hasGraphicalSession\x18\x02 \x01(\bR\x13hasGraphicalSession\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x01R\asession\x88\x01\x01B\a\n" +
+	"\x05_hintB\n" +
+	"\n" +
+	"\b_session\"\xe0\x01\n" +
 	" RequestExtendAuthSessionResponse\x12(\n" +
 	"\x0fverificationURI\x18\x01 \x01(\tR\x0fverificationURI\x128\n" +
 	"\x17verificationURIComplete\x18\x02 \x01(\tR\x17verificationURIComplete\x12\x1a\n" +
@@ -7642,15 +8109,21 @@ const file_daemon_proto_rawDesc = "" +
 	"\n" +
 	"deviceCode\x18\x04 \x01(\tR\n" +
 	"deviceCode\x12\x1c\n" +
-	"\texpiresIn\x18\x05 \x01(\x03R\texpiresIn\"Z\n" +
+	"\texpiresIn\x18\x05 \x01(\x03R\texpiresIn\"\x9f\x01\n" +
 	"\x1cWaitExtendAuthSessionRequest\x12\x1e\n" +
 	"\n" +
 	"deviceCode\x18\x01 \x01(\tR\n" +
 	"deviceCode\x12\x1a\n" +
-	"\buserCode\x18\x02 \x01(\tR\buserCode\"g\n" +
+	"\buserCode\x18\x02 \x01(\tR\buserCode\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"g\n" +
 	"\x1dWaitExtendAuthSessionResponse\x12F\n" +
-	"\x10sessionExpiresAt\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x10sessionExpiresAt\"\x1e\n" +
-	"\x1cDismissSessionWarningRequest\"\x1f\n" +
+	"\x10sessionExpiresAt\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x10sessionExpiresAt\"c\n" +
+	"\x1cDismissSessionWarningRequest\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"\x1f\n" +
 	"\x1dDismissSessionWarningResponse\"\x18\n" +
 	"\x16StartCPUProfileRequest\"\x19\n" +
 	"\x17StartCPUProfileResponse\"\x17\n" +
@@ -7659,7 +8132,7 @@ const file_daemon_proto_rawDesc = "" +
 	"\x16InstallerResultRequest\"O\n" +
 	"\x17InstallerResultResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1a\n" +
-	"\berrorMsg\x18\x02 \x01(\tR\berrorMsg\"\x87\x02\n" +
+	"\berrorMsg\x18\x02 \x01(\tR\berrorMsg\"\xcc\x02\n" +
 	"\x14ExposeServiceRequest\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\rR\x04port\x122\n" +
 	"\bprotocol\x18\x02 \x01(\x0e2\x16.daemon.ExposeProtocolR\bprotocol\x12\x10\n" +
@@ -7671,7 +8144,10 @@ const file_daemon_proto_rawDesc = "" +
 	"\vname_prefix\x18\a \x01(\tR\n" +
 	"namePrefix\x12\x1f\n" +
 	"\vlisten_port\x18\b \x01(\rR\n" +
-	"listenPort\"Q\n" +
+	"listenPort\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"Q\n" +
 	"\x12ExposeServiceEvent\x122\n" +
 	"\x05ready\x18\x01 \x01(\v2\x1a.daemon.ExposeServiceReadyH\x00R\x05readyB\a\n" +
 	"\x05event\"\x9e\x01\n" +
@@ -7680,7 +8156,7 @@ const file_daemon_proto_rawDesc = "" +
 	"\vservice_url\x18\x02 \x01(\tR\n" +
 	"serviceUrl\x12\x16\n" +
 	"\x06domain\x18\x03 \x01(\tR\x06domain\x12,\n" +
-	"\x12port_auto_assigned\x18\x04 \x01(\bR\x10portAutoAssigned\"\xd9\x01\n" +
+	"\x12port_auto_assigned\x18\x04 \x01(\bR\x10portAutoAssigned\"\x9e\x02\n" +
 	"\x13StartCaptureRequest\x12\x1f\n" +
 	"\vtext_output\x18\x01 \x01(\bR\n" +
 	"textOutput\x12\x19\n" +
@@ -7689,14 +8165,39 @@ const file_daemon_proto_rawDesc = "" +
 	"\vfilter_expr\x18\x04 \x01(\tR\n" +
 	"filterExpr\x12\x18\n" +
 	"\averbose\x18\x05 \x01(\bR\averbose\x12\x14\n" +
-	"\x05ascii\x18\x06 \x01(\bR\x05ascii\"#\n" +
+	"\x05ascii\x18\x06 \x01(\bR\x05ascii\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"#\n" +
 	"\rCapturePacket\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data\"P\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"\x95\x01\n" +
 	"\x19StartBundleCaptureRequest\x123\n" +
-	"\atimeout\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\atimeout\"\x1c\n" +
-	"\x1aStartBundleCaptureResponse\"\x1a\n" +
-	"\x18StopBundleCaptureRequest\"\x1b\n" +
-	"\x19StopBundleCaptureResponse*b\n" +
+	"\atimeout\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"\x1c\n" +
+	"\x1aStartBundleCaptureResponse\"_\n" +
+	"\x18StopBundleCaptureRequest\x127\n" +
+	"\asession\x18\xe8\a \x01(\v2\x17.daemon.SessionSelectorH\x00R\asession\x88\x01\x01B\n" +
+	"\n" +
+	"\b_session\"\x1b\n" +
+	"\x19StopBundleCaptureResponse\"G\n" +
+	"\x0fSessionSelector\x12\x18\n" +
+	"\aprofile\x18\x01 \x01(\tR\aprofile\x12\x1a\n" +
+	"\busername\x18\x02 \x01(\tR\busername\"\xac\x02\n" +
+	"\rSessionStatus\x12\x1d\n" +
+	"\n" +
+	"profile_id\x18\x01 \x01(\tR\tprofileId\x12!\n" +
+	"\fprofile_name\x18\x02 \x01(\tR\vprofileName\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\x12%\n" +
+	"\x0einterface_name\x18\x04 \x01(\tR\rinterfaceName\x12\x1d\n" +
+	"\n" +
+	"overlay_ip\x18\x05 \x01(\tR\toverlayIp\x12\x18\n" +
+	"\afocused\x18\x06 \x01(\bR\afocused\x12\x1f\n" +
+	"\bconflict\x18\a \x01(\tH\x00R\bconflict\x88\x01\x01\x123\n" +
+	"\vfull_status\x18\b \x01(\v2\x12.daemon.FullStatusR\n" +
+	"fullStatusB\v\n" +
+	"\t_conflict*b\n" +
 	"\bLogLevel\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\t\n" +
 	"\x05PANIC\x10\x01\x12\t\n" +
@@ -7779,7 +8280,7 @@ func file_daemon_proto_rawDescGZIP() []byte {
 }
 
 var file_daemon_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 110)
+var file_daemon_proto_msgTypes = make([]protoimpl.MessageInfo, 112)
 var file_daemon_proto_goTypes = []any{
 	(LogLevel)(0),                              // 0: daemon.LogLevel
 	(ExposeProtocol)(0),                        // 1: daemon.ExposeProtocol
@@ -7892,149 +8393,175 @@ var file_daemon_proto_goTypes = []any{
 	(*StartBundleCaptureResponse)(nil),         // 108: daemon.StartBundleCaptureResponse
 	(*StopBundleCaptureRequest)(nil),           // 109: daemon.StopBundleCaptureRequest
 	(*StopBundleCaptureResponse)(nil),          // 110: daemon.StopBundleCaptureResponse
-	nil,                                        // 111: daemon.Network.ResolvedIPsEntry
-	(*PortInfo_Range)(nil),                     // 112: daemon.PortInfo.Range
-	nil,                                        // 113: daemon.SystemEvent.MetadataEntry
-	(*durationpb.Duration)(nil),                // 114: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),              // 115: google.protobuf.Timestamp
+	(*SessionSelector)(nil),                    // 111: daemon.SessionSelector
+	(*SessionStatus)(nil),                      // 112: daemon.SessionStatus
+	nil,                                        // 113: daemon.Network.ResolvedIPsEntry
+	(*PortInfo_Range)(nil),                     // 114: daemon.PortInfo.Range
+	nil,                                        // 115: daemon.SystemEvent.MetadataEntry
+	(*durationpb.Duration)(nil),                // 116: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),              // 117: google.protobuf.Timestamp
 }
 var file_daemon_proto_depIdxs = []int32{
-	114, // 0: daemon.LoginRequest.dnsRouteInterval:type_name -> google.protobuf.Duration
-	25,  // 1: daemon.StatusResponse.fullStatus:type_name -> daemon.FullStatus
-	115, // 2: daemon.StatusResponse.sessionExpiresAt:type_name -> google.protobuf.Timestamp
-	115, // 3: daemon.PeerState.connStatusUpdate:type_name -> google.protobuf.Timestamp
-	115, // 4: daemon.PeerState.lastWireguardHandshake:type_name -> google.protobuf.Timestamp
-	114, // 5: daemon.PeerState.latency:type_name -> google.protobuf.Duration
-	23,  // 6: daemon.SSHServerState.sessions:type_name -> daemon.SSHSessionInfo
-	20,  // 7: daemon.FullStatus.managementState:type_name -> daemon.ManagementState
-	19,  // 8: daemon.FullStatus.signalState:type_name -> daemon.SignalState
-	18,  // 9: daemon.FullStatus.localPeerState:type_name -> daemon.LocalPeerState
-	17,  // 10: daemon.FullStatus.peers:type_name -> daemon.PeerState
-	21,  // 11: daemon.FullStatus.relays:type_name -> daemon.RelayState
-	22,  // 12: daemon.FullStatus.dns_servers:type_name -> daemon.NSGroupState
-	57,  // 13: daemon.FullStatus.events:type_name -> daemon.SystemEvent
-	24,  // 14: daemon.FullStatus.sshServerState:type_name -> daemon.SSHServerState
-	31,  // 15: daemon.ListNetworksResponse.routes:type_name -> daemon.Network
-	111, // 16: daemon.Network.resolvedIPs:type_name -> daemon.Network.ResolvedIPsEntry
-	112, // 17: daemon.PortInfo.range:type_name -> daemon.PortInfo.Range
-	32,  // 18: daemon.ForwardingRule.destinationPort:type_name -> daemon.PortInfo
-	32,  // 19: daemon.ForwardingRule.translatedPort:type_name -> daemon.PortInfo
-	33,  // 20: daemon.ForwardingRulesResponse.rules:type_name -> daemon.ForwardingRule
-	0,   // 21: daemon.GetLogLevelResponse.level:type_name -> daemon.LogLevel
-	0,   // 22: daemon.SetLogLevelRequest.level:type_name -> daemon.LogLevel
-	43,  // 23: daemon.ListStatesResponse.states:type_name -> daemon.State
-	52,  // 24: daemon.TracePacketRequest.tcp_flags:type_name -> daemon.TCPFlags
-	54,  // 25: daemon.TracePacketResponse.stages:type_name -> daemon.TraceStage
-	2,   // 26: daemon.SystemEvent.severity:type_name -> daemon.SystemEvent.Severity
-	3,   // 27: daemon.SystemEvent.category:type_name -> daemon.SystemEvent.Category
-	115, // 28: daemon.SystemEvent.timestamp:type_name -> google.protobuf.Timestamp
-	113, // 29: daemon.SystemEvent.metadata:type_name -> daemon.SystemEvent.MetadataEntry
-	57,  // 30: daemon.GetEventsResponse.events:type_name -> daemon.SystemEvent
-	114, // 31: daemon.SetConfigRequest.dnsRouteInterval:type_name -> google.protobuf.Duration
-	72,  // 32: daemon.ListProfilesResponse.profiles:type_name -> daemon.Profile
-	115, // 33: daemon.WaitExtendAuthSessionResponse.sessionExpiresAt:type_name -> google.protobuf.Timestamp
-	1,   // 34: daemon.ExposeServiceRequest.protocol:type_name -> daemon.ExposeProtocol
-	104, // 35: daemon.ExposeServiceEvent.ready:type_name -> daemon.ExposeServiceReady
-	114, // 36: daemon.StartCaptureRequest.duration:type_name -> google.protobuf.Duration
-	114, // 37: daemon.StartBundleCaptureRequest.timeout:type_name -> google.protobuf.Duration
-	30,  // 38: daemon.Network.ResolvedIPsEntry.value:type_name -> daemon.IPList
-	5,   // 39: daemon.DaemonService.Login:input_type -> daemon.LoginRequest
-	7,   // 40: daemon.DaemonService.WaitSSOLogin:input_type -> daemon.WaitSSOLoginRequest
-	9,   // 41: daemon.DaemonService.Up:input_type -> daemon.UpRequest
-	11,  // 42: daemon.DaemonService.Status:input_type -> daemon.StatusRequest
-	11,  // 43: daemon.DaemonService.SubscribeStatus:input_type -> daemon.StatusRequest
-	13,  // 44: daemon.DaemonService.Down:input_type -> daemon.DownRequest
-	15,  // 45: daemon.DaemonService.GetConfig:input_type -> daemon.GetConfigRequest
-	26,  // 46: daemon.DaemonService.ListNetworks:input_type -> daemon.ListNetworksRequest
-	28,  // 47: daemon.DaemonService.SelectNetworks:input_type -> daemon.SelectNetworksRequest
-	28,  // 48: daemon.DaemonService.DeselectNetworks:input_type -> daemon.SelectNetworksRequest
-	4,   // 49: daemon.DaemonService.ForwardingRules:input_type -> daemon.EmptyRequest
-	35,  // 50: daemon.DaemonService.DebugBundle:input_type -> daemon.DebugBundleRequest
-	37,  // 51: daemon.DaemonService.GetLogLevel:input_type -> daemon.GetLogLevelRequest
-	39,  // 52: daemon.DaemonService.SetLogLevel:input_type -> daemon.SetLogLevelRequest
-	44,  // 53: daemon.DaemonService.ListStates:input_type -> daemon.ListStatesRequest
-	46,  // 54: daemon.DaemonService.CleanState:input_type -> daemon.CleanStateRequest
-	48,  // 55: daemon.DaemonService.DeleteState:input_type -> daemon.DeleteStateRequest
-	50,  // 56: daemon.DaemonService.SetSyncResponsePersistence:input_type -> daemon.SetSyncResponsePersistenceRequest
-	53,  // 57: daemon.DaemonService.TracePacket:input_type -> daemon.TracePacketRequest
-	105, // 58: daemon.DaemonService.StartCapture:input_type -> daemon.StartCaptureRequest
-	107, // 59: daemon.DaemonService.StartBundleCapture:input_type -> daemon.StartBundleCaptureRequest
-	109, // 60: daemon.DaemonService.StopBundleCapture:input_type -> daemon.StopBundleCaptureRequest
-	56,  // 61: daemon.DaemonService.SubscribeEvents:input_type -> daemon.SubscribeRequest
-	58,  // 62: daemon.DaemonService.GetEvents:input_type -> daemon.GetEventsRequest
-	41,  // 63: daemon.DaemonService.RegisterUILog:input_type -> daemon.RegisterUILogRequest
-	60,  // 64: daemon.DaemonService.SwitchProfile:input_type -> daemon.SwitchProfileRequest
-	62,  // 65: daemon.DaemonService.SetConfig:input_type -> daemon.SetConfigRequest
-	64,  // 66: daemon.DaemonService.AddProfile:input_type -> daemon.AddProfileRequest
-	66,  // 67: daemon.DaemonService.RenameProfile:input_type -> daemon.RenameProfileRequest
-	68,  // 68: daemon.DaemonService.RemoveProfile:input_type -> daemon.RemoveProfileRequest
-	70,  // 69: daemon.DaemonService.ListProfiles:input_type -> daemon.ListProfilesRequest
-	73,  // 70: daemon.DaemonService.GetActiveProfile:input_type -> daemon.GetActiveProfileRequest
-	75,  // 71: daemon.DaemonService.Logout:input_type -> daemon.LogoutRequest
-	79,  // 72: daemon.DaemonService.GetFeatures:input_type -> daemon.GetFeaturesRequest
-	82,  // 73: daemon.DaemonService.TriggerUpdate:input_type -> daemon.TriggerUpdateRequest
-	84,  // 74: daemon.DaemonService.GetPeerSSHHostKey:input_type -> daemon.GetPeerSSHHostKeyRequest
-	86,  // 75: daemon.DaemonService.RequestJWTAuth:input_type -> daemon.RequestJWTAuthRequest
-	88,  // 76: daemon.DaemonService.WaitJWTToken:input_type -> daemon.WaitJWTTokenRequest
-	90,  // 77: daemon.DaemonService.RequestExtendAuthSession:input_type -> daemon.RequestExtendAuthSessionRequest
-	92,  // 78: daemon.DaemonService.WaitExtendAuthSession:input_type -> daemon.WaitExtendAuthSessionRequest
-	94,  // 79: daemon.DaemonService.DismissSessionWarning:input_type -> daemon.DismissSessionWarningRequest
-	96,  // 80: daemon.DaemonService.StartCPUProfile:input_type -> daemon.StartCPUProfileRequest
-	98,  // 81: daemon.DaemonService.StopCPUProfile:input_type -> daemon.StopCPUProfileRequest
-	100, // 82: daemon.DaemonService.GetInstallerResult:input_type -> daemon.InstallerResultRequest
-	102, // 83: daemon.DaemonService.ExposeService:input_type -> daemon.ExposeServiceRequest
-	77,  // 84: daemon.DaemonService.WailsUIReady:input_type -> daemon.WailsUIReadyRequest
-	6,   // 85: daemon.DaemonService.Login:output_type -> daemon.LoginResponse
-	8,   // 86: daemon.DaemonService.WaitSSOLogin:output_type -> daemon.WaitSSOLoginResponse
-	10,  // 87: daemon.DaemonService.Up:output_type -> daemon.UpResponse
-	12,  // 88: daemon.DaemonService.Status:output_type -> daemon.StatusResponse
-	12,  // 89: daemon.DaemonService.SubscribeStatus:output_type -> daemon.StatusResponse
-	14,  // 90: daemon.DaemonService.Down:output_type -> daemon.DownResponse
-	16,  // 91: daemon.DaemonService.GetConfig:output_type -> daemon.GetConfigResponse
-	27,  // 92: daemon.DaemonService.ListNetworks:output_type -> daemon.ListNetworksResponse
-	29,  // 93: daemon.DaemonService.SelectNetworks:output_type -> daemon.SelectNetworksResponse
-	29,  // 94: daemon.DaemonService.DeselectNetworks:output_type -> daemon.SelectNetworksResponse
-	34,  // 95: daemon.DaemonService.ForwardingRules:output_type -> daemon.ForwardingRulesResponse
-	36,  // 96: daemon.DaemonService.DebugBundle:output_type -> daemon.DebugBundleResponse
-	38,  // 97: daemon.DaemonService.GetLogLevel:output_type -> daemon.GetLogLevelResponse
-	40,  // 98: daemon.DaemonService.SetLogLevel:output_type -> daemon.SetLogLevelResponse
-	45,  // 99: daemon.DaemonService.ListStates:output_type -> daemon.ListStatesResponse
-	47,  // 100: daemon.DaemonService.CleanState:output_type -> daemon.CleanStateResponse
-	49,  // 101: daemon.DaemonService.DeleteState:output_type -> daemon.DeleteStateResponse
-	51,  // 102: daemon.DaemonService.SetSyncResponsePersistence:output_type -> daemon.SetSyncResponsePersistenceResponse
-	55,  // 103: daemon.DaemonService.TracePacket:output_type -> daemon.TracePacketResponse
-	106, // 104: daemon.DaemonService.StartCapture:output_type -> daemon.CapturePacket
-	108, // 105: daemon.DaemonService.StartBundleCapture:output_type -> daemon.StartBundleCaptureResponse
-	110, // 106: daemon.DaemonService.StopBundleCapture:output_type -> daemon.StopBundleCaptureResponse
-	57,  // 107: daemon.DaemonService.SubscribeEvents:output_type -> daemon.SystemEvent
-	59,  // 108: daemon.DaemonService.GetEvents:output_type -> daemon.GetEventsResponse
-	42,  // 109: daemon.DaemonService.RegisterUILog:output_type -> daemon.RegisterUILogResponse
-	61,  // 110: daemon.DaemonService.SwitchProfile:output_type -> daemon.SwitchProfileResponse
-	63,  // 111: daemon.DaemonService.SetConfig:output_type -> daemon.SetConfigResponse
-	65,  // 112: daemon.DaemonService.AddProfile:output_type -> daemon.AddProfileResponse
-	67,  // 113: daemon.DaemonService.RenameProfile:output_type -> daemon.RenameProfileResponse
-	69,  // 114: daemon.DaemonService.RemoveProfile:output_type -> daemon.RemoveProfileResponse
-	71,  // 115: daemon.DaemonService.ListProfiles:output_type -> daemon.ListProfilesResponse
-	74,  // 116: daemon.DaemonService.GetActiveProfile:output_type -> daemon.GetActiveProfileResponse
-	76,  // 117: daemon.DaemonService.Logout:output_type -> daemon.LogoutResponse
-	80,  // 118: daemon.DaemonService.GetFeatures:output_type -> daemon.GetFeaturesResponse
-	83,  // 119: daemon.DaemonService.TriggerUpdate:output_type -> daemon.TriggerUpdateResponse
-	85,  // 120: daemon.DaemonService.GetPeerSSHHostKey:output_type -> daemon.GetPeerSSHHostKeyResponse
-	87,  // 121: daemon.DaemonService.RequestJWTAuth:output_type -> daemon.RequestJWTAuthResponse
-	89,  // 122: daemon.DaemonService.WaitJWTToken:output_type -> daemon.WaitJWTTokenResponse
-	91,  // 123: daemon.DaemonService.RequestExtendAuthSession:output_type -> daemon.RequestExtendAuthSessionResponse
-	93,  // 124: daemon.DaemonService.WaitExtendAuthSession:output_type -> daemon.WaitExtendAuthSessionResponse
-	95,  // 125: daemon.DaemonService.DismissSessionWarning:output_type -> daemon.DismissSessionWarningResponse
-	97,  // 126: daemon.DaemonService.StartCPUProfile:output_type -> daemon.StartCPUProfileResponse
-	99,  // 127: daemon.DaemonService.StopCPUProfile:output_type -> daemon.StopCPUProfileResponse
-	101, // 128: daemon.DaemonService.GetInstallerResult:output_type -> daemon.InstallerResultResponse
-	103, // 129: daemon.DaemonService.ExposeService:output_type -> daemon.ExposeServiceEvent
-	78,  // 130: daemon.DaemonService.WailsUIReady:output_type -> daemon.WailsUIReadyResponse
-	85,  // [85:131] is the sub-list for method output_type
-	39,  // [39:85] is the sub-list for method input_type
-	39,  // [39:39] is the sub-list for extension type_name
-	39,  // [39:39] is the sub-list for extension extendee
-	0,   // [0:39] is the sub-list for field type_name
+	116, // 0: daemon.LoginRequest.dnsRouteInterval:type_name -> google.protobuf.Duration
+	111, // 1: daemon.WaitSSOLoginRequest.session:type_name -> daemon.SessionSelector
+	111, // 2: daemon.StatusRequest.session:type_name -> daemon.SessionSelector
+	25,  // 3: daemon.StatusResponse.fullStatus:type_name -> daemon.FullStatus
+	117, // 4: daemon.StatusResponse.sessionExpiresAt:type_name -> google.protobuf.Timestamp
+	112, // 5: daemon.StatusResponse.sessions:type_name -> daemon.SessionStatus
+	111, // 6: daemon.DownRequest.session:type_name -> daemon.SessionSelector
+	117, // 7: daemon.PeerState.connStatusUpdate:type_name -> google.protobuf.Timestamp
+	117, // 8: daemon.PeerState.lastWireguardHandshake:type_name -> google.protobuf.Timestamp
+	116, // 9: daemon.PeerState.latency:type_name -> google.protobuf.Duration
+	23,  // 10: daemon.SSHServerState.sessions:type_name -> daemon.SSHSessionInfo
+	20,  // 11: daemon.FullStatus.managementState:type_name -> daemon.ManagementState
+	19,  // 12: daemon.FullStatus.signalState:type_name -> daemon.SignalState
+	18,  // 13: daemon.FullStatus.localPeerState:type_name -> daemon.LocalPeerState
+	17,  // 14: daemon.FullStatus.peers:type_name -> daemon.PeerState
+	21,  // 15: daemon.FullStatus.relays:type_name -> daemon.RelayState
+	22,  // 16: daemon.FullStatus.dns_servers:type_name -> daemon.NSGroupState
+	57,  // 17: daemon.FullStatus.events:type_name -> daemon.SystemEvent
+	24,  // 18: daemon.FullStatus.sshServerState:type_name -> daemon.SSHServerState
+	111, // 19: daemon.ListNetworksRequest.session:type_name -> daemon.SessionSelector
+	31,  // 20: daemon.ListNetworksResponse.routes:type_name -> daemon.Network
+	111, // 21: daemon.SelectNetworksRequest.session:type_name -> daemon.SessionSelector
+	113, // 22: daemon.Network.resolvedIPs:type_name -> daemon.Network.ResolvedIPsEntry
+	114, // 23: daemon.PortInfo.range:type_name -> daemon.PortInfo.Range
+	32,  // 24: daemon.ForwardingRule.destinationPort:type_name -> daemon.PortInfo
+	32,  // 25: daemon.ForwardingRule.translatedPort:type_name -> daemon.PortInfo
+	33,  // 26: daemon.ForwardingRulesResponse.rules:type_name -> daemon.ForwardingRule
+	111, // 27: daemon.DebugBundleRequest.session:type_name -> daemon.SessionSelector
+	0,   // 28: daemon.GetLogLevelResponse.level:type_name -> daemon.LogLevel
+	0,   // 29: daemon.SetLogLevelRequest.level:type_name -> daemon.LogLevel
+	111, // 30: daemon.ListStatesRequest.session:type_name -> daemon.SessionSelector
+	43,  // 31: daemon.ListStatesResponse.states:type_name -> daemon.State
+	111, // 32: daemon.CleanStateRequest.session:type_name -> daemon.SessionSelector
+	111, // 33: daemon.DeleteStateRequest.session:type_name -> daemon.SessionSelector
+	111, // 34: daemon.SetSyncResponsePersistenceRequest.session:type_name -> daemon.SessionSelector
+	52,  // 35: daemon.TracePacketRequest.tcp_flags:type_name -> daemon.TCPFlags
+	111, // 36: daemon.TracePacketRequest.session:type_name -> daemon.SessionSelector
+	54,  // 37: daemon.TracePacketResponse.stages:type_name -> daemon.TraceStage
+	111, // 38: daemon.SubscribeRequest.session:type_name -> daemon.SessionSelector
+	2,   // 39: daemon.SystemEvent.severity:type_name -> daemon.SystemEvent.Severity
+	3,   // 40: daemon.SystemEvent.category:type_name -> daemon.SystemEvent.Category
+	117, // 41: daemon.SystemEvent.timestamp:type_name -> google.protobuf.Timestamp
+	115, // 42: daemon.SystemEvent.metadata:type_name -> daemon.SystemEvent.MetadataEntry
+	57,  // 43: daemon.GetEventsResponse.events:type_name -> daemon.SystemEvent
+	116, // 44: daemon.SetConfigRequest.dnsRouteInterval:type_name -> google.protobuf.Duration
+	72,  // 45: daemon.ListProfilesResponse.profiles:type_name -> daemon.Profile
+	111, // 46: daemon.GetPeerSSHHostKeyRequest.session:type_name -> daemon.SessionSelector
+	111, // 47: daemon.RequestJWTAuthRequest.session:type_name -> daemon.SessionSelector
+	111, // 48: daemon.WaitJWTTokenRequest.session:type_name -> daemon.SessionSelector
+	111, // 49: daemon.RequestExtendAuthSessionRequest.session:type_name -> daemon.SessionSelector
+	111, // 50: daemon.WaitExtendAuthSessionRequest.session:type_name -> daemon.SessionSelector
+	117, // 51: daemon.WaitExtendAuthSessionResponse.sessionExpiresAt:type_name -> google.protobuf.Timestamp
+	111, // 52: daemon.DismissSessionWarningRequest.session:type_name -> daemon.SessionSelector
+	1,   // 53: daemon.ExposeServiceRequest.protocol:type_name -> daemon.ExposeProtocol
+	111, // 54: daemon.ExposeServiceRequest.session:type_name -> daemon.SessionSelector
+	104, // 55: daemon.ExposeServiceEvent.ready:type_name -> daemon.ExposeServiceReady
+	116, // 56: daemon.StartCaptureRequest.duration:type_name -> google.protobuf.Duration
+	111, // 57: daemon.StartCaptureRequest.session:type_name -> daemon.SessionSelector
+	116, // 58: daemon.StartBundleCaptureRequest.timeout:type_name -> google.protobuf.Duration
+	111, // 59: daemon.StartBundleCaptureRequest.session:type_name -> daemon.SessionSelector
+	111, // 60: daemon.StopBundleCaptureRequest.session:type_name -> daemon.SessionSelector
+	25,  // 61: daemon.SessionStatus.full_status:type_name -> daemon.FullStatus
+	30,  // 62: daemon.Network.ResolvedIPsEntry.value:type_name -> daemon.IPList
+	5,   // 63: daemon.DaemonService.Login:input_type -> daemon.LoginRequest
+	7,   // 64: daemon.DaemonService.WaitSSOLogin:input_type -> daemon.WaitSSOLoginRequest
+	9,   // 65: daemon.DaemonService.Up:input_type -> daemon.UpRequest
+	11,  // 66: daemon.DaemonService.Status:input_type -> daemon.StatusRequest
+	11,  // 67: daemon.DaemonService.SubscribeStatus:input_type -> daemon.StatusRequest
+	13,  // 68: daemon.DaemonService.Down:input_type -> daemon.DownRequest
+	15,  // 69: daemon.DaemonService.GetConfig:input_type -> daemon.GetConfigRequest
+	26,  // 70: daemon.DaemonService.ListNetworks:input_type -> daemon.ListNetworksRequest
+	28,  // 71: daemon.DaemonService.SelectNetworks:input_type -> daemon.SelectNetworksRequest
+	28,  // 72: daemon.DaemonService.DeselectNetworks:input_type -> daemon.SelectNetworksRequest
+	4,   // 73: daemon.DaemonService.ForwardingRules:input_type -> daemon.EmptyRequest
+	35,  // 74: daemon.DaemonService.DebugBundle:input_type -> daemon.DebugBundleRequest
+	37,  // 75: daemon.DaemonService.GetLogLevel:input_type -> daemon.GetLogLevelRequest
+	39,  // 76: daemon.DaemonService.SetLogLevel:input_type -> daemon.SetLogLevelRequest
+	44,  // 77: daemon.DaemonService.ListStates:input_type -> daemon.ListStatesRequest
+	46,  // 78: daemon.DaemonService.CleanState:input_type -> daemon.CleanStateRequest
+	48,  // 79: daemon.DaemonService.DeleteState:input_type -> daemon.DeleteStateRequest
+	50,  // 80: daemon.DaemonService.SetSyncResponsePersistence:input_type -> daemon.SetSyncResponsePersistenceRequest
+	53,  // 81: daemon.DaemonService.TracePacket:input_type -> daemon.TracePacketRequest
+	105, // 82: daemon.DaemonService.StartCapture:input_type -> daemon.StartCaptureRequest
+	107, // 83: daemon.DaemonService.StartBundleCapture:input_type -> daemon.StartBundleCaptureRequest
+	109, // 84: daemon.DaemonService.StopBundleCapture:input_type -> daemon.StopBundleCaptureRequest
+	56,  // 85: daemon.DaemonService.SubscribeEvents:input_type -> daemon.SubscribeRequest
+	58,  // 86: daemon.DaemonService.GetEvents:input_type -> daemon.GetEventsRequest
+	41,  // 87: daemon.DaemonService.RegisterUILog:input_type -> daemon.RegisterUILogRequest
+	60,  // 88: daemon.DaemonService.SwitchProfile:input_type -> daemon.SwitchProfileRequest
+	62,  // 89: daemon.DaemonService.SetConfig:input_type -> daemon.SetConfigRequest
+	64,  // 90: daemon.DaemonService.AddProfile:input_type -> daemon.AddProfileRequest
+	66,  // 91: daemon.DaemonService.RenameProfile:input_type -> daemon.RenameProfileRequest
+	68,  // 92: daemon.DaemonService.RemoveProfile:input_type -> daemon.RemoveProfileRequest
+	70,  // 93: daemon.DaemonService.ListProfiles:input_type -> daemon.ListProfilesRequest
+	73,  // 94: daemon.DaemonService.GetActiveProfile:input_type -> daemon.GetActiveProfileRequest
+	75,  // 95: daemon.DaemonService.Logout:input_type -> daemon.LogoutRequest
+	79,  // 96: daemon.DaemonService.GetFeatures:input_type -> daemon.GetFeaturesRequest
+	82,  // 97: daemon.DaemonService.TriggerUpdate:input_type -> daemon.TriggerUpdateRequest
+	84,  // 98: daemon.DaemonService.GetPeerSSHHostKey:input_type -> daemon.GetPeerSSHHostKeyRequest
+	86,  // 99: daemon.DaemonService.RequestJWTAuth:input_type -> daemon.RequestJWTAuthRequest
+	88,  // 100: daemon.DaemonService.WaitJWTToken:input_type -> daemon.WaitJWTTokenRequest
+	90,  // 101: daemon.DaemonService.RequestExtendAuthSession:input_type -> daemon.RequestExtendAuthSessionRequest
+	92,  // 102: daemon.DaemonService.WaitExtendAuthSession:input_type -> daemon.WaitExtendAuthSessionRequest
+	94,  // 103: daemon.DaemonService.DismissSessionWarning:input_type -> daemon.DismissSessionWarningRequest
+	96,  // 104: daemon.DaemonService.StartCPUProfile:input_type -> daemon.StartCPUProfileRequest
+	98,  // 105: daemon.DaemonService.StopCPUProfile:input_type -> daemon.StopCPUProfileRequest
+	100, // 106: daemon.DaemonService.GetInstallerResult:input_type -> daemon.InstallerResultRequest
+	102, // 107: daemon.DaemonService.ExposeService:input_type -> daemon.ExposeServiceRequest
+	77,  // 108: daemon.DaemonService.WailsUIReady:input_type -> daemon.WailsUIReadyRequest
+	6,   // 109: daemon.DaemonService.Login:output_type -> daemon.LoginResponse
+	8,   // 110: daemon.DaemonService.WaitSSOLogin:output_type -> daemon.WaitSSOLoginResponse
+	10,  // 111: daemon.DaemonService.Up:output_type -> daemon.UpResponse
+	12,  // 112: daemon.DaemonService.Status:output_type -> daemon.StatusResponse
+	12,  // 113: daemon.DaemonService.SubscribeStatus:output_type -> daemon.StatusResponse
+	14,  // 114: daemon.DaemonService.Down:output_type -> daemon.DownResponse
+	16,  // 115: daemon.DaemonService.GetConfig:output_type -> daemon.GetConfigResponse
+	27,  // 116: daemon.DaemonService.ListNetworks:output_type -> daemon.ListNetworksResponse
+	29,  // 117: daemon.DaemonService.SelectNetworks:output_type -> daemon.SelectNetworksResponse
+	29,  // 118: daemon.DaemonService.DeselectNetworks:output_type -> daemon.SelectNetworksResponse
+	34,  // 119: daemon.DaemonService.ForwardingRules:output_type -> daemon.ForwardingRulesResponse
+	36,  // 120: daemon.DaemonService.DebugBundle:output_type -> daemon.DebugBundleResponse
+	38,  // 121: daemon.DaemonService.GetLogLevel:output_type -> daemon.GetLogLevelResponse
+	40,  // 122: daemon.DaemonService.SetLogLevel:output_type -> daemon.SetLogLevelResponse
+	45,  // 123: daemon.DaemonService.ListStates:output_type -> daemon.ListStatesResponse
+	47,  // 124: daemon.DaemonService.CleanState:output_type -> daemon.CleanStateResponse
+	49,  // 125: daemon.DaemonService.DeleteState:output_type -> daemon.DeleteStateResponse
+	51,  // 126: daemon.DaemonService.SetSyncResponsePersistence:output_type -> daemon.SetSyncResponsePersistenceResponse
+	55,  // 127: daemon.DaemonService.TracePacket:output_type -> daemon.TracePacketResponse
+	106, // 128: daemon.DaemonService.StartCapture:output_type -> daemon.CapturePacket
+	108, // 129: daemon.DaemonService.StartBundleCapture:output_type -> daemon.StartBundleCaptureResponse
+	110, // 130: daemon.DaemonService.StopBundleCapture:output_type -> daemon.StopBundleCaptureResponse
+	57,  // 131: daemon.DaemonService.SubscribeEvents:output_type -> daemon.SystemEvent
+	59,  // 132: daemon.DaemonService.GetEvents:output_type -> daemon.GetEventsResponse
+	42,  // 133: daemon.DaemonService.RegisterUILog:output_type -> daemon.RegisterUILogResponse
+	61,  // 134: daemon.DaemonService.SwitchProfile:output_type -> daemon.SwitchProfileResponse
+	63,  // 135: daemon.DaemonService.SetConfig:output_type -> daemon.SetConfigResponse
+	65,  // 136: daemon.DaemonService.AddProfile:output_type -> daemon.AddProfileResponse
+	67,  // 137: daemon.DaemonService.RenameProfile:output_type -> daemon.RenameProfileResponse
+	69,  // 138: daemon.DaemonService.RemoveProfile:output_type -> daemon.RemoveProfileResponse
+	71,  // 139: daemon.DaemonService.ListProfiles:output_type -> daemon.ListProfilesResponse
+	74,  // 140: daemon.DaemonService.GetActiveProfile:output_type -> daemon.GetActiveProfileResponse
+	76,  // 141: daemon.DaemonService.Logout:output_type -> daemon.LogoutResponse
+	80,  // 142: daemon.DaemonService.GetFeatures:output_type -> daemon.GetFeaturesResponse
+	83,  // 143: daemon.DaemonService.TriggerUpdate:output_type -> daemon.TriggerUpdateResponse
+	85,  // 144: daemon.DaemonService.GetPeerSSHHostKey:output_type -> daemon.GetPeerSSHHostKeyResponse
+	87,  // 145: daemon.DaemonService.RequestJWTAuth:output_type -> daemon.RequestJWTAuthResponse
+	89,  // 146: daemon.DaemonService.WaitJWTToken:output_type -> daemon.WaitJWTTokenResponse
+	91,  // 147: daemon.DaemonService.RequestExtendAuthSession:output_type -> daemon.RequestExtendAuthSessionResponse
+	93,  // 148: daemon.DaemonService.WaitExtendAuthSession:output_type -> daemon.WaitExtendAuthSessionResponse
+	95,  // 149: daemon.DaemonService.DismissSessionWarning:output_type -> daemon.DismissSessionWarningResponse
+	97,  // 150: daemon.DaemonService.StartCPUProfile:output_type -> daemon.StartCPUProfileResponse
+	99,  // 151: daemon.DaemonService.StopCPUProfile:output_type -> daemon.StopCPUProfileResponse
+	101, // 152: daemon.DaemonService.GetInstallerResult:output_type -> daemon.InstallerResultResponse
+	103, // 153: daemon.DaemonService.ExposeService:output_type -> daemon.ExposeServiceEvent
+	78,  // 154: daemon.DaemonService.WailsUIReady:output_type -> daemon.WailsUIReadyResponse
+	109, // [109:155] is the sub-list for method output_type
+	63,  // [63:109] is the sub-list for method input_type
+	63,  // [63:63] is the sub-list for extension type_name
+	63,  // [63:63] is the sub-list for extension extendee
+	0,   // [0:63] is the sub-list for field type_name
 }
 
 func init() { file_daemon_proto_init() }
@@ -8043,30 +8570,49 @@ func file_daemon_proto_init() {
 		return
 	}
 	file_daemon_proto_msgTypes[1].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[3].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[5].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[7].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[9].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[22].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[24].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[28].OneofWrappers = []any{
 		(*PortInfo_Port)(nil),
 		(*PortInfo_Range_)(nil),
 	}
+	file_daemon_proto_msgTypes[31].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[40].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[42].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[44].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[46].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[49].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[50].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[52].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[56].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[58].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[71].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[76].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[80].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[82].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[84].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[86].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[88].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[90].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[98].OneofWrappers = []any{}
 	file_daemon_proto_msgTypes[99].OneofWrappers = []any{
 		(*ExposeServiceEvent_Ready)(nil),
 	}
+	file_daemon_proto_msgTypes[101].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[103].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[105].OneofWrappers = []any{}
+	file_daemon_proto_msgTypes[108].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_daemon_proto_rawDesc), len(file_daemon_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   110,
+			NumMessages:   112,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
