@@ -35,7 +35,9 @@ type session struct {
 	clientRunningChan chan struct{}
 	clientGiveUpChan  chan struct{} // closed when connectWithRetryRuns goroutine exits
 
-	// restartDone is non-nil while an MDM restart is in progress, and closed when it ends.
+	// restart is the MDM restart in progress, nil when there is none. restartDone is closed
+	// when it ends.
+	restart     *runRestart
 	restartDone chan struct{}
 
 	connectClient *internal.ConnectClient
@@ -172,14 +174,19 @@ func (ss *session) goroutineAliveLocked() bool {
 // runningKey returns the profile the session is running. It reports false when nothing
 // runs: the daemon does not want to be connected, or the retry goroutine is gone, for
 // instance because a Login cancelled it to take over. A run an MDM restart is replacing
-// still counts, as its goroutine ends only on the way to the next one.
+// still counts, as its goroutine ends only on the way to the next one, unless someone took
+// the session over meanwhile.
 func (ss *session) runningKey() (profilemanager.SessionKey, bool) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if !ss.clientRunning || (!ss.goroutineAliveLocked() && ss.restartDone == nil) {
+	if !ss.clientRunning || (!ss.goroutineAliveLocked() && !ss.restartKeepsRunLocked()) {
 		return profilemanager.SessionKey{}, false
 	}
 	return ss.runKey, true
+}
+
+func (ss *session) restartKeepsRunLocked() bool {
+	return ss.restart != nil && ss.restart.running && ss.restart.actGeneration == ss.actGeneration
 }
 
 // runRestart is what an MDM restart copied from the session before releasing the locks
@@ -200,7 +207,7 @@ type runRestart struct {
 func (ss *session) beginRestart() (runRestart, bool) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if !ss.clientRunning || ss.restartDone != nil {
+	if !ss.clientRunning || ss.restart != nil {
 		return runRestart{}, false
 	}
 
@@ -208,6 +215,7 @@ func (ss *session) beginRestart() (runRestart, bool) {
 	if ss.goroutineAliveLocked() {
 		restart.key, restart.running = ss.runKey, true
 	}
+	ss.restart = &restart
 	ss.restartDone = make(chan struct{})
 	return restart, true
 }
@@ -215,9 +223,9 @@ func (ss *session) beginRestart() (runRestart, bool) {
 func (ss *session) endRestart() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if ss.restartDone != nil {
+	if ss.restart != nil {
 		close(ss.restartDone)
-		ss.restartDone = nil
+		ss.restart, ss.restartDone = nil, nil
 	}
 }
 
@@ -232,7 +240,7 @@ func (ss *session) restartStillWanted(restart runRestart) bool {
 func (ss *session) restarting() bool {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	return ss.restartDone != nil
+	return ss.restart != nil
 }
 
 // awaitRestart waits until no MDM restart is in progress. The caller must not hold

@@ -68,6 +68,8 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	if !s.session.restartStillWanted(restart) {
 		log.Info("MDM restart: the session was taken down or over during the wait, not restarting")
 		s.refreshSelectedConfig()
+		s.publishConfigChangedEvent(proto.MetadataSourceMDM)
+		s.publishPolicyApplied()
 		return nil
 	}
 
@@ -77,9 +79,14 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	}
 
 	// publishConfigChangedEvent has already fired inside
-	// restartEngineForMDMLocked with source="mdm". Emit an MDM-specific
-	// user-visible toast so the operator knows their IT policy was
-	// applied (UserMessage != "" triggers the GUI notifier).
+	// restartEngineForMDMLocked with source="mdm".
+	s.publishPolicyApplied()
+	return nil
+}
+
+// publishPolicyApplied emits an MDM-specific user-visible toast so the operator knows their
+// IT policy was applied (UserMessage != "" triggers the GUI notifier).
+func (s *Server) publishPolicyApplied() {
 	s.session.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
@@ -90,7 +97,6 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 			proto.MetadataTypeKey:   proto.MetadataTypePolicyApplied,
 		},
 	)
-	return nil
 }
 
 // publishConfigChangedEvent broadcasts a SystemEvent informing any active
@@ -151,8 +157,9 @@ func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, run
 }
 
 // refreshSelectedConfig re-reads the selected config, whose overlay the kill switches read,
-// for a policy change that restarted nothing. On a failure the config stays as it was and
-// the next Up, SwitchProfile or Login resolves it again.
+// for a policy change that did not replace it. An unreadable file must not leave them on the
+// old policy, so the new one then goes on a copy of what is there. The overlay cannot be
+// undone: what the policy dropped stays until the next load.
 func (s *Server) refreshSelectedConfig() {
 	key, config := s.session.selectedConfig()
 	if config == nil {
@@ -160,8 +167,10 @@ func (s *Server) refreshSelectedConfig() {
 	}
 	fresh, err := s.storedRunningConfig(key)
 	if err != nil {
-		log.Warnf("failed to apply the MDM policy to the selected profile: %v", err)
-		return
+		log.Warnf("failed to read the selected profile for the new MDM policy: %v", err)
+		overlaid := *config
+		overlaid.ApplyMDMPolicy(s.mdmLoader.Load())
+		fresh = &overlaid
 	}
 	s.session.setConfig(key, fresh)
 }

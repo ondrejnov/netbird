@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -288,6 +289,41 @@ func TestMDMRestart_RunCountsAsRunningAfterItsGoroutineEnded(t *testing.T) {
 	ss.endRestart()
 }
 
+// A restart only keeps a run alive that it is going to bring back. Logout and RemoveProfile
+// decide on what runningKey reports, and must not act on a profile that is not coming back.
+func TestMDMRestart_DoesNotKeepARunThatIsNotComingBack(t *testing.T) {
+	key := profilemanager.SessionKey{Profile: "work", Username: "user"}
+
+	t.Run("the run had already given up", func(t *testing.T) {
+		ss := newSession()
+		_, giveUp := ss.beginRun(key)
+		close(giveUp)
+
+		restart, ok := ss.beginRestart()
+		require.True(t, ok, "a client that wants to be running should be restartable")
+		defer ss.endRestart()
+
+		assert.False(t, restart.running, "the run was gone when the restart began")
+		_, running := ss.runningKey()
+		assert.False(t, running, "a run that gave up must not count as running")
+	})
+
+	t.Run("a Login took the session over", func(t *testing.T) {
+		ss := newSession()
+		_, giveUp := ss.beginRun(key)
+
+		_, ok := ss.beginRestart()
+		require.True(t, ok)
+		defer ss.endRestart()
+
+		ss.setActCancel(func() {})
+		close(giveUp)
+
+		_, running := ss.runningKey()
+		assert.False(t, running, "a run the restart will not bring back must not count as running")
+	})
+}
+
 // Each step that can replace what a restart is about ends it. A restart that misses one of
 // them either brings back a run the user took down, or orphans the one that replaced it.
 func TestRestartStillWanted(t *testing.T) {
@@ -373,4 +409,40 @@ func TestMDMRestart_DownDuringTheWaitStillAppliesThePolicy(t *testing.T) {
 	require.NoError(t, p.waitRestarted(t))
 
 	assert.True(t, s.checkProfilesDisabled(), "the new policy should be in force although nothing restarted")
+
+	var announced bool
+	for _, event := range s.session.statusRecorder.GetEventHistory() {
+		announced = announced || event.GetMetadata()[proto.MetadataTypeKey] == proto.MetadataTypePolicyApplied
+	}
+	assert.True(t, announced, "the operator should learn that the policy was applied")
+}
+
+// An unreadable profile file must not leave the kill switches on the old policy, and it is no
+// reason to move the selection.
+func TestMDMRestart_DownDuringTheWaitWithUnreadableProfileStillAppliesThePolicy(t *testing.T) {
+	p := startParkedRestart(t)
+	s, f := p.f.s, p.f
+
+	path, err := profileStateOf(f.active).FilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+
+	withMDMPolicy(t, s, mdm.NewPolicy(map[string]any{mdm.KeyDisableProfiles: true}))
+
+	down := make(chan error, 1)
+	go func() {
+		_, err := s.Down(context.Background(), &proto.DownRequest{})
+		down <- err
+	}()
+	require.Eventually(t, func() bool { return !s.session.isClientRunning() }, rpcDeadline, 10*time.Millisecond,
+		"Down stayed blocked while the MDM restart waited for the run to end")
+
+	p.endRun()
+	require.NoError(t, <-down)
+	require.NoError(t, p.waitRestarted(t))
+
+	assert.True(t, s.checkProfilesDisabled(), "the new policy should be in force")
+	key, _ := s.session.selectedConfig()
+	assert.Equal(t, f.active, key, "the selection should stay where it was")
+	assert.NoFileExists(t, path, "the refresh must not bring the profile back")
 }

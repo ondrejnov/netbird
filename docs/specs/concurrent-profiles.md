@@ -735,14 +735,17 @@ ve forku běží; co neběží, uveď v PR výslovně.
 
 - `onMDMPolicyChange` pod `Server.mutex` jen zkopíruje `runRestart` (klíč běhu, `giveUp`, generaci `actCancel`), zruší běh a
   zámek pustí. Po čekání zámek znovu vezme a restart provede, jen když `restartStillWanted`: `clientRunning` platí a
-  nikdo mezitím nevyměnil `actCancel`. Jinak skončí bez chyby a bez události `policy_applied`, novou politiku pro běh
-  načte další `Up`. Vybraný config se přesto načte znovu, protože z něj čtou kill switche politiku a `Down` v okně by je
-  jinak nechal na staré. Když není co restartovat vůbec, config se neobnoví, to je chování upstreamu.
+  nikdo mezitím nevyměnil `actCancel`. Jinak skončí bez chyby a novou politiku pro běh načte další `Up`. Vybraný config se
+  přesto obnoví a odejdou události `config_changed` a `policy_applied`, protože z něj čtou kill switche politiku a `Down` v
+  okně by je jinak nechal na staré. Při nečitelném souboru jde politika na kopii configu (I6), klíče, které z politiky
+  zmizely, v ní zůstanou do dalšího načtení. Když není co restartovat vůbec, config se neobnoví, to je chování upstreamu.
 - **Kdo v okně čekání co vidí:** `Down` a `Logout` projdou hned a restart se neprovede. `Login` a `WaitSSOLogin` projdou
   hned, převezmou session a restart se neprovede. `Up` a `Status` s `WaitForReady` počkají na konec restartu kanálem, s
   kontextem volajícího, takže se připojí k novému běhu. Ostatní RPC odpovídají ze stavu rušeného běhu.
 - `runningKey` po dobu restartu hlásí běh i po konci jeho gorutiny, jinak by `Logout` a residual cleanup rozhodovaly v
-  mezeře mezi starým a novým během o aktivním profilu.
+  mezeře mezi starým a novým během o aktivním profilu. Platí jen pro běh, který restart vrátí: ne pro běh, který vzdal už
+  před ním, ani když session mezitím převzal `Login`.
 - Druhý souběžný restart `beginRestart` odmítne. Ticker běží v jedné gorutině, takže v provozu nenastává.
-- **Beze změny:** vypršení 10 s vrátí chybu a nový běh se nespustí. `Status` s `WaitForReady`, který už čeká, když restart
-  začne, skončí se starým `giveUp` jako dřív.
+- **Beze změny z upstreamu:** vypršení 10 s nebo nečitelný config běhu vrátí chybu, nový běh se nespustí a config se
+  neobnoví. `Up` ve `waitForUp` a `Status` s `WaitForReady`, které už čekají, když restart začne, skončí se starým `giveUp`
+  jako dřív: `Up` chybou `client gave up to connect`, `Status` odpovědí.
