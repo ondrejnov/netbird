@@ -62,7 +62,9 @@ func TestServer_Up(t *testing.T) {
 		t.Fatalf("failed to set active profile state: %v", err)
 	}
 
-	s := New(ctx, "console", "", false, false, false, false)
+	rootCtx, cancelRoot := context.WithCancel(ctx)
+	s := New(rootCtx, "console", "", false, false, false, false)
+	stopRunAtCleanup(t, s, cancelRoot)
 	err = s.Start()
 	require.NoError(t, err)
 
@@ -77,6 +79,24 @@ func TestServer_Up(t *testing.T) {
 	log.Errorf("error from Up: %v", err)
 
 	assert.Contains(t, err.Error(), "context deadline exceeded")
+}
+
+// stopRunAtCleanup ends the run s started before the earlier cleanups of the test restore the
+// profile paths, which are globals the run reads for its state file on every attempt.
+func stopRunAtCleanup(t *testing.T, s *Server, cancelRoot context.CancelFunc) {
+	t.Helper()
+	t.Cleanup(func() {
+		cancelRoot()
+		_, giveUp := s.session.runChans()
+		if giveUp == nil {
+			return
+		}
+		select {
+		case <-giveUp:
+		case <-time.After(30 * time.Second):
+			t.Error("the run did not end after the root context was cancelled")
+		}
+	})
 }
 
 type mockSubscribeEventsServer struct {
@@ -132,7 +152,9 @@ func TestServer_SubcribeEvents(t *testing.T) {
 		t.Fatalf("failed to set active profile state: %v", err)
 	}
 
-	s := New(ctx, "console", "", false, false, false, false)
+	rootCtx, cancelRoot := context.WithCancel(ctx)
+	s := New(rootCtx, "console", "", false, false, false, false)
+	stopRunAtCleanup(t, s, cancelRoot)
 
 	err = s.Start()
 	require.NoError(t, err)
