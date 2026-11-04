@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R5 jsou rozhodnutá, R6 čeká na potvrzení (viz 2.2). F1: PR 1, 2, 3, 4, 6 a 8 jsou otevřené ve forku, zbývají PR 5 a 7 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R5 jsou rozhodnutá, R6 čeká na potvrzení (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. Další krok je F2, před ním rozhodnout 2.3 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -99,11 +99,32 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q6 | Kolize DNS domény (sekce 6) | Neimplementováno, rozhraní pro zjištění kolize není známé | 6 |
 | Q7 | Prefixové porovnání v ICE blacklistu | `wt1` vyloučí i `wt10`, chyba na straně vyloučení | 8 |
 | Q8 | Ověření DNS na reálném resolved a NM | Harness je Alpine bez systemd, testy běží proti falešným službám na D-Bus | 6 |
+| Q9 | **Vynucení I3, I4 v userspace režimu (sekce 7)** | Otevřené. Na hostiteli s nativním firewallem `NewFirewall` uspfilter nevytvoří, takže tabulka režimů neplatí. Návrh: vynucení se řídí typem firewallu, jaderná izolace je povinná všude, kde existuje nativní backend | 5, 13 |
+| Q10 | **`nativeRouter` v uspfilteru** | Otevřené. Routovaný paket jde do jádra bez kontroly I3. Návrh: v tomto režimu povinně jaderná izolace | 5, 13 |
+| Q11 | Minimální jádro | `own` potřebuje jádro 5.6 a novější, na starším se session nespustí | 5 |
+| Q12 | iptables bez modulů ipset | Izolace odmítne session (I6), bez fallbacku | 5 |
+| Q13 | Session s v6 bez funkční v6 izolace | Session se odmítne, přestože je IPv6 soft. Alternativa: odebrat v6 a pokračovat | 5, 13 |
+| Q14 | Opakování `Verify` | Jen po instalaci enginu, cizí pravidlo nad skokem v iptables by do té doby izolaci obešlo | 5, 13 |
+| Q15 | Překryv v6 u běžící session | `Add` hlásí `IPv6Disabled`, daemon musí v6 odebrat za běhu | 5, 15 |
+| Q16 | Adresy na interface jiné session mimo její prefix, např. `fe80::` | Nezahrnuto do `overlays` | 5 |
+| Q17 | Formát `sessions.json` (sekce 10 chce schválení) | `{version:1, sessions:[{profile, username, slot, desired}]}`, neznámé pole je poškození | 7 |
+| Q18 | Explicitní `WgPort` obsazený cizím procesem | Port z alokátoru jako dnes, alternativa je odmítnutí | 7 |
+| Q19 | Název kolidující s cizím linkem, který není session | Neřešeno, `wg_link_linux.go` by ho smazal a od zbytku po pádu ho odlišit neumí | 7, 13 |
+| Q20 | Foreground režim a zámek `sessions.json` | Druhá instance se odmítne. Návrh: foreground `Slots` vůbec neotevírá | 7, 13 |
+| Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
+| Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
 
 **Nový nález, globální stav v závislosti:** `allocSetID` v `github.com/google/nftables@v0.3.0/set.go:48,505` je
 nesynchronizovaný čítač procesu. Na `origin/main` ho shodí `TestEngine_MultiplePeers` pod `-race` (1 ze 4 běhů).
 Souběžné session ho budou spouštět běžně, takže před PR 13 je nutné serializovat `AddSet` napříč managery v procesu,
 nebo přiřazovat `Set.ID` ze sdíleného atomického čítače. Závislost se bez souhlasu nezvedá.
+
+**Známá selhání i na čistém `origin/main`:** `TestUDPTracker_Cleanup` pod `-race` a občas čtyři testy
+`TestNftablesManager*Compatibility*` v harnessu (`iptables-save` vrací prázdný výstup).
+
+**Přiřazení pro PR 13:** předat jednu instanci `Isolation`, `HostState` a `Accounting` všem session, zdroj izolace
+vyžadovat při zapnuté gate (nil odmítnout), volat `Add` před peery a `Verify` po enginu, `RemoveAll` pro oba backendy
+při residual cleanupu, a `RetryHandovers` při obnově interface.
 
 **Ověřování:** testy klienta se na hostiteli s běžícím daemonem nespouštějí. `TestLogin` bez `--daemon-addr` mluví se
 skutečným socketem a přepíše jeho config. Privilegovaný harness se při ověřování oprav spouští s `-count=1`.
