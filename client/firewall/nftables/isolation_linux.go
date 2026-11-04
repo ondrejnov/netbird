@@ -61,9 +61,10 @@ func (n IfaceName) validate() error {
 
 // AddResult is what a session has to honor after a successful Add.
 type AddResult struct {
-	// IPv6Disabled means the IPv6 overlay overlaps the one of another session and the session
-	// is isolated without it. The session must not put the IPv6 address on its interface: the
-	// rules go by address, so a peer of the other session would reach it there.
+	// IPv6Disabled means the session is isolated without the IPv6 overlay it asked for: it
+	// overlaps the one of another session, or the kernel refused it. The session must not put
+	// the IPv6 address on its interface: the rules go by address, so a peer of the other session
+	// would reach it there.
 	IPv6Disabled bool
 }
 
@@ -104,8 +105,9 @@ func NewIsolation() *Isolation {
 
 // Add isolates the session on the given interface from all others, or updates its overlays
 // when it is already known. A session must not run when Add fails: nothing is changed then.
-// An overlapping IPv4 overlay fails with ErrOverlayOverlap, an overlapping IPv6 overlay makes
-// the session continue without v6, which the result reports.
+// An overlapping IPv4 overlay fails with ErrOverlayOverlap. An overlapping IPv6 overlay, and a
+// kernel that refuses the IPv6 part, make the session continue without the new v6 overlay,
+// which the result reports. A known session keeps the one it had.
 func (i *Isolation) Add(name IfaceName, addr wgaddr.Address) (AddResult, error) {
 	if err := name.validate(); err != nil {
 		return AddResult{}, err
@@ -122,30 +124,54 @@ func (i *Isolation) Add(name IfaceName, addr wgaddr.Address) (AddResult, error) 
 	if err != nil {
 		return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
 	}
-	result := AddResult{IPv6Disabled: requested.overlay6.IsValid() && !member.overlay6.IsValid()}
 
 	previous, known := i.members[name]
 	if known && previous == member {
-		return result, nil
+		return ipv6Result(requested, member), nil
 	}
 
+	if err := i.applyMember(name, previous, member, known); err != nil {
+		// Only a v6 overlay that changes can be what the kernel refused. A known session keeps
+		// the one it has: its elements are in the sets, and a transient error must not take them.
+		if !member.overlay6.IsValid() || member.overlay6 == previous.overlay6 {
+			return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
+		}
+		log.Warnf("session %s continues without its new IPv6 isolation: %v", name, err)
+		member.overlay6 = previous.overlay6
+		if previous == member {
+			return ipv6Result(requested, member), nil
+		}
+		if err := i.applyMember(name, previous, member, known); err != nil {
+			return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
+		}
+	}
+	return ipv6Result(requested, member), nil
+}
+
+func ipv6Result(requested, stored isolationMember) AddResult {
+	return AddResult{IPv6Disabled: requested.overlay6.IsValid() && stored.overlay6 != requested.overlay6}
+}
+
+// applyMember writes the member in one batch, which the kernel takes whole or not at all, and
+// records it when it did.
+func (i *Isolation) applyMember(name IfaceName, previous, member isolationMember, known bool) error {
 	conn := &nftables.Conn{}
 	sets := newIsolationSets()
 	if len(i.members) == 0 {
 		// Whatever a crashed daemon left behind must not count as isolation of this one.
 		if err := queueIsolationInstall(conn, sets); err != nil {
-			return AddResult{}, fmt.Errorf("install isolation: %w", err)
+			return fmt.Errorf("install isolation: %w", err)
 		}
 	}
 	if err := sets.queueMemberChange(conn, name, previous, member, known); err != nil {
-		return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
+		return err
 	}
 	if err := conn.Flush(); err != nil {
-		return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
+		return err
 	}
 
 	i.members[name] = member
-	return result, nil
+	return nil
 }
 
 func (i *Isolation) resolveOverlaps(name IfaceName, member isolationMember) (isolationMember, error) {

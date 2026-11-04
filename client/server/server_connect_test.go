@@ -10,20 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/netbirdio/netbird/client/internal"
-	"github.com/netbirdio/netbird/client/internal/auth"
-	"github.com/netbirdio/netbird/client/internal/peer"
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
 func newTestServer() *Server {
 	return &Server{
-		rootCtx:        context.Background(),
-		statusRecorder: peer.NewRecorder(""),
-		// New always populates the SSH JWT cache and the logout and
-		// profile-switch paths call into it unconditionally, so a Server
-		// assembled field by field has to populate it too.
-		jwtCache:              newJWTCache(),
-		extendAuthSessionFlow: auth.NewPendingFlow(),
+		rootCtx: context.Background(),
+		session: newSession(),
 	}
 }
 
@@ -31,9 +25,9 @@ func newDummyConnectClient(ctx context.Context) *internal.ConnectClient {
 	return internal.NewConnectClient(ctx, nil, nil)
 }
 
-// TestConnectSetsClientWithMutex validates that connect() sets s.connectClient
-// under mutex protection so concurrent readers see a consistent value.
-func TestConnectSetsClientWithMutex(t *testing.T) {
+// TestConnectPublishedClientIsVisible validates that the client connect() publishes on
+// the session is the one its readers see.
+func TestConnectPublishedClientIsVisible(t *testing.T) {
 	s := newTestServer()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -41,18 +35,14 @@ func TestConnectSetsClientWithMutex(t *testing.T) {
 	// Manually simulate what connect() does (without calling Run which panics without full setup)
 	client := newDummyConnectClient(ctx)
 
-	s.mutex.Lock()
-	s.connectClient = client
-	s.mutex.Unlock()
+	s.session.setClient(client)
 
-	// Verify the assignment is visible under mutex
-	s.mutex.Lock()
-	assert.Equal(t, client, s.connectClient, "connectClient should be set")
-	s.mutex.Unlock()
+	assert.Equal(t, client, s.session.client(), "connectClient should be set")
 }
 
-// TestConcurrentConnectClientAccess validates that concurrent reads of
-// s.connectClient under mutex don't race with a write.
+// TestConcurrentConnectClientAccess validates that a read of the connect client does
+// not race with a write. The readers deliberately skip Server.mutex: runProbes and
+// CleanState read it that way, so under -race this holds only because of session.mu.
 func TestConcurrentConnectClientAccess(t *testing.T) {
 	s := newTestServer()
 	ctx := context.Background()
@@ -68,9 +58,7 @@ func TestConcurrentConnectClientAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.mutex.Lock()
-			c := s.connectClient
-			s.mutex.Unlock()
+			c := s.session.client()
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -85,7 +73,7 @@ func TestConcurrentConnectClientAccess(t *testing.T) {
 	// Simulate connect() writing under mutex
 	time.Sleep(5 * time.Millisecond)
 	s.mutex.Lock()
-	s.connectClient = client
+	s.session.setClient(client)
 	s.mutex.Unlock()
 
 	wg.Wait()
@@ -98,23 +86,23 @@ func TestConcurrentConnectClientAccess(t *testing.T) {
 func TestCleanupConnection_ClearsConnectClient(t *testing.T) {
 	s := newTestServer()
 	_, cancel := context.WithCancel(context.Background())
-	s.actCancel = cancel
+	s.session.actCancel = cancel
 
-	s.connectClient = newDummyConnectClient(context.Background())
-	s.clientRunning = true
+	s.session.connectClient = newDummyConnectClient(context.Background())
+	s.session.clientRunning = true
 
 	err := s.cleanupConnection()
 	require.NoError(t, err)
 
-	assert.Nil(t, s.connectClient, "connectClient should be nil after cleanup")
-	assert.False(t, s.clientRunning, "clientRunning should be cleared after cleanup (intent = down)")
+	assert.Nil(t, s.session.connectClient, "connectClient should be nil after cleanup")
+	assert.False(t, s.session.clientRunning, "clientRunning should be cleared after cleanup (intent = down)")
 }
 
 // TestCleanState_NilConnectClient validates that CleanState doesn't panic
 // when connectClient is nil.
 func TestCleanState_NilConnectClient(t *testing.T) {
 	s := newTestServer()
-	s.connectClient = nil
+	s.session.connectClient = nil
 	s.profileManager = nil // will cause error if it tries to proceed past the nil check
 
 	// Should not panic — the nil check should prevent calling Status() on nil
@@ -127,7 +115,7 @@ func TestCleanState_NilConnectClient(t *testing.T) {
 // when connectClient is nil.
 func TestDeleteState_NilConnectClient(t *testing.T) {
 	s := newTestServer()
-	s.connectClient = nil
+	s.session.connectClient = nil
 	s.profileManager = nil
 
 	assert.NotPanics(t, func() {
@@ -142,14 +130,14 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 	s := newTestServer()
 
 	// Simulate state after a successful connection
-	s.clientRunning = true
-	s.clientRunningChan = make(chan struct{})
-	close(s.clientRunningChan) // closed when engine started
-	s.clientGiveUpChan = make(chan struct{})
-	s.connectClient = newDummyConnectClient(context.Background())
+	s.session.clientRunning = true
+	s.session.clientRunningChan = make(chan struct{})
+	close(s.session.clientRunningChan) // closed when engine started
+	s.session.clientGiveUpChan = make(chan struct{})
+	s.session.connectClient = newDummyConnectClient(context.Background())
 
 	_, cancel := context.WithCancel(context.Background())
-	s.actCancel = cancel
+	s.session.actCancel = cancel
 
 	// Simulate Down(): cleanupConnection sets connectClient = nil and
 	// flips clientRunning to false (intent = down). The connectionGoroutineRunning state
@@ -163,8 +151,8 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 	// cleared by cleanupConnection), connectionGoroutineRunning may still be true
 	// (goroutine teardown is independent of the intent flag).
 	s.mutex.Lock()
-	assert.Nil(t, s.connectClient, "connectClient should be nil after cleanup")
-	assert.False(t, s.clientRunning, "clientRunning should be cleared by cleanupConnection (intent = down)")
+	assert.Nil(t, s.session.client(), "connectClient should be nil after cleanup")
+	assert.False(t, s.session.isClientRunning(), "clientRunning should be cleared by cleanupConnection (intent = down)")
 	s.mutex.Unlock()
 
 	// waitForUp() returns immediately due to stale closed clientRunningChan
@@ -182,7 +170,7 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 		assert.NoError(t, err, "waitForUp returns success on stale channel")
 		// But connectClient is still nil — this is the stale state issue
 		s.mutex.Lock()
-		assert.Nil(t, s.connectClient, "connectClient is nil despite waitForUp success")
+		assert.Nil(t, s.session.client(), "connectClient is nil despite waitForUp success")
 		s.mutex.Unlock()
 	case <-time.After(1 * time.Second):
 		t.Fatal("waitForUp should have returned immediately due to stale closed channel")
@@ -194,4 +182,39 @@ func TestDownThenUp_StaleRunningChan(t *testing.T) {
 func TestConnectClient_EngineNilOnFreshClient(t *testing.T) {
 	client := newDummyConnectClient(context.Background())
 	assert.Nil(t, client.Engine(), "engine should be nil on fresh ConnectClient")
+}
+
+// An MDM restart holds Server.mutex while it waits for the retry goroutine to end, up to its
+// timeout. A goroutine that needs that lock to publish its client can only end once the wait
+// is over, so the restart gives up and every RPC stands still meanwhile.
+func TestConnect_DoesNotNeedServerMutex(t *testing.T) {
+	s, _, profName, username, cfgPath := setupServerWithProfile(t)
+	cfg, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
+		ConfigPath:    cfgPath,
+		ManagementURL: "http://127.0.0.1:1",
+	})
+	require.NoError(t, err)
+
+	// The cancelled context stands for the restart that is waiting: the attempt is on its way out.
+	ctx, cancel := s.session.runContext(context.Background())
+	cancel()
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	key := profilemanager.SessionKey{Profile: profilemanager.ID(profName), Username: username}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := s.connect(ctx, key, cfg, s.session.statusRecorder, make(chan struct{})); err != nil {
+			t.Logf("connect returned: %v", err)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("connect did not end while Server.mutex was held")
+	}
+	assert.NotNil(t, s.session.client(), "connect should have published its client")
 }

@@ -8,12 +8,9 @@ import (
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 )
 
-// SessionKey identifies one session. It includes the user because legacy profile
-// IDs are not unique across users.
-type SessionKey struct {
-	Profile  profilemanager.ID
-	Username string
-}
+// SessionKey identifies one session. The type lives in profilemanager, which state
+// paths are derived in and which cannot import this package.
+type SessionKey = profilemanager.SessionKey
 
 // RoutingBase describes the routing state shared by all holders.
 type RoutingBase struct {

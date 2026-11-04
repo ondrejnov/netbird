@@ -245,7 +245,8 @@ func runInForegroundMode(ctx context.Context, cmd *cobra.Command, activeProf *pr
 	// Foreground mode is particularly exposed in containers: a crashed
 	// container restarts inside the same (pod) network namespace, so stale
 	// state survives while the process does not.
-	if err := server.RestoreResidualState(ctx, profilemanager.NewServiceManager(configPath).GetStatePath()); err != nil {
+	statePath := profilemanager.NewServiceManager(configPath).GetStatePath()
+	if err := server.RestoreResidualState(ctx, statePath); err != nil {
 		log.Warnf("failed to restore residual state: %v", err)
 	}
 
@@ -266,7 +267,7 @@ func runInForegroundMode(ctx context.Context, cmd *cobra.Command, activeProf *pr
 	r := peer.NewRecorder(config.ManagementURL.String())
 	r.GetFullStatus()
 
-	connectClient := internal.NewConnectClient(ctx, config, r)
+	connectClient := internal.NewConnectClient(ctx, config, r, internal.WithStatePath(statePath))
 	SetupDebugHandler(ctx, config, r, connectClient, "")
 
 	return connectClient.Run(nil, util.FindFirstLogPath(logFiles))

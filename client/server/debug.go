@@ -72,9 +72,11 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		log.Warnf("failed to get latest sync response: %v", err)
 	}
 
+	connectClient := s.session.client()
+
 	var clientMetrics debug.MetricsExporter
-	if s.connectClient != nil {
-		if engine := s.connectClient.Engine(); engine != nil {
+	if connectClient != nil {
+		if engine := connectClient.Engine(); engine != nil {
 			if cm := engine.GetClientMetrics(); cm != nil {
 				clientMetrics = cm
 			}
@@ -93,8 +95,8 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 	defer s.cleanupBundleCapture()
 
 	var refreshStatus func()
-	if s.connectClient != nil {
-		engine := s.connectClient.Engine()
+	if connectClient != nil {
+		engine := connectClient.Engine()
 		if engine != nil {
 			refreshStatus = func() {
 				log.Debug("refreshing system health status for debug bundle")
@@ -108,8 +110,8 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 
 	bundleGenerator := debug.NewBundleGenerator(
 		debug.GeneratorDependencies{
-			InternalConfig: s.config,
-			StatusRecorder: s.statusRecorder,
+			InternalConfig: s.session.currentConfig(),
+			StatusRecorder: s.session.statusRecorder,
 			SyncResponse:   syncResponse,
 			LogPath:        s.logFile,
 			UILogPath:      s.uiLogPath,
@@ -134,8 +136,8 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		return "", "", fmt.Errorf("generate debug bundle: %w", err)
 	}
 
-	if s.config != nil && s.config.ManagementURL != nil {
-		managementURL = s.config.ManagementURL.String()
+	if config := s.session.currentConfig(); config != nil && config.ManagementURL != nil {
+		managementURL = config.ManagementURL.String()
 	}
 
 	return path, managementURL, nil
@@ -162,8 +164,8 @@ func (s *Server) SetLogLevel(_ context.Context, req *proto.SetLogLevelRequest) (
 
 	log.SetLevel(level)
 
-	if s.connectClient != nil {
-		s.connectClient.SetLogLevel(level)
+	if connectClient := s.session.client(); connectClient != nil {
+		connectClient.SetLogLevel(level)
 	}
 
 	log.Infof("Log level set to %s", level.String())
@@ -217,15 +219,15 @@ func (s *Server) SetSyncResponsePersistence(_ context.Context, req *proto.SetSyn
 
 	enabled := req.GetEnabled()
 	s.persistSyncResponse = enabled
-	if s.connectClient != nil {
-		s.connectClient.SetSyncResponsePersistence(enabled)
+	if connectClient := s.session.client(); connectClient != nil {
+		connectClient.SetSyncResponsePersistence(enabled)
 	}
 
 	return &proto.SetSyncResponsePersistenceResponse{}, nil
 }
 
 func (s *Server) getLatestSyncResponse() (*mgmProto.SyncResponse, error) {
-	cClient := s.connectClient
+	cClient := s.session.client()
 	if cClient == nil {
 		return nil, errors.New("connect client is not initialized")
 	}

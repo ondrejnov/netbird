@@ -514,9 +514,7 @@ func TestIsolationStaysClosedWithoutSessionScope(t *testing.T) {
 				}
 
 				// The tag in a table created last shows the monitor ran with the isolation visible.
-				foreign := addHookedTable(t, "nbtest_foreign_late")
-				require.Eventually(t, func() bool { return len(foreign.tags(t)) > 0 },
-					5*time.Second, 50*time.Millisecond, "the monitor must open a table that appears later")
+				requireMonitorOpensLateTable(t)
 				require.NoError(t, reconcile())
 
 				assertNoAcceptTags(t, IsolationTableName, "isolation table")
@@ -528,6 +526,25 @@ func TestIsolationStaysClosedWithoutSessionScope(t *testing.T) {
 		}
 	}
 }
+
+// requireMonitorOpensLateTable retries with a new table because the monitor subscribes on its
+// own goroutine, and it misses a table created before the subscription is in place.
+func requireMonitorOpensLateTable(t *testing.T) {
+	t.Helper()
+	for attempt := range 5 {
+		foreign := addHookedTable(t, fmt.Sprintf("nbtest_foreign_late%d", attempt))
+		if assert.Eventually(&ignoredFailures{}, func() bool { return len(foreign.tags(t)) > 0 },
+			2*time.Second, 50*time.Millisecond) {
+			return
+		}
+	}
+	require.Fail(t, "the monitor must open a table that appears later")
+}
+
+// ignoredFailures lets a retry poll with assert.Eventually without failing the test.
+type ignoredFailures struct{}
+
+func (*ignoredFailures) Errorf(string, ...any) {}
 
 // TestIsolationAddFailsClosed covers the paths where a session must not start: nothing may look
 // installed afterwards.
@@ -603,6 +620,59 @@ func TestIsolationIPv6IsSoft(t *testing.T) {
 		addr.IPv6 = netip.MustParseAddr("fd00::1")
 		require.NoError(t, addToIsolation(isolation, "wt1", addr))
 		assert.Zero(t, isoElementCount(t, isoSetOwn6), "an unusable v6 overlay counts as none")
+		assert.NoError(t, isolation.Verify())
+	})
+
+	t.Run("kernel refuses the v6 elements of a new session", func(t *testing.T) {
+		isolation := NewIsolation()
+		t.Cleanup(func() { assert.NoError(t, isolation.RemoveAll()) })
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+
+		withV6 := isoFakeAddress(2)
+		withV6.IPv6, withV6.IPv6Net = netip.MustParseAddr("fd00:bb::1"), netip.MustParsePrefix("fd00:bb::/64")
+		blocker := blockIsolationOwn6(t, "wt2", netip.MustParsePrefix("fd00:bb::/65"))
+
+		disabled, err := addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err, "a v6 failure must not stop the session")
+		assert.True(t, disabled, "the session must be told to leave v6 alone")
+		assert.Equal(t, 2, isoElementCount(t, isoSetOwn), "v4 of the session must be isolated")
+		assert.Equal(t, 1, isoElementCount(t, isoSetOwn6), "only the foreign element may be in the v6 set")
+		assert.False(t, isolation.members["wt2"].overlay6.IsValid(), "v6 must not be in the isolation")
+
+		blocker()
+		assert.NoError(t, isolation.Verify(), "kernel and members must agree once the host is repaired")
+		disabled, err = addReportingIPv6(isolation, "wt2", withV6)
+		require.NoError(t, err)
+		assert.False(t, disabled, "the session gets its v6 once the kernel takes it")
+		assert.Equal(t, 1, isoElementCount(t, isoSetOwn6))
+		assert.NoError(t, isolation.Verify())
+	})
+
+	t.Run("kernel refuses the new v6 elements of a running session", func(t *testing.T) {
+		isolation := NewIsolation()
+		t.Cleanup(func() { assert.NoError(t, isolation.RemoveAll()) })
+		first := isoFakeAddress(1)
+		first.IPv6, first.IPv6Net = netip.MustParseAddr("fd00:aa::1"), netip.MustParsePrefix("fd00:aa::/64")
+		require.NoError(t, addToIsolation(isolation, "wt1", first))
+
+		next := isoFakeAddress(3)
+		next.IPv6, next.IPv6Net = netip.MustParseAddr("fd00:bb::1"), netip.MustParsePrefix("fd00:bb::/64")
+		blocker := blockIsolationOwn6(t, "wt1", netip.MustParsePrefix("fd00:bb::/65"))
+
+		disabled, err := addReportingIPv6(isolation, "wt1", next)
+		require.NoError(t, err, "a v6 failure must not stop the update")
+		assert.True(t, disabled)
+		assert.Equal(t, next.Network, isolation.members["wt1"].overlay, "v4 must move")
+		assert.Equal(t, first.IPv6Net, isolation.members["wt1"].overlay6,
+			"a refusal of the new v6 overlay must not take the v6 isolation the session has")
+
+		blocker()
+		assert.NoError(t, isolation.Verify(), "kernel and members must agree once the host is repaired")
+		assert.Equal(t, 1, isoElementCount(t, isoSetOwn6), "the session still owns its previous v6 overlay")
+
+		disabled, err = addReportingIPv6(isolation, "wt1", next)
+		require.NoError(t, err)
+		assert.False(t, disabled, "the session gets the new v6 overlay once the kernel takes it")
 		assert.NoError(t, isolation.Verify())
 	})
 
@@ -712,6 +782,28 @@ func TestIsolationOverlappingIPv6WithRealPackets(t *testing.T) {
 			assert.False(t, reaches(t, a.ns, a.peer4, nil, b.addr.IP), "v4 must stay isolated")
 			assert.True(t, reaches(t, b.ns, b.peer4, nil, b.addr.IP), "B keeps its v4")
 		})
+	}
+}
+
+// blockIsolationOwn6 puts an element of a session in front of the v6 set that overlaps the overlay
+// a test is going to add, which the kernel refuses. The result removes it.
+func blockIsolationOwn6(t *testing.T, name IfaceName, overlay netip.Prefix) (remove func()) {
+	t.Helper()
+	sets := newIsolationSets()
+	var own isolationElements
+	for _, batch := range sets.overlayElements(name, overlay) {
+		if batch.set.Name == isoSetOwn6 {
+			own = batch
+		}
+	}
+	require.NotNil(t, own.set)
+	conn := &nftables.Conn{}
+	require.NoError(t, conn.SetAddElements(own.set, own.elements))
+	require.NoError(t, conn.Flush())
+	return func() {
+		conn := &nftables.Conn{}
+		require.NoError(t, conn.SetDeleteElements(own.set, own.elements))
+		require.NoError(t, conn.Flush())
 	}
 }
 

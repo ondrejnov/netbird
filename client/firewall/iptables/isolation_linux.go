@@ -36,21 +36,32 @@ func (n IfaceName) validate() error {
 
 // AddResult is what a session has to honor after a successful Add.
 type AddResult struct {
-	// IPv6Disabled means the IPv6 overlay overlaps the one of another session and the session
-	// is isolated without it. The session must not put the IPv6 address on its interface: the
-	// rules go by address, so a peer of the other session would reach it there.
+	// IPv6Disabled means the session is isolated without the IPv6 overlay it asked for: it
+	// overlaps the one of another session, or the host cannot isolate IPv6. The session must not
+	// put the IPv6 address on its interface: the rules go by address, so a peer of the other
+	// session would reach it there.
 	IPv6Disabled bool
 }
 
 // isolationMember holds the overlay prefixes of a session. An invalid overlay6 means the
 // session has no IPv6 overlay on this host. stale and stale6 are prefixes of a failed update
 // the rollback could not take out of the kernel: they count as occupied, and leave with the
-// next update or Remove.
+// next update or Remove. no6 means the session is not in the IPv6 plane because the host has none
+// or cannot install it: it is the one thing a repeated Add with the same overlays does not
+// compare. A plane that is installed but refuses the session fails Add instead.
 type isolationMember struct {
 	overlay  netip.Prefix
 	overlay6 netip.Prefix
 	stale    netip.Prefix
 	stale6   netip.Prefix
+	no6      bool
+}
+
+// withoutPlane6 is the member as it stands when the IPv6 plane could not take it.
+func (m isolationMember) withoutPlane6() isolationMember {
+	m.overlay6 = netip.Prefix{}
+	m.no6 = true
+	return m
 }
 
 func newIsolationMember(addr wgaddr.Address) (isolationMember, error) {
@@ -102,8 +113,10 @@ func NewIsolation() (*Isolation, error) {
 
 // Add isolates the session on the given interface from all others, or updates its overlays
 // when it is already known. A session must not run when Add fails. An overlapping IPv4 overlay
-// fails with ErrOverlayOverlap, an overlapping IPv6 overlay makes it continue without v6, which
-// the result reports. A failed update leaves the session on its previous overlays.
+// fails with ErrOverlayOverlap. An overlapping IPv6 overlay, and a host that cannot install the
+// IPv6 plane, make the session continue without v6, which the result reports. An installed plane
+// that cannot take the session fails Add, since a session outside its forward rules would pass v6
+// between interfaces. A failed update leaves the session on its previous overlays.
 func (i *Isolation) Add(name IfaceName, addr wgaddr.Address) (AddResult, error) {
 	if err := name.validate(); err != nil {
 		return AddResult{}, err
@@ -120,19 +133,20 @@ func (i *Isolation) Add(name IfaceName, addr wgaddr.Address) (AddResult, error) 
 	if err != nil {
 		return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
 	}
-	result := AddResult{IPv6Disabled: requested.overlay6.IsValid() && !member.overlay6.IsValid()}
 
 	if previous, known := i.members[name]; known {
-		if previous == member {
-			return result, nil
+		stored := previous
+		if !sameOverlays(previous, member) {
+			stored, err = i.updateMember(name, previous, member)
+			if err != nil {
+				return AddResult{}, fmt.Errorf("update %s in isolation: %w", name, err)
+			}
 		}
-		if err := i.updateMember(name, previous, member); err != nil {
-			return AddResult{}, fmt.Errorf("update %s in isolation: %w", name, err)
-		}
-		return result, nil
+		return ipv6Result(requested, stored), nil
 	}
 
-	if err := i.addMember(name, member); err != nil {
+	stored, err := i.addMember(name, member)
+	if err != nil {
 		if len(i.members) == 0 {
 			if terr := i.teardown(); terr != nil {
 				return AddResult{}, fmt.Errorf("add %s to isolation: %w; rollback: %v", name, err, terr)
@@ -140,8 +154,18 @@ func (i *Isolation) Add(name IfaceName, addr wgaddr.Address) (AddResult, error) 
 		}
 		return AddResult{}, fmt.Errorf("add %s to isolation: %w", name, err)
 	}
-	i.members[name] = member
-	return result, nil
+	i.members[name] = stored
+	return ipv6Result(requested, stored), nil
+}
+
+func ipv6Result(requested, stored isolationMember) AddResult {
+	return AddResult{IPv6Disabled: requested.overlay6.IsValid() && stored.overlay6 != requested.overlay6}
+}
+
+// sameOverlays tells whether Add would change nothing in the kernel for a known session.
+func sameOverlays(previous, member isolationMember) bool {
+	previous.no6 = false
+	return previous == member
 }
 
 func (i *Isolation) resolveOverlaps(name IfaceName, member isolationMember) (isolationMember, error) {
@@ -160,114 +184,178 @@ func (i *Isolation) resolveOverlaps(name IfaceName, member isolationMember) (iso
 	return member, nil
 }
 
-func (i *Isolation) addMember(name IfaceName, member isolationMember) error {
+// addMember puts a new session into the IPv4 plane and then into the IPv6 plane. Both stop the
+// session when they fail, and the IPv4 half is taken out again. It returns the member as the
+// kernel holds it.
+func (i *Isolation) addMember(name IfaceName, member isolationMember) (isolationMember, error) {
 	if !i.plane4.installed {
 		if err := i.plane4.install(); err != nil {
-			return err
+			return member, err
 		}
 	}
-	if err := i.ensurePlane6(member); err != nil {
-		return err
-	}
-
 	if err := i.plane4.addMember(name, member.overlay); err != nil {
-		return err
+		return member, err
 	}
-	if i.plane6 == nil || !i.plane6.installed {
-		return nil
-	}
-	if err := i.plane6.addMember(name, member.overlay6); err != nil {
+	stored, err := i.applyPlane6(name, isolationMember{}, false, member)
+	if err != nil {
 		if rerr := i.plane4.removeMember(name, member.overlay); rerr != nil {
-			return fmt.Errorf("%w; rollback: %v", err, rerr)
+			return member, fmt.Errorf("%w; rollback: %v", err, rerr)
 		}
-		return err
+		return member, err
 	}
-	return nil
+	return stored, nil
 }
 
-// ensurePlane6 installs the v6 half when it can. Sessions without v6 run fine when it cannot,
-// a session with v6 cannot be isolated then and must not start. A plane installed late also
-// needs the sessions already running: traffic must not cross to them over v6 either.
-func (i *Isolation) ensurePlane6(member isolationMember) error {
-	hasV6 := member.overlay6.IsValid()
+// ensurePlane6 installs the v6 half when it can. A plane installed late also needs the sessions
+// already running, except skip: traffic must not cross to them over v6 either.
+func (i *Isolation) ensurePlane6(skip IfaceName) error {
 	if i.plane6 == nil {
-		if hasV6 {
-			return errors.New("session has an IPv6 overlay but the host has no ip6tables")
-		}
-		return nil
+		return errors.New("host has no ip6tables")
 	}
 	if i.plane6.installed {
 		return nil
 	}
 	if err := i.plane6.install(); err != nil {
-		if hasV6 {
+		return err
+	}
+
+	joined := make([]IfaceName, 0, len(i.members))
+	for existing := range i.members {
+		if existing == skip {
+			continue
+		}
+		if err := i.plane6.addMember(existing, netip.Prefix{}); err != nil {
+			err = fmt.Errorf("add running session %s: %w", existing, err)
+			// A half filled plane would pass as installed on the next Add. One that cannot be
+			// taken down is not installed either: the next install starts from nothing.
+			if terr := i.plane6.teardown(); terr != nil {
+				i.plane6.installed, i.plane6.ifaceSets = false, nil
+				return fmt.Errorf("%w; rollback: %v", err, terr)
+			}
 			return err
 		}
-		log.Debugf("skip IPv6 session isolation: %v", err)
-		return nil
+		joined = append(joined, existing)
 	}
-	for existing := range i.members {
-		if err := i.plane6.addMember(existing, netip.Prefix{}); err != nil {
-			// A half filled plane would pass as installed on the next Add.
-			if terr := i.plane6.teardown(); terr != nil {
-				return fmt.Errorf("add running session %s: %w; rollback: %v", existing, err, terr)
-			}
-			return fmt.Errorf("add running session %s: %w", existing, err)
-		}
+	for _, existing := range joined {
+		member := i.members[existing]
+		member.no6 = false
+		i.members[existing] = member
 	}
 	return nil
+}
+
+// applyPlane6 puts the session into the v6 plane with the wanted overlay and returns the member as
+// the kernel holds it. A host without the plane takes the v6 from the session. A plane that is
+// installed and cannot take the session fails: the forward rules of the others only match sessions
+// that are in it. A known session whose v6 update fails keeps its previous overlay, which the
+// kernel still has, so members keeps matching it.
+func (i *Isolation) applyPlane6(name IfaceName, previous isolationMember, known bool, member isolationMember) (isolationMember, error) {
+	want := member.overlay6
+	if err := i.ensurePlane6(name); err != nil {
+		if want.IsValid() {
+			log.Debugf("session %s continues without IPv6 isolation: %v", name, err)
+		}
+		return carryStale6(member.withoutPlane6(), previous), nil
+	}
+
+	if known && !previous.no6 {
+		return i.replaceOverlay6(name, previous, member), nil
+	}
+	if err := i.plane6.addMember(name, want); err != nil {
+		return isolationMember{}, fmt.Errorf("join IPv6 isolation: %w", err)
+	}
+	member.no6 = false
+	return carryStale6(member, previous), nil
+}
+
+// carryStale6 keeps the stale prefix of the previous member, which stays in the kernel until it is
+// taken out. One that became the overlay is in use, and a later cleanup would take it from the
+// session.
+func carryStale6(member, previous isolationMember) isolationMember {
+	if previous.stale6 != member.overlay6 {
+		member.stale6 = previous.stale6
+	}
+	return member
+}
+
+// replaceOverlay6 moves a session that is in the plane to a new v6 overlay. Only one prefix can be
+// recorded as stale, so a new overlay waits while an earlier one is still out of the kernel.
+func (i *Isolation) replaceOverlay6(name IfaceName, previous, member isolationMember) isolationMember {
+	want := member.overlay6
+	if previous.stale6.IsValid() && previous.stale6 != want && previous.overlay6 != want {
+		log.Warnf("session %s keeps its IPv6 overlay until the stale %s is out of the kernel", name, previous.stale6)
+		member.overlay6 = previous.overlay6
+		return carryStale6(member, previous)
+	}
+
+	err := i.plane6.replaceOverlay(name, previous.overlay6, want)
+	if err == nil {
+		return carryStale6(member, previous)
+	}
+
+	log.Warnf("session %s continues without its new IPv6 overlay: %v", name, err)
+	member.overlay6 = previous.overlay6
+	if rerr := i.plane6.restoreOverlay(name, previous.overlay6, want); rerr != nil {
+		member.stale6 = want
+		log.Debugf("restore IPv6 overlay of %s: %v", name, rerr)
+		return member
+	}
+	return carryStale6(member, previous)
 }
 
 // updateMember moves a session to new overlays. Ipsets have no batch, so a failed step is undone
-// by hand: members has to keep matching the kernel, or Verify fails for all other sessions.
-func (i *Isolation) updateMember(name IfaceName, previous, member isolationMember) error {
-	if err := i.removeStale(name, previous); err != nil {
-		return err
-	}
-	previous.stale, previous.stale6 = netip.Prefix{}, netip.Prefix{}
+// by hand: members has to keep matching the kernel, or Verify fails for all other sessions. The
+// IPv4 plane goes first. A failure of either plane fails the update, and the IPv4 overlay goes back.
+func (i *Isolation) updateMember(name IfaceName, previous, member isolationMember) (isolationMember, error) {
+	previous, err := i.removeStale(name, previous)
 	i.members[name] = previous
-
-	if err := i.ensurePlane6(member); err != nil {
-		return err
-	}
-	if err := i.replaceOverlays(name, previous, member); err != nil {
-		if rerr := i.restoreOverlays(name, previous, member); rerr != nil {
-			return fmt.Errorf("%w; rollback: %v", err, rerr)
-		}
-		return err
-	}
-	i.members[name] = member
-	return nil
-}
-
-func (i *Isolation) replaceOverlays(name IfaceName, previous, member isolationMember) error {
-	if err := i.plane4.replaceOverlay(name, previous.overlay, member.overlay); err != nil {
-		return err
-	}
-	if i.plane6 != nil && i.plane6.installed {
-		return i.plane6.replaceOverlay(name, previous.overlay6, member.overlay6)
-	}
-	return nil
-}
-
-// restoreOverlays puts both planes back on the previous overlays, and keeps track of what a plane
-// could not undo.
-func (i *Isolation) restoreOverlays(name IfaceName, previous, failed isolationMember) error {
-	err := i.plane4.restoreOverlay(name, previous.overlay, failed.overlay)
 	if err != nil {
-		previous.stale = failed.overlay
+		return previous, err
 	}
-	if i.plane6 != nil && i.plane6.installed {
-		if err6 := i.plane6.restoreOverlay(name, previous.overlay6, failed.overlay6); err6 != nil {
-			previous.stale6 = failed.overlay6
-			err = errors.Join(err, err6)
+
+	if err := i.plane4.replaceOverlay(name, previous.overlay, member.overlay); err != nil {
+		if rerr := i.plane4.restoreOverlay(name, previous.overlay, member.overlay); rerr != nil {
+			previous.stale = member.overlay
+			i.members[name] = previous
+			return previous, fmt.Errorf("%w; rollback: %v", err, rerr)
 		}
+		return previous, err
 	}
-	i.members[name] = previous
-	return err
+
+	stored, err := i.applyPlane6(name, previous, true, member)
+	if err != nil {
+		if rerr := i.plane4.restoreOverlay(name, previous.overlay, member.overlay); rerr != nil {
+			previous.stale = member.overlay
+			i.members[name] = previous
+			return previous, fmt.Errorf("%w; rollback: %v", err, rerr)
+		}
+		return previous, err
+	}
+	i.members[name] = stored
+	return stored, nil
 }
 
-func (i *Isolation) removeStale(name IfaceName, member isolationMember) error {
+// removeStale takes the leftovers of a failed update out of the kernel. Only the IPv4 ones can
+// fail the update, an IPv6 one stays recorded for the next try.
+func (i *Isolation) removeStale(name IfaceName, member isolationMember) (isolationMember, error) {
+	if err := i.plane4.removeOverlay(name, member.stale); err != nil {
+		return member, err
+	}
+	member.stale = netip.Prefix{}
+
+	if i.plane6 == nil || !i.plane6.installed {
+		member.stale6 = netip.Prefix{}
+		return member, nil
+	}
+	if err := i.plane6.removeOverlay(name, member.stale6); err != nil {
+		log.Debugf("remove stale IPv6 overlay of %s: %v", name, err)
+		return member, nil
+	}
+	member.stale6 = netip.Prefix{}
+	return member, nil
+}
+
+func (i *Isolation) removeAllStale(name IfaceName, member isolationMember) error {
 	err := i.plane4.removeOverlay(name, member.stale)
 	if i.plane6 != nil && i.plane6.installed {
 		err = errors.Join(err, i.plane6.removeOverlay(name, member.stale6))
@@ -298,12 +386,14 @@ func (i *Isolation) Remove(name IfaceName) error {
 	if err := i.plane4.removeMember(name, member.overlay); err != nil {
 		return fmt.Errorf("remove %s from isolation: %w", name, err)
 	}
+	// Whatever a failed attempt to join the plane left behind is not in members, so the plane is
+	// asked even for a session marked no6. Objects that are not there are no error.
 	if i.plane6 != nil && i.plane6.installed {
 		if err := i.plane6.removeMember(name, member.overlay6); err != nil {
 			return fmt.Errorf("remove %s from isolation: %w", name, err)
 		}
 	}
-	if err := i.removeStale(name, member); err != nil {
+	if err := i.removeAllStale(name, member); err != nil {
 		return fmt.Errorf("remove %s from isolation: %w", name, err)
 	}
 	delete(i.members, name)
@@ -348,7 +438,9 @@ func (i *Isolation) Verify() error {
 	overlays6 := make(map[IfaceName]netip.Prefix, len(i.members))
 	for name, member := range i.members {
 		overlays[name] = member.overlay
-		overlays6[name] = member.overlay6
+		if !member.no6 {
+			overlays6[name] = member.overlay6
+		}
 	}
 	if err := i.plane4.verify(overlays); err != nil {
 		return fmt.Errorf("verify isolation: %w", err)

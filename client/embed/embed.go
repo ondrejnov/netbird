@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"runtime"
 	"sync"
 
 	"github.com/sirupsen/logrus"
@@ -301,11 +302,7 @@ func (c *Client) Start(startCtx context.Context) error {
 	if err, _ := authClient.Login(ctx, c.setupKey, c.jwtToken); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
-	var connectOpts []internal.ConnectClientOption
-	if c.inMemoryState {
-		connectOpts = append(connectOpts, internal.WithInMemoryState())
-	}
-	client := internal.NewConnectClient(ctx, c.config, c.recorder, connectOpts...)
+	client := internal.NewConnectClient(ctx, c.config, c.recorder, c.stateOptions()...)
 	client.SetSyncResponsePersistence(true)
 
 	// either startup error (permanent backoff err) or nil err (successful engine up)
@@ -339,6 +336,20 @@ func (c *Client) Start(startCtx context.Context) error {
 	c.cancel = cancel
 
 	return nil
+}
+
+// stateOptions selects where the connect client keeps its state. Mobile platforms name
+// the state file when they run the client, so they read nothing here.
+func (c *Client) stateOptions() []internal.ConnectClientOption {
+	if c.inMemoryState {
+		return []internal.ConnectClientOption{internal.WithInMemoryState()}
+	}
+	if runtime.GOOS == "android" || runtime.GOOS == "ios" {
+		return nil
+	}
+	return []internal.ConnectClientOption{
+		internal.WithStatePath(profilemanager.NewServiceManager("").GetStatePath()),
+	}
 }
 
 // Stop gracefully stops the client.
