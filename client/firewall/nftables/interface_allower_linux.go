@@ -33,9 +33,23 @@ type InterfaceAllower struct {
 // error when nftables is unavailable (e.g. an iptables-legacy host), so the
 // caller can fall back to firewalld trust.
 func NewInterfaceAllower(wgIface iFaceMapper, mtu uint16) (*InterfaceAllower, error) {
-	tableName := getTableName()
+	return newInterfaceAllower(wgIface, mtu, getTableName(), nil)
+}
 
+// NewInterfaceAllowerForSession builds an allower for one of several sessions on the host.
+// It tags its rules with the given names and never opens the table of another session or
+// the isolation table.
+func NewInterfaceAllowerForSession(wgIface iFaceMapper, mtu uint16, names SessionNames) (*InterfaceAllower, error) {
+	scope, err := newSessionScope(names)
+	if err != nil {
+		return nil, err
+	}
+	return newInterfaceAllower(wgIface, mtu, names.Table, scope)
+}
+
+func newInterfaceAllower(wgIface iFaceMapper, mtu uint16, tableName string, scope *sessionScope) (*InterfaceAllower, error) {
 	family4 := newFamily(&nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv4}, wgIface, mtu)
+	family4.bindSession(scope)
 
 	// Probe nftables availability before committing to this backend.
 	if _, err := family4.conn.ListChainsOfTableFamily(nftables.TableFamilyINet); err != nil {
@@ -46,9 +60,11 @@ func NewInterfaceAllower(wgIface iFaceMapper, mtu uint16) (*InterfaceAllower, er
 
 	if wgIface.Address().HasIPv6() {
 		a.family6 = newFamily(&nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv6}, wgIface, mtu)
+		a.family6.bindSession(scope)
 	}
 
 	a.extMonitor = newExternalChainMonitor(a)
+	a.extMonitor.scope = scope
 	return a, nil
 }
 

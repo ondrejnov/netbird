@@ -32,7 +32,7 @@ func (r *family) AddInboundDNAT(localAddr netip.Addr, protocol firewall.Protocol
 
 	info := ruleInfo{
 		table: tableNat,
-		chain: chainRTRdr,
+		chain: r.names.rtRdr,
 		rule:  dnatRule,
 	}
 
@@ -50,7 +50,7 @@ func (r *family) RemoveInboundDNAT(localAddr netip.Addr, protocol firewall.Proto
 	ruleID := firewall.RuleID(fmt.Sprintf("inbound-dnat-%s-%s-%d-%d", localAddr.String(), protocol, originalPort, translatedPort))
 
 	if dnatRule, exists := r.rules[ruleID]; exists {
-		if err := r.iptablesClient.Delete(tableNat, chainRTRdr, dnatRule...); err != nil {
+		if err := r.iptablesClient.Delete(tableNat, r.names.rtRdr, dnatRule...); err != nil {
 			return fmt.Errorf("delete inbound DNAT rule: %w", err)
 		}
 		delete(r.rules, ruleID)
@@ -66,21 +66,21 @@ func (r *family) ensureNATOutputChain() error {
 		return nil
 	}
 
-	chainExists, err := r.iptablesClient.ChainExists(tableNat, chainNATOutput)
+	chainExists, err := r.iptablesClient.ChainExists(tableNat, r.names.natOutput)
 	if err != nil {
-		return fmt.Errorf("check chain %s: %w", chainNATOutput, err)
+		return fmt.Errorf("check chain %s: %w", r.names.natOutput, err)
 	}
 	if !chainExists {
-		if err := r.iptablesClient.NewChain(tableNat, chainNATOutput); err != nil {
-			return fmt.Errorf("create chain %s: %w", chainNATOutput, err)
+		if err := r.iptablesClient.NewChain(tableNat, r.names.natOutput); err != nil {
+			return fmt.Errorf("create chain %s: %w", r.names.natOutput, err)
 		}
 	}
 
-	jumpRule := jumpRuleSpec(chainNATOutput)
+	jumpRule := jumpRuleSpec(r.names.natOutput)
 	if err := r.iptablesClient.Insert(tableNat, chainOutput, 1, jumpRule...); err != nil {
 		if !chainExists {
-			if delErr := r.iptablesClient.ClearAndDeleteChain(tableNat, chainNATOutput); delErr != nil {
-				log.Warnf("failed to rollback chain %s: %v", chainNATOutput, delErr)
+			if delErr := r.iptablesClient.ClearAndDeleteChain(tableNat, r.names.natOutput); delErr != nil {
+				log.Warnf("failed to rollback chain %s: %v", r.names.natOutput, delErr)
 			}
 		}
 		return fmt.Errorf("add OUTPUT jump rule: %w", err)
@@ -111,7 +111,7 @@ func (r *family) AddOutputDNAT(localAddr netip.Addr, protocol firewall.Protocol,
 		"--to-destination", ":" + strconv.Itoa(int(translatedPort)),
 	}
 
-	if err := r.iptablesClient.Append(tableNat, chainNATOutput, dnatRule...); err != nil {
+	if err := r.iptablesClient.Append(tableNat, r.names.natOutput, dnatRule...); err != nil {
 		return fmt.Errorf("add output DNAT rule: %w", err)
 	}
 	r.rules[ruleID] = dnatRule
@@ -125,7 +125,7 @@ func (r *family) RemoveOutputDNAT(localAddr netip.Addr, protocol firewall.Protoc
 	ruleID := firewall.RuleID(fmt.Sprintf("output-dnat-%s-%s-%d-%d", localAddr.String(), protocol, originalPort, translatedPort))
 
 	if dnatRule, exists := r.rules[ruleID]; exists {
-		if err := r.iptablesClient.Delete(tableNat, chainNATOutput, dnatRule...); err != nil {
+		if err := r.iptablesClient.Delete(tableNat, r.names.natOutput, dnatRule...); err != nil {
 			return fmt.Errorf("delete output DNAT rule: %w", err)
 		}
 		delete(r.rules, ruleID)

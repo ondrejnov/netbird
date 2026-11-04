@@ -24,6 +24,8 @@ type Manager struct {
 	mutex sync.Mutex
 
 	wgIface iFaceMapper
+	// slot selects the suffix of the chains and ipsets this manager owns.
+	slot uint
 
 	ipv4Client *iptables.IPTables
 	family4    *family
@@ -39,8 +41,9 @@ type iFaceMapper interface {
 	Address() wgaddr.Address
 }
 
-// Create iptables firewall manager
-func Create(wgIface iFaceMapper, mtu uint16) (*Manager, error) {
+// Create iptables firewall manager. Without options it owns the chains and
+// ipsets of slot 0; WithSlot selects the suffixed names of another slot.
+func Create(wgIface iFaceMapper, mtu uint16, opts ...Option) (*Manager, error) {
 	iptablesClient, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
 	if err != nil {
 		return nil, fmt.Errorf("init iptables: %w", err)
@@ -48,16 +51,17 @@ func Create(wgIface iFaceMapper, mtu uint16) (*Manager, error) {
 
 	m := &Manager{
 		wgIface:    wgIface,
+		slot:       newConfig(opts...).slot,
 		ipv4Client: iptablesClient,
 	}
 
-	m.family4, err = newFamily(iptablesClient, wgIface, mtu)
+	m.family4, err = newFamily(iptablesClient, wgIface, mtu, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create family: %w", err)
 	}
 
 	if wgIface.Address().HasIPv6() {
-		if err := m.createIPv6Components(wgIface, mtu); err != nil {
+		if err := m.createIPv6Components(wgIface, mtu, opts...); err != nil {
 			return nil, fmt.Errorf("create IPv6 firewall: %w", err)
 		}
 	}
@@ -65,13 +69,13 @@ func Create(wgIface iFaceMapper, mtu uint16) (*Manager, error) {
 	return m, nil
 }
 
-func (m *Manager) createIPv6Components(wgIface iFaceMapper, mtu uint16) error {
+func (m *Manager) createIPv6Components(wgIface iFaceMapper, mtu uint16, opts ...Option) error {
 	ip6Client, err := iptables.NewWithProtocol(iptables.ProtocolIPv6)
 	if err != nil {
 		return fmt.Errorf("init ip6tables: %w", err)
 	}
 
-	family6, err := newFamily(ip6Client, wgIface, mtu)
+	family6, err := newFamily(ip6Client, wgIface, mtu, opts...)
 	if err != nil {
 		return fmt.Errorf("create v6 family: %w", err)
 	}
@@ -96,6 +100,7 @@ func (m *Manager) Init(stateManager *statemanager.Manager) error {
 			NameStr:   m.wgIface.Name(),
 			WGAddress: m.wgIface.Address(),
 			MTU:       m.family4.mtu,
+			Slot:      m.slot,
 		},
 	}
 	stateManager.RegisterState(state)

@@ -101,7 +101,7 @@ func (r *family) DeleteFilterRule(rule firewall.Rule) error {
 			merr = multierror.Append(merr, fmt.Errorf("delete rule from %s: %w", pr.chain, err))
 		}
 		if fs.mangleSpecs != nil {
-			if err := r.iptablesClient.DeleteIfExists(tableMangle, chainRTPre, fs.mangleSpecs...); err != nil {
+			if err := r.iptablesClient.DeleteIfExists(tableMangle, r.names.rtPre, fs.mangleSpecs...); err != nil {
 				merr = multierror.Append(merr, fmt.Errorf("delete mangle rule: %w", err))
 			}
 		}
@@ -183,7 +183,10 @@ func (r *family) applySourceMatch(network firewall.Network, prefixes []netip.Pre
 		if r.ipsetCounter == nil {
 			return nil, fmt.Errorf("multi-source peer rule requires shared ipset counter")
 		}
-		name := r.ipsetName(network.Set.HashedName())
+		name, err := r.ipsetName(network.Set.HashedName())
+		if err != nil {
+			return nil, err
+		}
 		if _, err := r.ipsetCounter.Increment(name, prefixes); err != nil {
 			return nil, fmt.Errorf("ipset increment %s: %w", name, err)
 		}
@@ -254,9 +257,9 @@ func (r *family) installFilterRule(
 	}
 	matchSpecs := filterMatchSpecs(proto, sPort, dPort)
 
-	chain := chainACLInput
+	chain := r.names.aclInput
 	if isRoute {
-		chain = chainRTFwdIn
+		chain = r.names.rtFwdIn
 	}
 
 	var installed []filterSpecs
@@ -289,7 +292,7 @@ func (r *family) installFilterRule(
 		// is what enforces the ACL, so a mangle failure must not undo it. Drop
 		// the spec so teardown does not try to remove a rule that was not added.
 		if mangleSpecs != nil {
-			if err := r.iptablesClient.Append(tableMangle, chainRTPre, mangleSpecs...); err != nil {
+			if err := r.iptablesClient.Append(tableMangle, r.names.rtPre, mangleSpecs...); err != nil {
 				log.Errorf("add mangle rule: %v", err)
 				mangleSpecs = nil
 			}
@@ -315,7 +318,7 @@ func (r *family) installFilterRule(
 func (r *family) insertFilterRule(chain string, action firewall.Action, specs []string) error {
 	if action == firewall.ActionDrop {
 		pos := 1
-		if chain == chainRTFwdIn {
+		if chain == r.names.rtFwdIn {
 			pos = 2
 		}
 		return r.iptablesClient.Insert(tableFilter, chain, pos, specs...)
@@ -331,7 +334,7 @@ func (r *family) removeFilterSpecs(chain string, installed []filterSpecs) {
 			log.Debugf("delete partial filter rule: %v", err)
 		}
 		if fs.mangleSpecs != nil {
-			if err := r.iptablesClient.DeleteIfExists(tableMangle, chainRTPre, fs.mangleSpecs...); err != nil {
+			if err := r.iptablesClient.DeleteIfExists(tableMangle, r.names.rtPre, fs.mangleSpecs...); err != nil {
 				log.Debugf("delete partial mangle rule: %v", err)
 			}
 		}
@@ -357,7 +360,10 @@ func (r *family) applyNetwork(flag string, network firewall.Network, prefixes []
 			return nil, fmt.Errorf("destination set %s requires ipset (ip_set_hash_net and xt_set)", network.Set.HashedName())
 		}
 
-		name := r.ipsetName(network.Set.HashedName())
+		name, err := r.ipsetName(network.Set.HashedName())
+		if err != nil {
+			return nil, err
+		}
 		if _, err := r.ipsetCounter.Increment(name, prefixes); err != nil {
 			return nil, fmt.Errorf("create or get ipset: %w", err)
 		}

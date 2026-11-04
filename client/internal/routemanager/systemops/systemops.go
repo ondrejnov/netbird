@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
+	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/routemanager/notifier"
 	"github.com/netbirdio/netbird/client/internal/routemanager/refcounter"
 	"github.com/netbirdio/netbird/client/internal/routemanager/vars"
@@ -81,6 +82,19 @@ type SysOps struct {
 	localSubnetsCache     []*net.IPNet
 	localSubnetsCacheMu   sync.RWMutex
 	localSubnetsCacheTime time.Time
+
+	// coordinator shares the routing base between sessions. When nil, this instance
+	// owns the base alone. Only Linux uses it.
+	//nolint:unused // only used on Linux
+	coordinator *hostcoord.Coordinator
+	//nolint:unused // only used on Linux
+	sessionKey hostcoord.SessionKey
+	// originalSysctl stores the sysctl values from before this instance changed them.
+	//nolint:unused // only used on Linux
+	originalSysctl map[string]int
+	// sysctlFailed is used as an indicator to emit a warning when default routes are configured.
+	//nolint:unused // only used on Linux
+	sysctlFailed atomic.Bool
 }
 
 func New(wgInterface wgIface, notifier *notifier.Notifier) *SysOps {
@@ -88,6 +102,15 @@ func New(wgInterface wgIface, notifier *notifier.Notifier) *SysOps {
 		wgInterface: wgInterface,
 		notifier:    notifier,
 	}
+}
+
+// NewShared returns a SysOps that shares the routing base with the other sessions
+// of coordinator instead of owning it. Only Linux honors the coordinator.
+func NewShared(wgInterface wgIface, notifier *notifier.Notifier, coordinator *hostcoord.Coordinator, key hostcoord.SessionKey) *SysOps {
+	r := New(wgInterface, notifier)
+	r.coordinator = coordinator
+	r.sessionKey = key
+	return r
 }
 
 //nolint:unused // only used on BSD systems

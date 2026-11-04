@@ -96,6 +96,9 @@ type family struct {
 	ipFwdState       *ipfwdstate.IPForwardingState
 	legacyManagement bool
 	mtu              uint16
+
+	tags  acceptTags
+	scope *sessionScope
 }
 
 func newFamily(workTable *nftables.Table, wgIface iFaceMapper, mtu uint16) *family {
@@ -110,6 +113,7 @@ func newFamily(workTable *nftables.Table, wgIface iFaceMapper, mtu uint16) *fami
 		wgIface:            wgIface,
 		ipFwdState:         ipfwdstate.NewIPForwardingState(wgIface.Name()),
 		mtu:                mtu,
+		tags:               newAcceptTags(""),
 	}
 
 	r.ipsetCounter = refcounter.New(
