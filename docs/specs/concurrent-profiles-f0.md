@@ -2,7 +2,7 @@
 
 Commit `3c996c91d`. Nezávislá kontrola výsledků agentů, 2026-11-04.
 
-**Stav po bráně (2026-11-04):** vlastník schválil navržené změny specifikace a zapracoval je. Fork se používá jen se self-hosted Managementem (D7), ověření cloudu z Q4 tím odpadá. R1 až R6 zůstávají otevřené. Verdikt níže popisuje stav před bránou.
+**Stav po bráně (2026-11-04):** vlastník schválil navržené změny specifikace a zapracoval je. Fork se používá jen se self-hosted Managementem (D7), ověření cloudu z Q4 tím odpadá. R1 až R5 vlastník schválil podle doporučení, R6 čeká na potvrzení. Verdikt níže popisuje stav před bránou.
 
 **Verdikt pro bránu F0: do F1 zatím nejít.** Sekce 5 až 7 je nutné upravit (Q1, Q2, Q5) a otázka 4 není plně zodpovězená, protože dostupnost v cloudu nikdo na účtu neověřil. Sdílená tabulka a LPM (Q3) potvrzují architekturu D1. Největší problémy: izolace I3/I4 nainstalovaná jako další nft tabulka se dá obejít, flow události jedné sítě odcházejí do druhé a souběžný start přepne celý proces na legacy routing. Vlastník musí před F1 rozhodnout R1 až R6 (konec zprávy) a ověřit cloud na účtu. Selhaní agenti: žádní. Otázky bez výsledku od agentů: žádné, ale viz Q4.
 
