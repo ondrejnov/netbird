@@ -257,6 +257,14 @@ func (s *Slots) Release(lease Lease) {
 	}
 }
 
+// Running returns the resources key holds at the moment, if any.
+func (s *Slots) Running(key SessionKey) (SessionResources, bool) {
+	s.bringUpMu.Lock()
+	defer s.bringUpMu.Unlock()
+	res, running := s.running[key]
+	return res, running
+}
+
 // Remove frees the slot of a removed profile, the only way a slot becomes free. A
 // profile without a slot is not an error, a running session is.
 func (s *Slots) Remove(key SessionKey) error {

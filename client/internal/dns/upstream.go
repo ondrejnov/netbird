@@ -40,6 +40,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -55,7 +56,16 @@ import (
 	"github.com/netbirdio/netbird/shared/management/domain"
 )
 
-var currentMTU uint16 = iface.DefaultMTU
+// currentMTU is one value for the process, so sessions with different MTUs share the last one set.
+var currentMTU = func() *atomic.Uint32 {
+	mtu := &atomic.Uint32{}
+	mtu.Store(uint32(iface.DefaultMTU))
+	return mtu
+}()
+
+func tunnelMTU() uint16 {
+	return uint16(currentMTU.Load())
+}
 
 // nonRetryableEDECodes lists EDE info codes (RFC 8914) for which a SERVFAIL
 // from one upstream means another upstream would return the same answer:
@@ -85,7 +95,7 @@ type privateClientIface interface {
 }
 
 func SetCurrentMTU(mtu uint16) {
-	currentMTU = mtu
+	currentMTU.Store(uint32(mtu))
 }
 
 const (
@@ -517,8 +527,8 @@ func (u *upstreamResolverBase) UpstreamHealth() map[netip.AddrPort]UpstreamHealt
 // upstreamUDPSize returns the EDNS0 UDP buffer size we advertise to upstreams,
 // derived from the tunnel MTU and bounded against underflow.
 func upstreamUDPSize() uint16 {
-	if currentMTU > ipUDPHeaderSize {
-		return currentMTU - ipUDPHeaderSize
+	if mtu := tunnelMTU(); mtu > ipUDPHeaderSize {
+		return mtu - ipUDPHeaderSize
 	}
 	return dns.MinMsgSize
 }
@@ -659,7 +669,7 @@ func ExchangeWithFallback(ctx context.Context, client *dns.Client, r *dns.Msg, u
 	// response larger than our read buffer.
 	// Note: the query could be sent out on an interface that is not ours,
 	// but higher MTU settings could break truncation handling.
-	maxUDPPayload := uint16(currentMTU - ipUDPHeaderSize)
+	maxUDPPayload := tunnelMTU() - ipUDPHeaderSize
 	client.UDPSize = maxUDPPayload
 	if opt := r.IsEdns0(); opt != nil && opt.UDPSize() > maxUDPPayload {
 		opt.SetUDPSize(maxUDPPayload)
@@ -729,7 +739,7 @@ func ExchangeWithNetstack(ctx context.Context, nsNet *wgbackend.NetstackNet, r *
 
 	// Cap EDNS0 to our tunnel MTU so the upstream doesn't send a
 	// response larger than what we can read over UDP.
-	maxUDPPayload := uint16(currentMTU - ipUDPHeaderSize)
+	maxUDPPayload := tunnelMTU() - ipUDPHeaderSize
 	if opt := r.IsEdns0(); opt != nil && opt.UDPSize() > maxUDPPayload {
 		opt.SetUDPSize(maxUDPPayload)
 	}
@@ -775,7 +785,7 @@ func netstackExchange(ctx context.Context, nsNet *wgbackend.NetstackNet, r *dns.
 		}
 	}
 
-	dnsConn := &dns.Conn{Conn: conn, UDPSize: uint16(currentMTU - ipUDPHeaderSize)}
+	dnsConn := &dns.Conn{Conn: conn, UDPSize: tunnelMTU() - ipUDPHeaderSize}
 
 	if err := dnsConn.WriteMsg(r); err != nil {
 		return nil, fmt.Errorf("write %s message: %w", network, err)

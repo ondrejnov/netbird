@@ -68,10 +68,13 @@ func Create(wgIface iFaceMapper, mtu uint16) (*Manager, error) {
 // CreateForSession creates an nftables firewall manager for one of several sessions on
 // the host. It owns only the given names and never opens the table of another session or
 // the isolation table.
-func CreateForSession(wgIface iFaceMapper, mtu uint16, names SessionNames) (*Manager, error) {
+func CreateForSession(wgIface iFaceMapper, mtu uint16, names SessionNames, opts ...SessionOption) (*Manager, error) {
 	scope, err := newSessionScope(names)
 	if err != nil {
 		return nil, err
+	}
+	for _, opt := range opts {
+		opt(scope)
 	}
 	return newManager(wgIface, mtu, names.Table, scope), nil
 }
@@ -88,6 +91,7 @@ func newManager(wgIface iFaceMapper, mtu uint16, tableName string, scope *sessio
 
 	m.family4 = newFamily(workTable, wgIface, mtu)
 	m.family4.bindSession(scope)
+	m.shareForwarding()
 
 	if wgIface.Address().HasIPv6() {
 		m.createIPv6Components(tableName, wgIface, mtu)
@@ -399,6 +403,10 @@ func (m *Manager) Close(stateManager *statemanager.Manager) error {
 		if err := m.family6.Reset(); err != nil {
 			merr = multierror.Append(merr, fmt.Errorf("reset v6 family: %w", err))
 		}
+	}
+
+	if err := m.closeSharedForwarding(); err != nil {
+		merr = multierror.Append(merr, fmt.Errorf("close shared forwarding: %w", err))
 	}
 
 	if err := m.cleanupNetbirdTables(); err != nil {

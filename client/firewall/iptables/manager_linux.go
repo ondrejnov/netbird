@@ -14,6 +14,7 @@ import (
 	"github.com/netbirdio/netbird/client/firewall/firewalld"
 	firewall "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
+	"github.com/netbirdio/netbird/client/internal/routemanager/ipfwdstate"
 	"github.com/netbirdio/netbird/client/internal/statemanager"
 )
 
@@ -26,6 +27,8 @@ type Manager struct {
 	wgIface iFaceMapper
 	// slot selects the suffix of the chains and ipsets this manager owns.
 	slot uint
+	// sharedFwd says the IP forwarding state outlives the manager, see WithHostForwarding.
+	sharedFwd bool
 
 	ipv4Client *iptables.IPTables
 	family4    *family
@@ -49,15 +52,22 @@ func Create(wgIface iFaceMapper, mtu uint16, opts ...Option) (*Manager, error) {
 		return nil, fmt.Errorf("init iptables: %w", err)
 	}
 
+	cfg := newConfig(opts...)
 	m := &Manager{
 		wgIface:    wgIface,
-		slot:       newConfig(opts...).slot,
+		slot:       cfg.slot,
+		sharedFwd:  cfg.forwarding != nil,
 		ipv4Client: iptablesClient,
 	}
 
 	m.family4, err = newFamily(iptablesClient, wgIface, mtu, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create family: %w", err)
+	}
+
+	// Ahead of the IPv6 family, which follows the IPv4 one.
+	if cfg.forwarding != nil {
+		m.family4.ipFwdState = ipfwdstate.NewIPForwardingState(wgIface.Name(), ipfwdstate.WithHostState(cfg.forwarding))
 	}
 
 	if wgIface.Address().HasIPv6() {
@@ -297,6 +307,12 @@ func (m *Manager) Close(stateManager *statemanager.Manager) error {
 
 	if err := m.family4.Reset(); err != nil {
 		merr = multierror.Append(merr, fmt.Errorf("reset family: %w", err))
+	}
+
+	if m.sharedFwd {
+		if err := m.family4.ipFwdState.Close(); err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("close shared forwarding: %w", err))
+		}
 	}
 
 	// Appending to merr intentionally blocks DeleteState below so ShutdownState

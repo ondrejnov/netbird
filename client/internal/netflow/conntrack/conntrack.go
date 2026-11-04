@@ -45,6 +45,10 @@ type ConnTrack struct {
 	started        bool
 	done           chan struct{}
 	sysctlModified bool
+
+	// accounting shares the counters with other instances, nil when this one owns them.
+	accounting     *Accounting
+	accountingHeld bool
 }
 
 // DialFunc is a constructor for netlink conntrack connections.

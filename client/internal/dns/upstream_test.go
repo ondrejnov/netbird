@@ -847,7 +847,7 @@ func TestExchangeWithFallback_EDNS0Capped(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rm)
 
-	expectedMax := uint16(currentMTU - ipUDPHeaderSize)
+	expectedMax := tunnelMTU() - ipUDPHeaderSize
 	assert.Equal(t, expectedMax, uint16(receivedUDPSize.Load()),
 		"upstream should see capped EDNS0, not the client's 4096")
 }
