@@ -109,7 +109,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 	require.NoError(t, err)
 
 	s.mutex.Lock()
-	running, gaveUp := s.clientRunningChan, s.clientGiveUpChan
+	running, gaveUp := s.session.runChans()
 	s.mutex.Unlock()
 
 	select {

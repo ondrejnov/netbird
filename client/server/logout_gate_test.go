@@ -132,7 +132,7 @@ func TestLogout_ForeignUserProfileDoesNotUseTheRunningConfig(t *testing.T) {
 	running, err := profilemanager.GetExistingConfig(cfgPath)
 	require.NoError(t, err)
 	s.config = running
-	s.connectClient = newDummyConnectClient(context.Background())
+	s.session.connectClient = newDummyConnectClient(context.Background())
 
 	shared := "shared-legacy-name"
 	_, err = profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{

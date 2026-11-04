@@ -77,8 +77,10 @@ type statusSetter interface {
 
 // Server for service control.
 type Server struct {
-	rootCtx   context.Context
-	actCancel context.CancelFunc
+	rootCtx context.Context
+
+	// session is the one connection this daemon runs, set by New and never replaced.
+	session *session
 
 	logFile string
 
@@ -114,17 +116,6 @@ type Server struct {
 	mutex  sync.Mutex
 	config *profilemanager.Config
 	proto.UnimplementedDaemonServiceServer
-	// clientRunning tracks "the daemon wants to be connected" — set true by
-	// Start / Up, cleared by Down / Logout. Persists across retry
-	// loops, signal disconnects, and ErrResetConnection cycles. NOT
-	// changed by connectWithRetryRuns goroutine exit — for that
-	// (goroutine-still-alive) check, see connectionGoroutineRunning() which
-	// derives from clientGiveUpChan close state. Protected by s.mutex.
-	clientRunning     bool
-	clientRunningChan chan struct{}
-	clientGiveUpChan  chan struct{} // closed when connectWithRetryRuns goroutine exits
-
-	connectClient *internal.ConnectClient
 
 	statusRecorder *peer.Status
 	sessionWatcher *internal.SessionWatcher
@@ -201,6 +192,7 @@ type oauthAuthFlow struct {
 func New(ctx context.Context, logFile string, configFile string, profilesDisabled bool, updateSettingsDisabled bool, captureEnabled bool, networksDisabled bool) *Server {
 	s := &Server{
 		rootCtx:                ctx,
+		session:                newSession(),
 		logFile:                logFile,
 		persistSyncResponse:    true,
 		statusRecorder:         peer.NewRecorder(""),
@@ -226,7 +218,7 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 // engine's client metrics, or nil when no engine is running.
 func (s *Server) clientMetricsGatherer() prometheus.Gatherer {
 	s.mutex.Lock()
-	connectClient := s.connectClient
+	connectClient := s.session.client()
 	s.mutex.Unlock()
 
 	if connectClient == nil {
@@ -243,7 +235,7 @@ func (s *Server) Start() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.clientRunning {
+	if s.session.isClientRunning() {
 		return nil
 	}
 
@@ -302,7 +294,7 @@ func (s *Server) Start() error {
 	}
 
 	ctx, cancel := context.WithCancel(s.rootCtx)
-	s.actCancel = cancel
+	s.session.setActCancel(cancel)
 
 	// copy old default config
 	_, err = s.profileManager.CopyDefaultProfileIfNotExists()
@@ -343,10 +335,8 @@ func (s *Server) Start() error {
 		return nil
 	}
 
-	s.clientRunning = true
-	s.clientRunningChan = make(chan struct{})
-	s.clientGiveUpChan = make(chan struct{})
-	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
+	runningChan, giveUpChan := s.session.beginRun()
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceStartup)
 	return nil
 }
@@ -359,7 +349,7 @@ func (s *Server) Start() error {
 // — placed in the function-scope defer so every return path (panic,
 // DisableAutoConnect early-exit, backoff exhausted, ctx cancel) closes
 // it. Callers that need to observe "is the goroutine still alive?" use
-// Server.connectionGoroutineRunning() which non-blockingly checks the close state
+// session.connectionGoroutineRunning() which non-blockingly checks the close state
 // of clientGiveUpChan. The defer does NOT touch s.mutex; the daemon's
 // "intent" (clientRunning) is maintained by the RPC handlers, not by this
 // goroutine.
@@ -427,26 +417,6 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, key profilemanager.Se
 		log.Errorf("operation failed: %v", err)
 	}
 	// giveUpChan is closed by the function-scope defer.
-}
-
-// connectionGoroutineRunning reports whether the connectWithRetryRuns goroutine is
-// still running. Returns false when no goroutine has ever been started
-// AND when the most recent one has already closed clientGiveUpChan on
-// exit (whether due to ctx cancel, DisableAutoConnect single-shot
-// completion, or backoff retry exhaustion).
-//
-// MUST be called with s.mutex held — accesses s.clientGiveUpChan which
-// is written by Start/Up under the same lock.
-func (s *Server) connectionGoroutineRunning() bool {
-	if s.clientGiveUpChan == nil {
-		return false
-	}
-	select {
-	case <-s.clientGiveUpChan:
-		return false
-	default:
-		return true
-	}
 }
 
 // attemptLogin runs a login round trip against Management, or the stand-in a
@@ -951,9 +921,7 @@ func (s *Server) reuseOAuthFlow(ctx context.Context, oAuthFlow auth.OAuthFlow, s
 // doesn't leak when there is nothing to wait on.
 func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLoginRequest) (*proto.WaitSSOLoginResponse, error) {
 	s.mutex.Lock()
-	if s.actCancel != nil {
-		s.actCancel()
-	}
+	s.session.cancelAct()
 	ctx, cancel := context.WithCancel(s.rootCtx)
 
 	// Tie the in-flight browser wait to the caller. ctx stays rooted in
@@ -981,7 +949,7 @@ func (s *Server) WaitSSOLogin(callerCtx context.Context, msg *proto.WaitSSOLogin
 		ctx = context.WithValue(ctx, system.DeviceNameCtxKey, msg.Hostname)
 	}
 
-	s.actCancel = cancel
+	s.session.setActCancel(cancel)
 	// One snapshot of the flow this wait belongs to. hint and accountPrompted
 	// are judged against the token that comes back below, and WaitToken blocks
 	// for the whole browser leg: a concurrent Login or RequestJWTAuth replaces
@@ -1117,7 +1085,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	// the existing engine is on the job — just wait for it. When intent
 	// is up but the goroutine has given up (backoff exhausted) OR when
 	// intent is down, fall through to spawn a fresh retry loop.
-	if s.clientRunning && s.connectionGoroutineRunning() {
+	if s.session.isClientRunning() && s.session.connectionGoroutineRunning() {
 		state := internal.CtxGetState(s.rootCtx)
 		status, err := state.Status()
 		if err != nil {
@@ -1125,7 +1093,7 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 			return nil, err
 		}
 		if status == internal.StatusNeedsLogin {
-			s.actCancel()
+			s.session.cancelAct()
 		}
 		s.mutex.Unlock()
 
@@ -1168,16 +1136,14 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	}
 
 	// it should be nil here, but in case it isn't we cancel it.
-	if s.actCancel != nil {
-		s.actCancel()
-	}
+	s.session.cancelAct()
 	ctx, cancel := context.WithCancel(s.rootCtx)
 	md, ok := metadata.FromIncomingContext(callerCtx)
 	if ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 
-	s.actCancel = cancel
+	s.session.setActCancel(cancel)
 
 	if s.config == nil {
 		s.mutex.Unlock()
@@ -1224,11 +1190,9 @@ func (s *Server) Up(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpR
 	s.statusRecorder.UpdateRosenpass(s.config.RosenpassEnabled, s.config.RosenpassPermissive)
 	s.localMetrics.Reconcile(s.config.LocalMetricsEnabled, s.config.LocalMetricsAddress)
 
-	s.clientRunning = true
-	s.clientRunningChan = make(chan struct{})
-	s.clientGiveUpChan = make(chan struct{})
+	runningChan, giveUpChan := s.session.beginRun()
 
-	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), s.config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), s.config, s.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceUpRPC)
 
 	s.mutex.Unlock()
@@ -1243,10 +1207,12 @@ func (s *Server) waitForUp(callerCtx context.Context) (*proto.UpResponse, error)
 	timeoutCtx, cancel := context.WithTimeout(callerCtx, 50*time.Second)
 	defer cancel()
 
+	runningChan, giveUpChan := s.session.runChans()
+
 	select {
-	case <-s.clientGiveUpChan:
+	case <-giveUpChan:
 		return nil, fmt.Errorf("client gave up to connect")
-	case <-s.clientRunningChan:
+	case <-runningChan:
 		s.isSessionActive.Store(true)
 		return &proto.UpResponse{}, nil
 	case <-callerCtx.Done():
@@ -1441,7 +1407,7 @@ func (s *Server) SwitchProfile(callerCtx context.Context, msg *proto.SwitchProfi
 func (s *Server) Down(ctx context.Context, _ *proto.DownRequest) (*proto.DownResponse, error) {
 	s.mutex.Lock()
 
-	giveUpChan := s.clientGiveUpChan
+	_, giveUpChan := s.session.runChans()
 
 	if err := s.cleanupConnection(); err != nil {
 		s.mutex.Unlock()
@@ -1490,7 +1456,7 @@ func (s *Server) Down(ctx context.Context, _ *proto.DownRequest) (*proto.DownRes
 func (s *Server) cleanupConnection() error {
 	s.oauthAuthFlow = oauthAuthFlow{}
 
-	if s.actCancel == nil {
+	if !s.session.hasActCancel() {
 		return ErrServiceNotUp
 	}
 
@@ -1498,24 +1464,25 @@ func (s *Server) cleanupConnection() error {
 	// Logout RPC handlers) tear down the connection because the user
 	// explicitly asked for it. MDM restart does NOT go through this
 	// path, so its clientRunning stays true.
-	s.clientRunning = false
+	s.session.markClientDown()
 
 	// Capture the engine reference before cancelling the context.
 	// After actCancel(), the connectWithRetryRuns goroutine wakes up
 	// and sets connectClient.engine = nil, causing connectClient.Stop()
 	// to skip the engine shutdown entirely.
+	connectClient := s.session.client()
 	var engine *internal.Engine
-	if s.connectClient != nil {
-		engine = s.connectClient.Engine()
+	if connectClient != nil {
+		engine = connectClient.Engine()
 	}
 
-	s.actCancel()
+	s.session.cancelAct()
 
-	if s.connectClient == nil {
+	if connectClient == nil {
 		return nil
 	}
 
-	// TODO: consider calling s.connectClient.Stop() instead of engine.Stop().
+	// TODO: consider calling connectClient.Stop() instead of engine.Stop().
 	// actCancel() lets the run loop stop the engine too, so both stop it
 	// concurrently; ConnectClient.Stop cancels and waits for the run loop,
 	// making the run loop the sole owner of engine shutdown.
@@ -1525,7 +1492,7 @@ func (s *Server) cleanupConnection() error {
 		}
 	}
 
-	s.connectClient = nil
+	s.session.setClient(nil)
 	s.isSessionActive.Store(false)
 
 	log.Infof("service is down")
@@ -1734,7 +1701,7 @@ func isActiveProfile(activeProf *profilemanager.ActiveProfileState, id profilema
 // requested one.
 func (s *Server) logoutFromProfile(ctx context.Context, profile *profilemanager.Profile, username string) error {
 	activeProf, err := s.profileManager.GetActiveProfileState()
-	if err == nil && isActiveProfile(activeProf, profile.ID, username) && s.connectClient != nil {
+	if err == nil && isActiveProfile(activeProf, profile.ID, username) && s.session.client() != nil {
 		return s.sendLogoutRequest(ctx)
 	}
 
@@ -1820,7 +1787,7 @@ func (s *Server) Status(
 	// progress. clientRunning=true with connectionGoroutineRunning=false means the
 	// backoff has given up — there is nothing to wait for; let the
 	// caller observe the failed status directly.
-	alive := s.connectionGoroutineRunning()
+	alive := s.session.connectionGoroutineRunning()
 	s.mutex.Unlock()
 
 	if msg.WaitForReady != nil && *msg.WaitForReady && alive {
@@ -1831,18 +1798,19 @@ func (s *Server) Status(
 		}
 
 		if status != internal.StatusIdle && status != internal.StatusConnected && status != internal.StatusConnecting {
-			s.actCancel()
+			s.session.cancelAct()
 		}
 
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 	loop:
 		for {
+			runningChan, giveUpChan := s.session.runChans()
 			select {
-			case <-s.clientGiveUpChan:
+			case <-giveUpChan:
 				ticker.Stop()
 				break loop
-			case <-s.clientRunningChan:
+			case <-runningChan:
 				ticker.Stop()
 				break loop
 			case <-ticker.C:
@@ -1851,7 +1819,7 @@ func (s *Server) Status(
 					continue
 				}
 				if status != internal.StatusIdle && status != internal.StatusConnected && status != internal.StatusConnecting {
-					s.actCancel()
+					s.session.cancelAct()
 				}
 				continue
 			case <-ctx.Done():
@@ -1911,7 +1879,7 @@ func (s *Server) buildStatusResponse(ctx context.Context, msg *proto.StatusReque
 // getSSHServerState retrieves the current SSH server state including enabled status and active sessions
 func (s *Server) getSSHServerState() *proto.SSHServerState {
 	s.mutex.Lock()
-	connectClient := s.connectClient
+	connectClient := s.session.client()
 	s.mutex.Unlock()
 
 	if connectClient == nil {
@@ -1951,7 +1919,7 @@ func (s *Server) GetPeerSSHHostKey(
 	}
 
 	s.mutex.Lock()
-	connectClient := s.connectClient
+	connectClient := s.session.client()
 	statusRecorder := s.statusRecorder
 	s.mutex.Unlock()
 
@@ -2169,7 +2137,7 @@ func (s *Server) RequestExtendAuthSession(
 
 	s.mutex.Lock()
 	config := s.config
-	connectClient := s.connectClient
+	connectClient := s.session.client()
 	s.mutex.Unlock()
 
 	if config == nil {
@@ -2228,7 +2196,7 @@ func (s *Server) WaitExtendAuthSession(
 	oAuthFlow, authInfo, ok := s.extendAuthSessionFlow.Get()
 
 	s.mutex.Lock()
-	connectClient := s.connectClient
+	connectClient := s.session.client()
 	s.mutex.Unlock()
 
 	if !ok || authInfo.DeviceCode != req.DeviceCode {
@@ -2293,7 +2261,7 @@ func (s *Server) DismissSessionWarning(
 	_ *proto.DismissSessionWarningRequest,
 ) (*proto.DismissSessionWarningResponse, error) {
 	s.mutex.Lock()
-	connectClient := s.connectClient
+	connectClient := s.session.client()
 	s.mutex.Unlock()
 	if connectClient == nil {
 		return &proto.DismissSessionWarningResponse{}, nil
@@ -2307,11 +2275,11 @@ func (s *Server) DismissSessionWarning(
 // ExposeService exposes a local port via the NetBird reverse proxy.
 func (s *Server) ExposeService(req *proto.ExposeServiceRequest, srv proto.DaemonService_ExposeServiceServer) error {
 	s.mutex.Lock()
-	if !s.clientRunning {
+	if !s.session.isClientRunning() {
 		s.mutex.Unlock()
 		return gstatus.Errorf(codes.FailedPrecondition, "client is not running, run 'netbird up' first")
 	}
-	connectClient := s.connectClient
+	connectClient := s.session.client()
 	s.mutex.Unlock()
 
 	if connectClient == nil {
@@ -2364,11 +2332,12 @@ func (s *Server) ExposeService(req *proto.ExposeServiceRequest, srv proto.Daemon
 }
 
 func (s *Server) runProbes(ctx context.Context, waitForProbeResult bool) {
-	if s.connectClient == nil {
+	connectClient := s.session.client()
+	if connectClient == nil {
 		return
 	}
 
-	engine := s.connectClient.Engine()
+	engine := connectClient.Engine()
 	if engine == nil {
 		return
 	}
@@ -2719,7 +2688,7 @@ func (s *Server) connect(ctx context.Context, key profilemanager.SessionKey, con
 	client.SetSyncResponsePersistence(s.persistSyncResponse)
 
 	s.mutex.Lock()
-	s.connectClient = client
+	s.session.setClient(client)
 	s.mutex.Unlock()
 
 	if err := client.Run(runningChan, s.logFile); err != nil {
@@ -2896,14 +2865,12 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 	}
 
 	s.mutex.Lock()
-	if s.actCancel != nil {
-		s.actCancel()
-	}
+	s.session.cancelAct()
 	ctx, cancel := context.WithCancel(callerCtx)
 	if md, ok := metadata.FromIncomingContext(callerCtx); ok {
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
-	s.actCancel = cancel
+	s.session.setActCancel(cancel)
 	s.mutex.Unlock()
 
 	if err := RestoreResidualState(s.rootCtx, s.profileManager.GetStatePath()); err != nil {

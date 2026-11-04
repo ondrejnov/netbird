@@ -40,13 +40,11 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if !s.clientRunning {
+	if !s.session.isClientRunning() {
 		// The client is not running, so there's no engine to restart.
 		return nil
 	}
-	if s.actCancel != nil {
-		s.actCancel()
-	}
+	s.session.cancelAct()
 
 	// Wait for previous connectWithRetryRuns to exit so we don't end up
 	// with two goroutines fighting over the same status recorder + engine.
@@ -55,9 +53,9 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	// happens in the function-scope defer of connectWithRetryRuns, on
 	// every exit path (ctx cancel, backoff exhausted, panic) — see the
 	// defer in server.go.
-	if s.clientGiveUpChan != nil {
+	if _, giveUpChan := s.session.runChans(); giveUpChan != nil {
 		select {
-		case <-s.clientGiveUpChan:
+		case <-giveUpChan:
 		case <-time.After(10 * time.Second):
 			return fmt.Errorf("failed to restart the engine due to timeout")
 		}
@@ -135,12 +133,10 @@ func (s *Server) restartEngineForMDMLocked() error {
 	s.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
 	ctx, cancel := context.WithCancel(s.rootCtx)
-	s.actCancel = cancel
-	s.clientRunning = true
-	s.clientRunningChan = make(chan struct{})
-	s.clientGiveUpChan = make(chan struct{})
+	s.session.setActCancel(cancel)
+	runningChan, giveUpChan := s.session.beginRun()
 	log.Info("MDM restart: spawning connectWithRetryRuns with re-resolved config")
-	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, s.clientRunningChan, s.clientGiveUpChan)
+	go s.connectWithRetryRuns(ctx, activeProf.SessionKey(), config, s.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
 }

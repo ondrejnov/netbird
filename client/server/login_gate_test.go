@@ -67,7 +67,7 @@ func TestLogin_ChangeThatBecomesPrivilegedMidRequestHasNoSideEffects(t *testing.
 	require.NoError(t, err)
 
 	cancelled := false
-	s.actCancel = func() { cancelled = true }
+	s.session.actCancel = func() { cancelled = true }
 
 	// Stand in for a privileged SetConfig that enables the SSH server between the
 	// two checks, which is the interleaving the lock has to make safe.
@@ -114,7 +114,7 @@ func TestLogin_RefusedChangeLeavesAnInProgressLoginAlone(t *testing.T) {
 	require.NoError(t, err)
 
 	cancelled := false
-	s.actCancel = func() { cancelled = true }
+	s.session.actCancel = func() { cancelled = true }
 
 	_, err = s.Login(userCtx(), &proto.LoginRequest{
 		ProfileName:   &target,

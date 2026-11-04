@@ -133,7 +133,7 @@ func TestSwitchProfile_ClearsJWTCache(t *testing.T) {
 func TestCleanupConnection_KeepsJWTCache(t *testing.T) {
 	s := newTestServer()
 	_, cancel := context.WithCancel(context.Background())
-	s.actCancel = cancel
+	s.session.actCancel = cancel
 
 	owner := unprivilegedIdentity()
 	s.jwtCache.store("token", owner, testTTL, s.jwtCache.currentGeneration())
