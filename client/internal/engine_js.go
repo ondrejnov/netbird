@@ -10,7 +10,7 @@ import (
 func (e *Engine) createICEConfig() icemaker.Config {
 	cfg := icemaker.Config{
 		StunTurn:             &e.stunTurn,
-		InterfaceBlackList:   e.config.IFaceBlackList,
+		InterfaceBlackList:   e.iceBlackList(),
 		DisableIPv6Discovery: e.config.DisableIPv6Discovery,
 		NATExternalIPs:       e.parseNATExternalIPMappings(),
 		WGDetector:           e.wgDetector,
