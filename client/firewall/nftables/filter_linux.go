@@ -402,7 +402,7 @@ func (r *family) anonymousPortSet(values []uint16) (*expr.Lookup, error) {
 	for _, p := range values {
 		elements = append(elements, nftables.SetElement{Key: binaryutil.BigEndian.PutUint16(p)})
 	}
-	if err := r.conn.AddSet(set, elements); err != nil {
+	if err := addSet(r.conn, set, elements); err != nil {
 		return nil, fmt.Errorf("add anonymous port set: %w", err)
 	}
 	return &expr.Lookup{
