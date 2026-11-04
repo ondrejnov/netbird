@@ -173,7 +173,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   neopraví, je potřeba restart služby. `AdvancedRouting` platí už před první session, takže `Login` před prvním `Up`
   používá značené sockety stejně jako po `down`.
 - `EEXIST` na probe pravidle znamená, že pravidla fungují. Cizí pravidlo sonda nemaže, zbytek po pádu tedy zůstane
-  (není rozhodnuto, viz I7). Na směrování nemá vliv, 32321 hledá v main stejně jako výchozí 32766.
+  (není rozhodnuto, viz I7). Hledá v main stejně jako výchozí 32766, zastíní jen cizí pravidla s prioritou mezi nimi.
 
 ## 3. Architektura: proč jeden daemon
 
