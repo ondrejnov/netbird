@@ -113,7 +113,7 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
 | Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
 | Q23 | Selhání v6 části izolace u session s v6 v nainstalované rovině iptables | Add vrací chybu, pokus bez overlaye nejde v harnessu otestovat | 5 |
-| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. S gate může `Up` téhož profilu sáhnout na výchozí názvy běžící session (I2), řešit v PR 13 | 11, 13 |
+| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. **Zatím vyřešeno odmítnutím:** vedle běžící session `Up` a `Login` zbytek neuklízí a `CleanState` se odmítne, viz 2.5. Úklid podle názvů slotu patří k napojení prostředků | 11, 13 |
 | Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu | 11 |
 | Q26 | `RemoveProfile` běžícího profilu | **Rozhodnuto a opraveno** ve `f3/run-config`: `FailedPrecondition` před deregistrací. `logout` podle 5.7 zůstává na PR 16 | 11, 16 |
 | Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
@@ -308,6 +308,52 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - `session_compat_test.go` skládá schéma starého klienta z aktuálního deskriptoru (bez polí od 1000 a bez nových zpráv)
   a ověřuje oba směry I10: nová zpráva projde starým klientem bez ztráty polí 1000+ a stará zpráva se načte do nových typů
   s nenastaveným selektorem. Pevná čísla polí ze 5.6 hlídá `TestSessionFieldNumbers`.
+
+**PR 13, první polovina, `f3/gate-sessions`:**
+
+- **Gate** je `service install --enable-concurrent-profiles` podle `--enable-capture`, uložená v `service.json`. Mimo Linux
+  skončí `Start` chybou, služba se nespustí. `server.New` bere gate jako parametr a limit přes `WithMaxSessions`, výchozí je
+  `defaultMaxSessions`. Jediná kontrola limitu je `admitSessionLocked`.
+- **Mapa a focus:** `sessions` je pod `Server.mutex` a platí jen s gate, bez ní zůstává prázdná a jediná session je `focused`.
+  `focused` je atomický ukazatel, protože ho handlery čtou bez zámku. Session zůstává v mapě do odstranění profilu.
+  `session.key` je s gate normalizovaný klíč, výchozí profil je bez uživatele.
+- **Zámky, doplnění 5.4 bodu 2:** pořadí je `guardedConfigMu` → `session.lifecycle` → `Server.mutex` → `session.mu`.
+  `lifecycle` je semafor jedné session, na který se dá čekat s kontextem. Drží ho `Up`, `Down`, `Logout`, `RemoveProfile`,
+  závěr MDM restartu, `CleanState` a úklid v `Login`, po dobu kontroly a provedení. Pomalé kroky běží bez `Server.mutex`:
+  `engine.Stop`, deregistrace a residual cleanup. Rozhodnutí a publikace běhu berou `Server.mutex` krátce. Klient zůstává
+  publikovaný až do konce `engine.Stop`, aby `CleanState` nesáhl na hostitele pod ním. Ostatní RPC v té chvíli odpovídají ze
+  stavu rušeného běhu, stejně jako při MDM restartu. Bez gate je jediný rozdíl, že během zastavení enginu a deregistrace
+  odpovídají ostatní RPC. `Up` bez gate drží `Server.mutex` po celou dobu jako dřív.
+- **Dočasné odmítnutí:** nic zatím session nedává vlastní interface, port ani izolaci, proto `admitSessionLocked` vrátí
+  `Unimplemented`, když hostitele drží jiná session. `hostIsolationWired` nastavují jen testy, napojení prostředků ho nahradí.
+  Limit se kontroluje před tím. Hostitele drží session s živou gorutinou, během MDM restartu a od přijetí po spuštění běhu
+  (`hostClaim`). `Down` ho tedy uvolní až koncem gorutiny, a to i když se zasekne. První session běží s názvy z configu bez
+  ohledu na číslo slotu, které zatím jen rezervuje místo v `sessions.json` (`Slots.Ensure`, porty nedrží).
+- **Odmítnutí při gate** (`refuseUnsupportedRuntime`, `FailedPrecondition`): netstack, `AdvancedRouting()` false,
+  `NB_DNS_STATE_FILE`. Platí i pro první session a pro obnovu po startu.
+- **Bez selektoru `focused`, jiný selektor `FailedPrecondition`:** `checkSessionSelector` je na začátku všech RPC s
+  polem `session` a platí i bez gate. Všechna selhání mají stejnou odpověď, takže selektor neprozradí existenci profilu.
+  Kontrola identity je PR 14.
+- **`Down`** s `all` míří na všechny, kombinace se selektorem je `InvalidArgument`. `Down` a `Logout` zapisují `desired=down`.
+  Zastavení služby jde přes `StopSessions`, které `desired` nemění, a stejně tak sleep.
+- **`Status`:** `sessions` se plní jen s gate a obsahuje běžící session a `focused`. `interface_name` je zatím z configu.
+- **Obnova:** `desired=up` startuje s focused první. Focused se připojí i bez uloženého stavu, pokud při startu neexistoval
+  žádný záznam, protože migrace ukládá vlastníka slotu 0 jako `down` a daemon doposud aktivní profil připojoval. `DisableAutoConnect` má
+  přednost před `desired`. Config nefocused session se čte bez provisioningu, smazaný profil se nevrátí. Bez gate se soubor jen
+  čte a připojí se aktivní profil. Před napojením se vrátí jen první session, ostatní zůstanou `up` a zaloguje se chyba.
+  Poškozený `sessions.json` s gate odmítne start služby a soubor zůstane na místě.
+- **Sleep a MDM** běží přes všechny session souběžně (`forEachSession`). Probuzení vrací jen to, co sleep vzal dolů. MDM obnoví
+  config i session bez běhu, protože z něj čtou kill switche. Běh, který vzdal, se nevrátí, pokud mezitím hostitele drží jiná.
+- **`Login` s gate** cílí jen na focused, jiný profil je `FailedPrecondition`, protože navazující `WaitSSOLogin` jinou session
+  zatím nepojmenuje a `Login` focus nepřesouvá. `up --profile X` z dnešního CLI funguje, protože nejdřív přepne.
+- **`Logout` a `RemoveProfile` s gate** běžící session odmítnou před deregistrací (5.7).
+- **Přesunuto na session:** `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`. Záchyty si pamatují vlastníka, focus se
+  může během záchytu změnit. **Zůstává na `Server`:** `bundleCapture`, `persistSyncResponse`, `probeThrottle` (PR 14, 17).
+- **Zatím nepokryto:** `localMetrics` a `updateManager` jsou svázané se session focused při startu a `SetUpdateManager`
+  dostane i nefocused session (5.4 bod 5, další krok a PR 17). `generateDebugBundle` běží celý pod `Server.mutex` a zdrží ostatní
+  session (PR 17). `SubscribeStatus` a `SubscribeEvents` zůstávají na session focused v okamžiku přihlášení (PR 14). Událost
+  o změně seznamu profilů proto jde na předchozí i nový focus. `Profile.connection_status` a `SystemEvent.profile_id` se
+  neplní (PR 16, 17).
 
 ## 3. Architektura: proč jeden daemon
 
