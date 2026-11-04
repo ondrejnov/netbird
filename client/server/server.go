@@ -408,6 +408,9 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, ss *session, key prof
 				log.Debugf("run client connection exited with PermissionDenied, waiting for login")
 				return backoff.Permanent(err)
 			}
+			if errors.Is(err, internal.ErrSessionRefused) {
+				return backoff.Permanent(err)
+			}
 			log.Debugf("run client connection exited with error: %v. Will retry in the background", err)
 			return err
 		}
@@ -2922,8 +2925,10 @@ func (s *Server) connect(ctx context.Context, ss *session, key profilemanager.Se
 	}
 
 	log.Tracef("running client connection")
-	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, internal.WithSessionKey(key))
-	client.SetUpdateManager(s.updateManager)
+	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(key)...)
+	if s.controlsUpdates(ss) {
+		client.SetUpdateManager(s.updateManager)
+	}
 	client.SetSyncResponsePersistence(s.persistSyncResponse)
 
 	ss.setClient(client)

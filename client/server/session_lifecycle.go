@@ -82,6 +82,7 @@ func (s *Server) prepareConcurrentStart() (concurrentStart, error) {
 		return concurrentStart{}, fmt.Errorf("open stored sessions: %w", err)
 	}
 	s.slots = slots
+	s.host = internal.NewDaemonHost(slots)
 	context.AfterFunc(s.rootCtx, func() {
 		if err := slots.Close(); err != nil {
 			log.Debugf("close stored sessions: %v", err)

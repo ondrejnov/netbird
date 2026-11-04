@@ -53,9 +53,8 @@ type sessionSet struct {
 	// slots stores the slots and the desired states. Set once by the start.
 	slots *hostcoord.Slots
 
-	// hostIsolationWired says that sessions can run side by side. Nothing gives a session its
-	// own interface, port, firewall table or isolation rules yet, so only tests set it.
-	hostIsolationWired bool
+	// host is what the sessions share on the host. Set once by the start.
+	host *internal.DaemonHost
 
 	// connectFn stands in for a client run, stopEngineFn for stopping an engine and
 	// advancedRoutingFn for the routing probe. Tests set them; production leaves them nil.
@@ -70,6 +69,21 @@ func newSessionSet(concurrentProfiles bool) sessionSet {
 		set.sessions = make(map[profilemanager.SessionKey]*session)
 	}
 	return set
+}
+
+// clientOptions binds a client to its profile and, with the gate, to its share of the host.
+func (s *Server) clientOptions(key profilemanager.SessionKey) []internal.ConnectClientOption {
+	opts := []internal.ConnectClientOption{internal.WithSessionKey(key)}
+	if s.concurrentProfiles {
+		opts = append(opts, internal.WithSessionHost(s.host.Session(key)))
+	}
+	return opts
+}
+
+// controlsUpdates reports whether Management may drive the updater through this session. The
+// updater acts on the whole machine, so only the focused session does (5.4).
+func (s *Server) controlsUpdates(ss *session) bool {
+	return !s.concurrentProfiles || s.focusedSession() == ss
 }
 
 // checkConcurrentProfilesPlatform refuses the gate on a platform whose host resources do not
@@ -194,23 +208,18 @@ func (s *Server) otherHostHoldersLocked(ss *session) int {
 	return others
 }
 
-// admitSessionLocked is the only check of the session limit. It also keeps a session from
-// running next to another one for as long as they would share the names of the host resources
-// and run without isolation. It returns how many other sessions hold the host. The caller
-// holds s.mutex.
+// admitSessionLocked is the only check of the session limit. It returns how many other sessions
+// hold the host. The caller holds s.mutex.
 func (s *Server) admitSessionLocked(ss *session) (int, error) {
 	others := s.otherHostHoldersLocked(ss)
 	if s.maxSessions > 0 && uint32(others) >= s.maxSessions {
 		return others, gstatus.Errorf(codes.ResourceExhausted, "the limit of %d concurrent sessions is reached, bring a session down first", s.maxSessions)
 	}
-	if others > 0 && !s.hostIsolationWired {
-		return others, gstatus.Error(codes.Unimplemented, "running a second session next to another one is not implemented yet: it would run without isolation, bring the other session down first")
-	}
 	return others, nil
 }
 
-// admitRestartLocked keeps an MDM restart from bringing back a run that gave up before another
-// session was admitted in its place. Such a run stays ended.
+// admitRestartLocked keeps an MDM restart from bringing back a run that gave up, when other
+// sessions have taken its place up to the limit. Such a run stays ended.
 func (s *Server) admitRestartLocked(ss *session) error {
 	if !s.concurrentProfiles {
 		return nil
@@ -450,8 +459,8 @@ func (s *Server) sessionStatuses(focused *session, focusedStatus internal.Status
 			Focused:     ss == focused,
 		}
 		if holdsHost {
-			if config := ss.connectionConfig(); config != nil {
-				entry.InterfaceName = config.WgIface
+			if resources, running := s.slots.Running(ss.key); running {
+				entry.InterfaceName = resources.Interface
 			}
 			entry.OverlayIp = ss.statusRecorder.GetLocalPeerState().IP
 		}

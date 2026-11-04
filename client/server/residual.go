@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 
 	nberrors "github.com/netbirdio/netbird/client/errors"
+	"github.com/netbirdio/netbird/client/firewall"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 )
@@ -38,6 +39,13 @@ func (s *Server) restoreResidualAtStart(ctx context.Context) error {
 
 	if err := s.flushMarkedRoutes(); err != nil {
 		merr = multierror.Append(merr, err)
+	}
+
+	// Without a sessions file no isolation ever ran here, and the host stays untouched.
+	if len(records) > 0 {
+		if err := firewall.RemoveResidualSessionIsolation(); err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("remove session isolation: %w", err))
+		}
 	}
 
 	return nberrors.FormatErrorOrNil(merr)

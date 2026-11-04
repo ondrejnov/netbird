@@ -389,7 +389,7 @@ func TestCleanupConnection_StopsTheEngineWithoutServerMutex(t *testing.T) {
 
 // The whole point of the rule above: a session stuck in its teardown leaves the others alone.
 func TestGate_ASlowTeardownDoesNotBlockTheOtherSessions(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 

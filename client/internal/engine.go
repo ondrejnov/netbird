@@ -132,6 +132,10 @@ type EngineConfig struct {
 	// daemon. Nil keeps the single-session behavior.
 	Sessions hostcoord.SessionSource
 
+	// Session is the share of the host of a client that runs next to others. Nil keeps the
+	// single-session behavior.
+	Session *SessionHost
+
 	PreSharedKey *wgtypes.Key
 
 	// UDPMuxPort default value 0 - the system will pick an available port
@@ -607,7 +611,7 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL) 
 
 	// start flow manager right after interface creation
 	publicKey := e.config.WgPrivateKey.PublicKey()
-	e.flowManager = netflow.NewManager(e.wgInterface, publicKey[:], e.statusRecorder)
+	e.flowManager = netflow.NewManager(e.wgInterface, publicKey[:], e.statusRecorder, e.config.Session.conntrackOptions()...)
 
 	if e.config.RosenpassEnabled {
 		log.Infof("rosenpass is enabled")
@@ -649,6 +653,7 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL) 
 		PeerStore:           e.peerStore,
 		DisableClientRoutes: e.config.DisableClientRoutes,
 		DisableServerRoutes: e.config.DisableServerRoutes,
+		NewSysOps:           e.config.Session.newSysOps(e),
 	})
 	if err := e.routeManager.Init(); err != nil {
 		log.Errorf("Failed to initialize route manager: %s", err)
@@ -682,6 +687,7 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL) 
 		return fmt.Errorf("up wg interface: %w", err)
 	}
 	e.wgDevice.Store(e.wgInterface.GetWGDevice())
+	e.config.Session.retryHandovers()
 
 	// Start after interface is up since port may have been resolved from 0 or changed if occupied
 	e.shutdownWg.Add(1)
@@ -768,10 +774,15 @@ func (e *Engine) createFirewall() error {
 		return nil
 	}
 
-	firewalld.SetParentContext(e.ctx)
-
 	var err error
-	e.firewall, err = firewall.NewFirewall(e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU)
+	if e.config.Session != nil {
+		// The parent context is one for the process, and the end of this engine must not make
+		// the TrustInterface of another session silently do nothing.
+		e.firewall, err = e.config.Session.newFirewall(e)
+	} else {
+		firewalld.SetParentContext(e.ctx)
+		e.firewall, err = firewall.NewFirewall(e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU)
+	}
 	if err != nil {
 		return fmt.Errorf("create firewall manager: %w", err)
 	}
@@ -2310,6 +2321,7 @@ func (e *Engine) newDnsServer() (dns.Server, error) {
 			StatusRecorder: e.statusRecorder,
 			StateManager:   e.stateManager,
 			DisableSys:     e.config.DisableDNS,
+			HostDNS:        e.config.Session.hostDNS(),
 		})
 		if err != nil {
 			return nil, err
@@ -2487,7 +2499,7 @@ func (e *Engine) startNetworkMonitor() {
 		return
 	}
 
-	e.networkMonitor = networkmonitor.New()
+	e.networkMonitor = networkmonitor.New(e.config.Session.networkMonitorOptions()...)
 	e.shutdownWg.Add(1)
 	go func() {
 		defer e.shutdownWg.Done()

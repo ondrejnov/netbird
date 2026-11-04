@@ -90,6 +90,8 @@ type ConnectClient struct {
 	profileOwnerUnknown bool
 	// daemonSession marks a client whose daemon already probed the routing support.
 	daemonSession bool
+	// sessionHost is the share of the host of a client that runs next to others, nil otherwise.
+	sessionHost *SessionHost
 }
 
 // ConnectClientOption configures optional ConnectClient behavior.
@@ -123,6 +125,11 @@ func WithSessionKey(key profilemanager.SessionKey) ConnectClientOption {
 		c.profileOwnerUnknown = key.Profile == ""
 		c.daemonSession = true
 	}
+}
+
+// WithSessionHost makes the client one session of several on the host.
+func WithSessionHost(host *SessionHost) ConnectClientOption {
+	return func(c *ConnectClient) { c.sessionHost = host }
 }
 
 func NewConnectClient(
@@ -480,6 +487,16 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 			engineConfig.StateDir = filepath.Dir(path)
 		}
 
+		if c.sessionHost != nil {
+			detach, err := c.sessionHost.attach(c.config, engineConfig)
+			if err != nil {
+				log.Error(err)
+				return backoff.Permanent(wrapErr(err))
+			}
+			// Deferred after the clients above, so it runs before they close and after the engine stopped.
+			defer detach()
+		}
+
 		relayManager := relayClient.NewManager(engineCtx, relayURLs, myPrivateKey.PublicKey().String(), engineConfig.MTU,
 			relayClient.WithNetEvents(c.netMgr))
 		c.statusRecorder.SetRelayMgr(relayManager)
@@ -517,7 +534,16 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 
 		if err := engine.Start(loginResp.GetNetbirdConfig(), c.config.ManagementURL); err != nil {
 			log.Errorf("error while starting Netbird Connection Engine: %s", err)
+			if errors.Is(err, ErrSessionRefused) {
+				return backoff.Permanent(wrapErr(err))
+			}
 			return wrapErr(err)
+		}
+
+		if err := c.sessionHost.verifyIsolation(); err != nil {
+			log.Error(err)
+			c.stopRefusedEngine(engine)
+			return backoff.Permanent(wrapErr(err))
 		}
 
 		// Seed the session-expiry deadline from the LoginResponse. Subsequent
@@ -584,6 +610,17 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 		return err
 	}
 	return nil
+}
+
+func (c *ConnectClient) stopRefusedEngine(engine *Engine) {
+	c.engineMutex.Lock()
+	c.engine = nil
+	c.engineMutex.Unlock()
+
+	if err := engine.Stop(); err != nil {
+		log.Errorf("Failed to stop engine: %v", err)
+	}
+	c.statusRecorder.ClientTeardown()
 }
 
 func parseRelayInfo(loginResp *mgmProto.LoginResponse) ([]string, *hmac.Token) {
