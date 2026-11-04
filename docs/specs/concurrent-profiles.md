@@ -290,6 +290,25 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Neřešeno, není v zadání:** `SwitchProfile` a `Login` volají `localMetrics.Reconcile` s configem výběru, i když běží jiný
   profil (PR 17). Hlavička `status.txt` v bundlu bere název z aktivního profilu (`client/internal/debug/debug.go:559`), PR 17.
 
+### 2.5 Poznatky z implementace F3
+
+**PR 12, `f3/proto`:**
+
+- Proto podle 5.6, handlery se nemění. Nová pole existujících zpráv jsou od 1000, `SessionSelector` a `SessionStatus` jsou
+  na konci `daemon.proto`, aby se nepřečíslovaly typy existujících zpráv v `daemon.pb.go`. Odebrané řádky v tom souboru
+  jsou jen přečíslování `goTypes` a `depIdxs` a délky v `rawDesc`. Aditivnost se ověřuje rozdílem descriptor setů z `protoc`
+  (`--descriptor_set_out`, dekódováno přes `--decode`): proti předchozímu `daemon.proto` se liší jen přidané řádky.
+- **Selektor navíc oproti seznamu v 5.6:** `DebugBundleRequest`, `SetSyncResponsePersistenceRequest`,
+  `StartBundleCaptureRequest`, `StopBundleCaptureRequest` a `SubscribeRequest` (`SubscribeEvents`). Pracují s enginem,
+  záznamníkem stavu nebo záchytem jedné session. `SelectNetworksRequest` slouží i `DeselectNetworks`.
+- **Bez selektoru:** `Login`, `Up`, `Logout`, `GetConfig`, `SetConfig` (nesou `profileName` a `username`), `TriggerUpdate`
+  (jen `focused`, 5.4 bod 5), `GetLogLevel`, `SetLogLevel`, `StartCPUProfile`, `StopCPUProfile`, `RegisterUILog`,
+  `GetInstallerResult` (celý proces) a `GetEvents` (server ho neimplementuje).
+- Typy: `Profile.connection_status` je `string` jako `SessionStatus.status`, `max_sessions` je `uint32`.
+- `session_compat_test.go` skládá schéma starého klienta z aktuálního deskriptoru (bez polí od 1000 a bez nových zpráv)
+  a ověřuje oba směry I10: nová zpráva projde starým klientem bez ztráty polí 1000+ a stará zpráva se načte do nových typů
+  s nenastaveným selektorem. Pevná čísla polí ze 5.6 hlídá `TestSessionFieldNumbers`.
+
 ## 3. Architektura: proč jeden daemon
 
 Komunita v #446 navrhuje N samostatných daemonů, protože to vyžaduje méně změn v RPC a
