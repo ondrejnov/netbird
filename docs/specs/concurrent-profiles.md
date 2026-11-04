@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, rozhodnutí R1 až R6 zůstávají otevřená (viz 2.2). Další krok je F1 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. Další krok je F2, před ním rozhodnout 2.3 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -72,17 +72,61 @@ netbird down --profile doma     # routy, firewall i DNS profilu "prace" zůstano
 
 ### 2.2 Otevřená rozhodnutí
 
-Podrobnosti a doporučení jsou v [concurrent-profiles-f0.md](concurrent-profiles-f0.md#otevřená-rozhodnutí-vlastníka).
-Kód závislý na otevřeném rozhodnutí nevzniká, dokud ho vlastník nerozhodne.
+Podrobnosti jsou v [concurrent-profiles-f0.md](concurrent-profiles-f0.md#otevřená-rozhodnutí-vlastníka). R1 až R5
+vlastník schválil 2026-11-04 podle doporučení, R6 potvrdil ve stejný den.
 
 | # | Otázka | Stav | Blokuje |
 |---|---|---|---|
-| R1 | Flow události a sdílené značky (I5) | Otevřené | PR 15, 17 |
-| R2 | Legacy routing při zapnuté gate | Otevřené | PR 13 |
-| R3 | Systémový resolver a domény Managementu | Otevřené | PR 6 |
-| R4 | Odchod vlastníka exit nodu | Otevřené | PR 2, 15 |
-| R5 | openresolv a přepínač `-x` | Otevřené | PR 6 |
-| R6 | Distribuce forku (platformy, název balíčku, dotaz na `pkgs.netbird.io`) | Otevřené | PR 18 |
+| R1 | Flow události a sdílené značky (I5) | Při zapnuté gate se bere jen flow s overlay adresou session v tuple, ostatní se zahodí. Flow přes routy bez overlay adresy se nereportuje | PR 15, 17 |
+| R2 | Legacy routing při zapnuté gate | `up` se odmítne, pokud `AdvancedRouting()` je false, stejně jako netstack | PR 13 |
+| R3 | Systémový resolver a domény Managementu | Přijaté známé omezení v1: domény Managementu session bez root handleru překládá DNS sítě, která vlastní catch-all | PR 6 |
+| R4 | Odchod vlastníka exit nodu | Žádné automatické předání, provoz jde fyzickým defaultem a session dostane varování v `SystemEvent` | PR 2, 15 |
+| R5 | openresolv a přepínač `-x` | `-x` zůstává, hostitelský DNS má jeden vlastník a první vyhrává | PR 6 |
+| R6 | Distribuce forku (platformy, název balíčku, dotaz na `pkgs.netbird.io`) | Ve v1 jen Linux (D3), balíček `netbird-multiprofile`, který koliduje s `netbird`, a dotaz na `pkgs.netbird.io` vypnutý | PR 18 |
+
+### 2.3 Otázky z implementace F1
+
+Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změnit.
+
+| # | Otázka | Zvolená varianta | PR |
+|---|---|---|---|
+| Q1 | Selhání předání routy dalšímu vlastníkovi | Zůstává ve frontě, opakuje se při další operaci nebo přes `RetryHandovers`, bez časovače | 2 |
+| Q2 | Identifikace vlastního `accept` v iptables | `-m comment --comment netbird-N` jen pro slot N | 4 |
+| Q3 | Kam patří `ShutdownState` session | Slot nese state, klíč v souboru se nemění. Dva sloty ve sdíleném state manageru by si ho přepsaly, proto má každá session vlastní state soubor (PR 9, 11) | 4, 6 |
+| Q4 | Předání uvolněného DNS | Bez aktivního předání, další update se stejnou konfigurací zkusí claim znovu | 6 |
+| Q5 | Debian `resolvconf` | Výhradní backend jako openresolv, bez ověření | 6 |
+| Q6 | Kolize DNS domény (sekce 6) | Neimplementováno, rozhraní pro zjištění kolize není známé | 6 |
+| Q7 | Prefixové porovnání v ICE blacklistu | `wt1` vyloučí i `wt10`, chyba na straně vyloučení | 8 |
+| Q8 | Ověření DNS na reálném resolved a NM | Harness je Alpine bez systemd, testy běží proti falešným službám na D-Bus | 6 |
+| Q9 | **Vynucení I3, I4 v userspace režimu (sekce 7)** | **Rozhodnuto:** vynucení se řídí typem firewallu, jaderná izolace je povinná všude, kde existuje nativní backend | 5, 13 |
+| Q10 | **`nativeRouter` v uspfilteru** | **Rozhodnuto:** routovaný paket jde do jádra, proto je v tomto režimu jaderná izolace povinná | 5, 13 |
+| Q11 | Minimální jádro | `own` potřebuje jádro 5.6 a novější, na starším se session nespustí | 5 |
+| Q12 | iptables bez modulů ipset | Izolace odmítne session (I6), bez fallbacku | 5 |
+| Q13 | Session s v6 bez funkční v6 izolace | **Rozhodnuto:** v6 se odebere a session pokračuje na v4 | 5, 13 |
+| Q14 | Opakování `Verify` | Jen po instalaci enginu, cizí pravidlo nad skokem v iptables by do té doby izolaci obešlo | 5, 13 |
+| Q15 | Překryv v6 u běžící session | `Add` hlásí `IPv6Disabled`, daemon musí v6 odebrat za běhu | 5, 15 |
+| Q16 | Adresy na interface jiné session mimo její prefix, např. `fe80::` | Nezahrnuto do `overlays` | 5 |
+| Q17 | Formát `sessions.json` | **Schváleno:** `{version:1, sessions:[{profile, username, slot, desired}]}`, neznámé pole je poškození | 7 |
+| Q18 | Explicitní `WgPort` obsazený cizím procesem | Port z alokátoru jako dnes, alternativa je odmítnutí | 7 |
+| Q19 | Název kolidující s cizím linkem, který není session | Neřešeno, `wg_link_linux.go` by ho smazal a od zbytku po pádu ho odlišit neumí | 7, 13 |
+| Q20 | Foreground režim a zámek `sessions.json` | Druhá instance se odmítne. Návrh: foreground `Slots` vůbec neotevírá | 7, 13 |
+| Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
+| Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
+
+**Nový nález, globální stav v závislosti:** `allocSetID` v `github.com/google/nftables@v0.3.0/set.go:48,505` je
+nesynchronizovaný čítač procesu. Na `origin/main` ho shodí `TestEngine_MultiplePeers` pod `-race` (1 ze 4 běhů).
+Souběžné session ho budou spouštět běžně, takže před PR 13 je nutné serializovat `AddSet` napříč managery v procesu,
+nebo přiřazovat `Set.ID` ze sdíleného atomického čítače. Závislost se bez souhlasu nezvedá.
+
+**Známá selhání i na čistém `origin/main`:** `TestUDPTracker_Cleanup` pod `-race` a občas čtyři testy
+`TestNftablesManager*Compatibility*` v harnessu (`iptables-save` vrací prázdný výstup).
+
+**Přiřazení pro PR 13:** předat jednu instanci `Isolation`, `HostState` a `Accounting` všem session, zdroj izolace
+vyžadovat při zapnuté gate (nil odmítnout), volat `Add` před peery a `Verify` po enginu, `RemoveAll` pro oba backendy
+při residual cleanupu, a `RetryHandovers` při obnově interface.
+
+**Ověřování:** testy klienta se na hostiteli s běžícím daemonem nespouštějí. `TestLogin` bez `--daemon-addr` mluví se
+skutečným socketem a přepíše jeho config. Privilegovaný harness se při ověřování oprav spouští s `-count=1`.
 
 ## 3. Architektura: proč jeden daemon
 
@@ -238,7 +282,8 @@ Tvar rozhraní je orientační, agent ho upřesní během F1. Pravidla jsou ale 
   `nf_conntrack_acct`.
 - **`nbnet.Init`** běží jednou při startu daemonu, před první session. `CheckFwmarkSupport` nepřepíná globální
   proměnnou.
-- **Vlastník exit nodu** vlastní i `unreachable ::/0` ve sdílené tabulce.
+- **Vlastník exit nodu** vlastní i `unreachable ::/0` ve sdílené tabulce. Výchozí prefixy se po odchodu vlastníka
+  nepředávají (R4).
 - **Sdílená tabulka `0x1BD0`, routy rozlišené přes `dev`.** Stejný prefix ze dvou session
   nainstaluje jen vlastník. Po uvolnění se automaticky nainstaluje další v pořadí, aby se
   neopakoval problém refcounteru, který volá add jen při přechodu 0→1.
@@ -254,13 +299,14 @@ Tvar rozhraní je orientační, agent ho upřesní během F1. Pravidla jsou ale 
 |---|---|---|
 | systemd-resolved | Per-link. Dotaz jde na všechny linky se shodnou doménou, pozitivní odpověď vyhrává, jméno v obou sítích je závod, chybový rcode určuje jedna linka, nereagující server blokuje negativní dotazy až 120 s. Ověřeno na systemd 257 | Jeden vlastník |
 | NetworkManager | Per-link, neověřeno | Jeden vlastník |
-| resolvconf | openresolv se kvůli `-x` chová jako `file`: hostitelský DNS má jedna session, viz R5. Debian `resolvconf` neověřeno | Jeden vlastník |
+| resolvconf | openresolv se kvůli `-x` chová jako `file`: hostitelský DNS má jedna session, první vyhrává (R5). Debian `resolvconf` neověřeno | Jeden vlastník |
 | `/etc/resolv.conf` (file) | Nejde sloučit: **hostitelský DNS má jen jedna session** | Jeden vlastník |
 
 - `captureOriginalNameservers` musí vynechat **všechny** NetBird interfaces.
 - Session bez hostitelského DNS dál funguje přes IP a hlásí varování v `SystemEvent`.
 - Sloučený zapisovač `resolv.conf` a sdílený fan-out resolver jsou mimo v1.
-- Překlad domén Managementu u session bez root handleru řeší R3.
+- Domény Managementu u session bez root handleru překládá DNS sítě, která vlastní catch-all. V1 to přijímá jako
+  známé omezení (R3).
 
 ### 5.4 Daemon: vrstva session
 
@@ -372,7 +418,7 @@ Limit je dnes 4, ale jediné, co smí počet omezovat, je **jedna kontrola v `Se
 - **Zakázáno:** pole pevné velikosti, rozsahy podle limitu, předpoklad o maximálním čísle slotu nebo
   jednociferném suffixu.
 - **Žádný prostředek hostitele se nepřiděluje na session, pokud není nezbytný.** Fwmarky, routovací
-  tabulka a pravidla 105/110 zůstávají sdílené. Sdílené značky proto neurčují session, důsledek pro flow řeší R1.
+  tabulka a pravidla 105/110 zůstávají sdílené. Sdílené značky proto neurčují session, flow se filtruje podle overlay adresy (R1).
 
 | Prostředek | Kapacita | Požadavek |
 |---|---|---|
@@ -396,8 +442,8 @@ a změřená paměť, CPU a latence paketů jsou zaznamenané v této specifikac
 | Overlay IPv6 se překrývá | Nová session přeskočí v6 a pokračuje na v4 (IPv6 je soft feature) |
 | Stejný prefix routy | Vlastní ho první session, po jejím odchodu přejde na další. Varování v `SystemEvent` |
 | Routa pokrývá overlay jiné session | Routa se odmítne (rozšíření `isOwnAddress` na `OverlayPrefixes()`) |
-| Exit node | Jeden v celém počítači, první vyhrává. Ruční výběr v další session vrátí `FailedPrecondition`, auto-apply se přeskočí s varováním. Chování po odchodu vlastníka určí R4 |
-| Stejná DNS doména | systemd-resolved: chování podle 5.3, při kolizi jména varování (rozhraní pro zjištění kolize spike netestoval). Ostatní: doménu má jedna session (u openresolv viz R5), jména druhé nefungují, IP ano, varování |
+| Exit node | Jeden v celém počítači, první vyhrává. Ruční výběr v další session vrátí `FailedPrecondition`, auto-apply se přeskočí s varováním. Po odchodu vlastníka se nepředává, provoz jde fyzickým defaultem, varování v `SystemEvent` (R4) |
+| Stejná DNS doména | systemd-resolved: chování podle 5.3, při kolizi jména varování (rozhraní pro zjištění kolize spike netestoval). Ostatní: doménu má první session (R5), jména druhé nefungují, IP ano, varování |
 | DNS catch-all | Jeden vlastník, první vyhrává |
 | Limit session (výchozí 4) | `up` vrátí `ResourceExhausted` |
 
@@ -422,14 +468,14 @@ Každý invariant musí mít test.
 | I9 | Secrets a tokeny patří jedné session. JWT cache ani SSO flow se nesdílí |
 | I10 | Starý klient funguje s novým daemonem a nový klient se starým (`GetFeatures`) |
 
-**I3 a I4 musí platit ve všech třech režimech:**
+**I3 a I4 musí platit ve všech režimech. Vynucení se řídí typem firewallu (Q9, Q10):**
 
 | Režim | Vynucení |
 |---|---|
-| kernel | nftables/iptables pravidla |
-| userspace | `uspfilter` a forwarder |
+| Nativní firewall (kernel i userspace bind) | Povinně nftables/iptables izolace |
+| Bez nativního firewallu | `uspfilter` a forwarder |
 | netstack | Při zapnuté gate se ve v1 nepovoluje, `up` vrátí srozumitelnou chybu |
-| legacy routing | Při zapnuté gate podle R2 |
+| legacy routing | Při zapnuté gate se nepovoluje, `up` vrátí srozumitelnou chybu (R2) |
 
 **I8:** Linux monitor sleduje jen default routy v main tabulce (`networkmonitor/check_change_linux.go:39`).
 `GetNextHop` musí vynechat všechny NetBird interfaces.
