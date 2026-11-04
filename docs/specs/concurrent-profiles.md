@@ -238,6 +238,25 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Neuklizený zbytek zůstává:** když `Cleanup` selže, stav v souboru zůstane a opakuje se při každém startu. S gate by
   pozdější `Up` toho profilu přes `restoreOwnResidual` mohl sáhnout na výchozí názvy běžící session (I2). Není rozhodnuto.
 
+**`f3/mdm-wait`, Q28:**
+
+- `onMDMPolicyChange` pod `Server.mutex` jen zkopíruje `runRestart` (klíč běhu, `giveUp`, generaci `actCancel`), zruší běh a
+  zámek pustí. Po čekání zámek znovu vezme a restart provede, jen když `restartStillWanted`: `clientRunning` platí a
+  nikdo mezitím nevyměnil `actCancel`. Jinak skončí bez chyby a novou politiku pro běh načte další `Up`. Vybraný config se
+  přesto obnoví a odejdou události `config_changed` a `policy_applied`, protože z něj čtou kill switche politiku a `Down` v
+  okně by je jinak nechal na staré. Při nečitelném souboru jde politika na kopii configu (I6), klíče, které z politiky
+  zmizely, v ní zůstanou do dalšího načtení. Když není co restartovat vůbec, config se neobnoví, to je chování upstreamu.
+- **Kdo v okně čekání co vidí:** `Down` a `Logout` projdou hned a restart se neprovede. `Login` a `WaitSSOLogin` projdou
+  hned, převezmou session a restart se neprovede. `Up` a `Status` s `WaitForReady` počkají na konec restartu kanálem, s
+  kontextem volajícího, takže se připojí k novému běhu. Ostatní RPC odpovídají ze stavu rušeného běhu.
+- `runningKey` po dobu restartu hlásí běh i po konci jeho gorutiny, jinak by `Logout` a residual cleanup rozhodovaly v
+  mezeře mezi starým a novým během o aktivním profilu. Platí jen pro běh, který restart vrátí: ne pro běh, který vzdal už
+  před ním, ani když session mezitím převzal `Login`.
+- Druhý souběžný restart `beginRestart` odmítne. Ticker běží v jedné gorutině, takže v provozu nenastává.
+- **Beze změny z upstreamu:** vypršení 10 s nebo nečitelný config běhu vrátí chybu, nový běh se nespustí a config se
+  neobnoví. `Up` ve `waitForUp` a `Status` s `WaitForReady`, které už čekají, když restart začne, skončí se starým `giveUp`
+  jako dřív: `Up` chybou `client gave up to connect`, `Status` odpovědí.
+
 ## 3. Architektura: proč jeden daemon
 
 Komunita v #446 navrhuje N samostatných daemonů, protože to vyžaduje méně změn v RPC a
@@ -730,22 +749,3 @@ ve forku běží; co neběží, uveď v PR výslovně.
 | Panic shodí všechny sítě | Střední | Nelze plně zabránit (viz 5.4); residual cleanup a obnovení session ze `sessions.json` po restartu služby |
 | Sdílená DNS doména omezí UX | Nízký | Self-hosted správce nastaví vlastní doménu (D7), varování, případný fan-out resolver později |
 | Dlouhá řada PR a konflikty v `server.go` | Střední | Malé PR, slití upstreamu těsně před F2, F2 co nejrychleji za sebou |
-
-**`f3/mdm-wait`, Q28:**
-
-- `onMDMPolicyChange` pod `Server.mutex` jen zkopíruje `runRestart` (klíč běhu, `giveUp`, generaci `actCancel`), zruší běh a
-  zámek pustí. Po čekání zámek znovu vezme a restart provede, jen když `restartStillWanted`: `clientRunning` platí a
-  nikdo mezitím nevyměnil `actCancel`. Jinak skončí bez chyby a novou politiku pro běh načte další `Up`. Vybraný config se
-  přesto obnoví a odejdou události `config_changed` a `policy_applied`, protože z něj čtou kill switche politiku a `Down` v
-  okně by je jinak nechal na staré. Při nečitelném souboru jde politika na kopii configu (I6), klíče, které z politiky
-  zmizely, v ní zůstanou do dalšího načtení. Když není co restartovat vůbec, config se neobnoví, to je chování upstreamu.
-- **Kdo v okně čekání co vidí:** `Down` a `Logout` projdou hned a restart se neprovede. `Login` a `WaitSSOLogin` projdou
-  hned, převezmou session a restart se neprovede. `Up` a `Status` s `WaitForReady` počkají na konec restartu kanálem, s
-  kontextem volajícího, takže se připojí k novému běhu. Ostatní RPC odpovídají ze stavu rušeného běhu.
-- `runningKey` po dobu restartu hlásí běh i po konci jeho gorutiny, jinak by `Logout` a residual cleanup rozhodovaly v
-  mezeře mezi starým a novým během o aktivním profilu. Platí jen pro běh, který restart vrátí: ne pro běh, který vzdal už
-  před ním, ani když session mezitím převzal `Login`.
-- Druhý souběžný restart `beginRestart` odmítne. Ticker běží v jedné gorutině, takže v provozu nenastává.
-- **Beze změny z upstreamu:** vypršení 10 s nebo nečitelný config běhu vrátí chybu, nový běh se nespustí a config se
-  neobnoví. `Up` ve `waitForUp` a `Status` s `WaitForReady`, které už čekají, když restart začne, skončí se starým `giveUp`
-  jako dřív: `Up` chybou `client gave up to connect`, `Status` odpovědí.
