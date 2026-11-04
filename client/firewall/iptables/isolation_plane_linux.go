@@ -264,7 +264,8 @@ func (p *isolationPlane) addMemberObjects(name IfaceName, overlay netip.Prefix) 
 	if err := p.addOverlay(name, overlay); err != nil {
 		return err
 	}
-	if err := p.client.Append(tableMangle, isoChainForward, p.forwardRule(name)...); err != nil {
+	// A rule a failed rollback left must not be added twice by the next attempt.
+	if err := p.client.AppendUnique(tableMangle, isoChainForward, p.forwardRule(name)...); err != nil {
 		return fmt.Errorf("add forward rule: %w", err)
 	}
 	return nil
