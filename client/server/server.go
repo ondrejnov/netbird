@@ -30,6 +30,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	sleephandler "github.com/netbirdio/netbird/client/internal/sleep/handler"
 	"github.com/netbirdio/netbird/client/mdm"
+	nbnet "github.com/netbirdio/netbird/client/net"
 	"github.com/netbirdio/netbird/client/system"
 	mgm "github.com/netbirdio/netbird/shared/management/client"
 	"github.com/netbirdio/netbird/shared/management/domain"
@@ -240,6 +241,9 @@ func (s *Server) Start() error {
 	if err := RestoreResidualState(s.rootCtx, s.profileManager.GetStatePath()); err != nil {
 		log.Warnf(errRestoreResidualState, err)
 	}
+
+	// Sessions share the result, so it is settled here, before the first one can start.
+	nbnet.Init()
 
 	if s.updateManager == nil {
 		stateMgr := statemanager.New(s.profileManager.GetStatePath())

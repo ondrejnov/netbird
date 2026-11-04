@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	log "github.com/sirupsen/logrus"
 
@@ -16,11 +17,14 @@ var (
 	vpnInterfaceName string
 	vpnInitMutex     sync.RWMutex
 
-	advancedRoutingSupported bool
+	advancedRoutingSupported atomic.Bool
 )
 
+// Init detects whether advanced routing can be used. The daemon calls it once at startup,
+// and clients that run without a daemon call it on every run. It is safe to repeat and
+// to call concurrently.
 func Init() {
-	advancedRoutingSupported = checkAdvancedRoutingSupport()
+	advancedRoutingSupported.Store(checkAdvancedRoutingSupport())
 }
 
 func checkAdvancedRoutingSupport() bool {
@@ -50,7 +54,7 @@ func checkAdvancedRoutingSupport() bool {
 
 // AdvancedRouting reports whether routing loops can be avoided without using exclusion routes
 func AdvancedRouting() bool {
-	return advancedRoutingSupported
+	return advancedRoutingSupported.Load()
 }
 
 // GetVPNInterfaceName returns the stored VPN interface name

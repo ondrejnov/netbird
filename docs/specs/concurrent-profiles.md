@@ -161,9 +161,19 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   restart z MDM.
 - Na `Server` zůstává `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`, `bundleCapture`, `persistSyncResponse` a
   `probeThrottle`. Zadání je neřadí k žádné skupině, jejich přesun rozhodne PR 13.
-- **Nepřesunutá závada z PR 9:** sekce 8 řadí `nbnet.Init` do PR 9, ale `advancedRoutingSupported` je dál procesová
-  proměnná bez synchronizace. `TestServer_SubcribeEvents` na ní pod `-race` občas selže, i na `f2/identity` (3 ze 6 běhů).
+- **Závada z PR 9, opravená ve `f2/nbnet-init-once`:** sekce 8 řadí `nbnet.Init` do PR 9, ale `advancedRoutingSupported`
+  zůstala nesynchronizovaná. `TestServer_SubcribeEvents` na ní pod `-race` občas selhal, i na `f2/identity` (3 ze 6 běhů).
   `TestLogin` v `client/cmd` pod `-race` selhává i bez PR 10, závod je v logování v `util/log.go`.
+
+**`f2/nbnet-init-once`, N2 a 5.2:**
+
+- `Server.Start` volá `nbnet.Init` hned po residual restore, stejně jako foreground v `up.go`. Klient s `WithSessionKey`
+  ho nevolá. Foreground a embed ho volají při každém běhu jako dřív, protože embed nastavuje netstack přes env až v `New`.
+- **Rozdíl pro jednu session, schválený zadáním:** podpora se zjišťuje jednou za běh daemonu. `down` a `up` už chybu sondy
+  neopraví, je potřeba restart služby. `AdvancedRouting` platí už před první session, takže `Login` před prvním `Up`
+  používá značené sockety stejně jako po `down`.
+- `EEXIST` na probe pravidle znamená, že pravidla fungují. Cizí pravidlo sonda nemaže, zbytek po pádu tedy zůstane
+  (není rozhodnuto, viz I7). Na směrování nemá vliv, 32321 hledá v main stejně jako výchozí 32766.
 
 ## 3. Architektura: proč jeden daemon
 
