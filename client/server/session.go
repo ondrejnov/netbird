@@ -288,6 +288,13 @@ func (ss *session) currentConfig() *profilemanager.Config {
 	return ss.config
 }
 
+// selectedConfig returns currentConfig along with the profile it was resolved for.
+func (ss *session) selectedConfig() (profilemanager.SessionKey, *profilemanager.Config) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.configKey, ss.config
+}
+
 func (ss *session) setConfig(key profilemanager.SessionKey, config *profilemanager.Config) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()

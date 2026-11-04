@@ -11,6 +11,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
+	"github.com/netbirdio/netbird/client/mdm"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
@@ -348,4 +349,28 @@ func TestAwaitRestart_EndsWithContextAndRestart(t *testing.T) {
 	case <-time.After(rpcDeadline):
 		t.Fatal("awaitRestart did not end with the restart")
 	}
+}
+
+// The kill switches read the policy off the selected config, which a restart replaces. A
+// Down during the wait cancels the restart, not the policy change.
+func TestMDMRestart_DownDuringTheWaitStillAppliesThePolicy(t *testing.T) {
+	p := startParkedRestart(t)
+	s := p.f.s
+	require.False(t, s.checkProfilesDisabled(), "the policy should not disable profiles yet")
+
+	withMDMPolicy(t, s, mdm.NewPolicy(map[string]any{mdm.KeyDisableProfiles: true}))
+
+	down := make(chan error, 1)
+	go func() {
+		_, err := s.Down(context.Background(), &proto.DownRequest{})
+		down <- err
+	}()
+	require.Eventually(t, func() bool { return !s.session.isClientRunning() }, rpcDeadline, 10*time.Millisecond,
+		"Down stayed blocked while the MDM restart waited for the run to end")
+
+	p.endRun()
+	require.NoError(t, <-down)
+	require.NoError(t, p.waitRestarted(t))
+
+	assert.True(t, s.checkProfilesDisabled(), "the new policy should be in force although nothing restarted")
 }

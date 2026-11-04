@@ -189,6 +189,7 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.clientConnectingOrConnected()
 		ss.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{})
 		ss.currentConfig()
+		ss.selectedConfig()
 		ss.runningKey()
 		ss.beginRestart()
 		ss.restartStillWanted(runRestart{})

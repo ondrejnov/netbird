@@ -735,8 +735,9 @@ ve forku běží; co neběží, uveď v PR výslovně.
 
 - `onMDMPolicyChange` pod `Server.mutex` jen zkopíruje `runRestart` (klíč běhu, `giveUp`, generaci `actCancel`), zruší běh a
   zámek pustí. Po čekání zámek znovu vezme a restart provede, jen když `restartStillWanted`: `clientRunning` platí a
-  nikdo mezitím nevyměnil `actCancel`. Jinak skončí bez chyby a bez události `policy_applied`, novou politiku načte
-  další `Up`.
+  nikdo mezitím nevyměnil `actCancel`. Jinak skončí bez chyby a bez události `policy_applied`, novou politiku pro běh
+  načte další `Up`. Vybraný config se přesto načte znovu, protože z něj čtou kill switche politiku a `Down` v okně by je
+  jinak nechal na staré. Když není co restartovat vůbec, config se neobnoví, to je chování upstreamu.
 - **Kdo v okně čekání co vidí:** `Down` a `Logout` projdou hned a restart se neprovede. `Login` a `WaitSSOLogin` projdou
   hned, převezmou session a restart se neprovede. `Up` a `Status` s `WaitForReady` počkají na konec restartu kanálem, s
   kontextem volajícího, takže se připojí k novému běhu. Ostatní RPC odpovídají ze stavu rušeného běhu.

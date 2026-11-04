@@ -67,6 +67,7 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	// The lock was free during the wait, so the session may have moved on.
 	if !s.session.restartStillWanted(restart) {
 		log.Info("MDM restart: the session was taken down or over during the wait, not restarting")
+		s.refreshSelectedConfig()
 		return nil
 	}
 
@@ -147,6 +148,22 @@ func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, run
 	go s.connectWithRetryRuns(ctx, key, config, s.session.statusRecorder, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
 	return nil
+}
+
+// refreshSelectedConfig re-reads the selected config, whose overlay the kill switches read,
+// for a policy change that restarted nothing. On a failure the config stays as it was and
+// the next Up, SwitchProfile or Login resolves it again.
+func (s *Server) refreshSelectedConfig() {
+	key, config := s.session.selectedConfig()
+	if config == nil {
+		return
+	}
+	fresh, err := s.storedRunningConfig(key)
+	if err != nil {
+		log.Warnf("failed to apply the MDM policy to the selected profile: %v", err)
+		return
+	}
+	s.session.setConfig(key, fresh)
 }
 
 // lockAfterRestart takes s.mutex for an RPC that needs the outcome of an MDM restart in
