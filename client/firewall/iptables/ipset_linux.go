@@ -72,7 +72,10 @@ func (r *family) deleteIpSet(setName string) error {
 }
 
 func (r *family) UpdateSet(set firewall.Set, prefixes []netip.Prefix) error {
-	name := r.ipsetName(set.HashedName())
+	name, err := r.ipsetName(set.HashedName())
+	if err != nil {
+		return err
+	}
 	var merr *multierror.Error
 	for _, prefix := range prefixes {
 		if err := r.addPrefixToIPSet(name, prefix); err != nil {
@@ -86,11 +89,8 @@ func (r *family) UpdateSet(set firewall.Set, prefixes []netip.Prefix) error {
 	return nberrors.FormatErrorOrNil(merr)
 }
 
-func (r *family) ipsetName(name string) string {
-	if r.v6 {
-		return name + "-v6"
-	}
-	return name
+func (r *family) ipsetName(name string) (string, error) {
+	return r.names.ipsetName(name, r.v6)
 }
 
 func (r *family) createIPSet(name string) error {

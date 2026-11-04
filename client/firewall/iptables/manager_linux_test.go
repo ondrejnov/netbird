@@ -389,7 +389,8 @@ func TestIptablesNatRuleDropsSourceSetOnDestinationFailure(t *testing.T) {
 
 	// Poison the destination set's name so its hash:net creation fails after
 	// the source set has already been created.
-	poisoned := manager.family4.ipsetName(destSet.HashedName())
+	poisoned, err := manager.family4.ipsetName(destSet.HashedName())
+	require.NoError(t, err)
 	require.NoError(t, ipset.Create(poisoned, ipset.TypeHashIP, ipset.CreateOptions{}))
 	t.Cleanup(func() {
 		if err := ipset.Destroy(poisoned); err != nil {
@@ -407,7 +408,9 @@ func TestIptablesNatRuleDropsSourceSetOnDestinationFailure(t *testing.T) {
 
 	require.Error(t, manager.AddNatRule(pair), "the destination set must fail to be created")
 
-	_, ok := manager.family4.ipsetCounter.Get(manager.family4.ipsetName(sourceSet.HashedName()))
+	sourceName, err := manager.family4.ipsetName(sourceSet.HashedName())
+	require.NoError(t, err)
+	_, ok := manager.family4.ipsetCounter.Get(sourceName)
 	require.False(t, ok, "the source set reference must be released")
 }
 
@@ -434,7 +437,8 @@ func TestIptablesNatRuleReAddKeepsSetReferences(t *testing.T) {
 	}
 
 	require.NoError(t, manager.AddNatRule(pair), "add nat rule")
-	name := manager.family4.ipsetName(set.HashedName())
+	name, err := manager.family4.ipsetName(set.HashedName())
+	require.NoError(t, err)
 	first, ok := manager.family4.ipsetCounter.Get(name)
 	require.True(t, ok, "the marking rule must hold a reference to its set")
 

@@ -67,7 +67,7 @@ func (r *family) addLegacyRouteRule(pair firewall.RouterPair) error {
 	}
 
 	rule := []string{"-s", pair.Source.String(), "-d", pair.Destination.String(), "-j", "ACCEPT"}
-	if err := r.iptablesClient.Append(tableFilter, chainRTFwdIn, rule...); err != nil {
+	if err := r.iptablesClient.Append(tableFilter, r.names.rtFwdIn, rule...); err != nil {
 		return fmt.Errorf("add legacy forwarding rule %s -> %s: %w", pair.Source, pair.Destination, err)
 	}
 
@@ -80,7 +80,7 @@ func (r *family) removeLegacyRouteRule(pair firewall.RouterPair) error {
 	ruleID := pair.GenKey(firewall.ForwardingFormat)
 
 	if rule, exists := r.rules[ruleID]; exists {
-		if err := r.iptablesClient.DeleteIfExists(tableFilter, chainRTFwdIn, rule...); err != nil {
+		if err := r.iptablesClient.DeleteIfExists(tableFilter, r.names.rtFwdIn, rule...); err != nil {
 			return fmt.Errorf("remove legacy forwarding rule %s -> %s: %w", pair.Source, pair.Destination, err)
 		}
 		delete(r.rules, ruleID)
@@ -110,7 +110,7 @@ func (r *family) RemoveAllLegacyRouteRules() error {
 		if !strings.HasPrefix(string(k), firewall.ForwardingFormatPrefix) {
 			continue
 		}
-		if err := r.iptablesClient.DeleteIfExists(tableFilter, chainRTFwdIn, rule...); err != nil {
+		if err := r.iptablesClient.DeleteIfExists(tableFilter, r.names.rtFwdIn, rule...); err != nil {
 			merr = multierror.Append(merr, fmt.Errorf("remove legacy forwarding rule: %w", err))
 		} else {
 			delete(r.rules, k)
@@ -129,7 +129,7 @@ func (r *family) addPostroutingRules() error {
 		"!", "-o", "lo",
 		"-j", "MASQUERADE",
 	}
-	if err := r.iptablesClient.Append(tableNat, chainRTNAT, rule1...); err != nil {
+	if err := r.iptablesClient.Append(tableNat, r.names.rtNAT, rule1...); err != nil {
 		return fmt.Errorf("add outbound masquerade rule: %w", err)
 	}
 	r.rules["static-nat-outbound"] = rule1
@@ -140,7 +140,7 @@ func (r *family) addPostroutingRules() error {
 		"-o", r.wgIface.Name(),
 		"-j", "MASQUERADE",
 	}
-	if err := r.iptablesClient.Append(tableNat, chainRTNAT, rule2...); err != nil {
+	if err := r.iptablesClient.Append(tableNat, r.names.rtNAT, rule2...); err != nil {
 		return fmt.Errorf("add return masquerade rule: %w", err)
 	}
 	r.rules["static-nat-return"] = rule2
@@ -157,7 +157,7 @@ func (r *family) addMSSClampingRules() error {
 	mss := r.mtu - overhead
 
 	// Add jump rule from FORWARD chain in mangle table to our custom chain
-	jumpRule := jumpRuleSpec(chainRTMSSClamp)
+	jumpRule := jumpRuleSpec(r.names.rtMSSClamp)
 	if err := r.iptablesClient.Insert(tableMangle, chainForward, 1, jumpRule...); err != nil {
 		return fmt.Errorf("add jump to MSS clamp chain: %w", err)
 	}
@@ -170,7 +170,7 @@ func (r *family) addMSSClampingRules() error {
 		"-j", "TCPMSS",
 		"--set-mss", fmt.Sprintf("%d", mss),
 	}
-	if err := r.iptablesClient.Append(tableMangle, chainRTMSSClamp, ruleOut...); err != nil {
+	if err := r.iptablesClient.Append(tableMangle, r.names.rtMSSClamp, ruleOut...); err != nil {
 		return fmt.Errorf("add outbound MSS clamp rule: %w", err)
 	}
 	r.rules["mss-clamp-out"] = ruleOut
@@ -196,7 +196,7 @@ func (r *family) addNatRule(pair firewall.RouterPair) (err error) {
 	ruleID := pair.GenKey(firewall.NatFormat)
 
 	if rule, exists := r.rules[ruleID]; exists {
-		if derr := r.iptablesClient.DeleteIfExists(tableMangle, chainRTPre, rule...); derr != nil {
+		if derr := r.iptablesClient.DeleteIfExists(tableMangle, r.names.rtPre, rule...); derr != nil {
 			return fmt.Errorf("remove existing marking rule for %s: %w", pair.Destination, derr)
 		}
 		delete(r.rules, ruleID)
@@ -243,7 +243,7 @@ func (r *family) addNatRule(pair firewall.RouterPair) (err error) {
 
 	// Ensure nat rules come first, so the mark can be overwritten.
 	// Currently overwritten by the dst-type LOCAL rules for redirected traffic.
-	if err := r.iptablesClient.Insert(tableMangle, chainRTPre, 1, rule...); err != nil {
+	if err := r.iptablesClient.Insert(tableMangle, r.names.rtPre, 1, rule...); err != nil {
 		r.dropSourceMatch(rule)
 		return fmt.Errorf("add marking rule for %s: %w", pair.Destination, err)
 	}
@@ -257,7 +257,7 @@ func (r *family) removeNatRule(pair firewall.RouterPair) error {
 	ruleID := pair.GenKey(firewall.NatFormat)
 
 	if rule, exists := r.rules[ruleID]; exists {
-		if err := r.iptablesClient.DeleteIfExists(tableMangle, chainRTPre, rule...); err != nil {
+		if err := r.iptablesClient.DeleteIfExists(tableMangle, r.names.rtPre, rule...); err != nil {
 			return fmt.Errorf("remove marking rule for %s: %w", pair.Destination, err)
 		}
 		delete(r.rules, ruleID)
