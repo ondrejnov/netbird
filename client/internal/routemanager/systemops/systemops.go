@@ -89,6 +89,12 @@ type SysOps struct {
 	coordinator *hostcoord.Coordinator
 	//nolint:unused // only used on Linux
 	sessionKey hostcoord.SessionKey
+	// sharedRoutes decides which session carries a prefix of the shared table. When
+	// nil, routes go straight to the kernel. Only Linux uses it.
+	//nolint:unused // only used on Linux
+	sharedRoutes *hostcoord.Routes
+	//nolint:unused // only used on Linux
+	sharedRouteEvents hostcoord.RouteEventFunc
 	// originalSysctl stores the sysctl values from before this instance changed them.
 	//nolint:unused // only used on Linux
 	originalSysctl map[string]int
@@ -105,12 +111,30 @@ func New(wgInterface wgIface, notifier *notifier.Notifier) *SysOps {
 }
 
 // NewShared returns a SysOps that shares the routing base with the other sessions
-// of coordinator instead of owning it. Only Linux honors the coordinator.
-func NewShared(wgInterface wgIface, notifier *notifier.Notifier, coordinator *hostcoord.Coordinator, key hostcoord.SessionKey) *SysOps {
+// of coordinator instead of owning it. Only Linux honors the coordinator and the
+// options.
+func NewShared(wgInterface wgIface, notifier *notifier.Notifier, coordinator *hostcoord.Coordinator, key hostcoord.SessionKey, opts ...SharedOption) *SysOps {
 	r := New(wgInterface, notifier)
 	r.coordinator = coordinator
 	r.sessionKey = key
+	for _, opt := range opts {
+		opt(r)
+	}
 	return r
+}
+
+// SharedOption configures a SysOps returned by NewShared.
+type SharedOption func(*SysOps)
+
+// WithSharedRoutes makes the session claim its overlay routes in routes, so a prefix
+// shared with another session has one owner and moves on when that owner leaves. Its
+// stop then removes only the routes of this session. onEvent receives the warnings for
+// this session and may be nil. Nil routes leave the routes unshared.
+func WithSharedRoutes(routes *hostcoord.Routes, onEvent hostcoord.RouteEventFunc) SharedOption {
+	return func(r *SysOps) {
+		r.sharedRoutes = routes
+		r.sharedRouteEvents = onEvent
+	}
 }
 
 //nolint:unused // only used on BSD systems
