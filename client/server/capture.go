@@ -191,7 +191,7 @@ func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCap
 	s.stopBundleCaptureLocked()
 	s.cleanupBundleCapture()
 
-	if s.activeCapture != nil {
+	if s.session.currentCapture() != nil {
 		return nil, status.Error(codes.FailedPrecondition, "another capture is already running")
 	}
 
@@ -227,7 +227,7 @@ func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCap
 		log.Warnf("packet capture unavailable (no filtered device), skipping: %v", err)
 		return &proto.StartBundleCaptureResponse{}, nil
 	}
-	s.activeCapture = sess
+	s.session.setCapture(sess)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	bc := &bundleCapture{
@@ -270,11 +270,11 @@ func (s *Server) stopBundleCaptureLocked() {
 		return
 	}
 	bc := s.bundleCapture
-	if bc.engine != nil && s.activeCapture == bc.sess {
+	if bc.engine != nil && s.session.currentCapture() == bc.sess {
 		if err := bc.engine.SetCapture(nil); err != nil {
 			log.Debugf("clear bundle capture: %v", err)
 		}
-		s.activeCapture = nil
+		s.session.setCapture(nil)
 	}
 	bc.stop()
 
@@ -310,14 +310,14 @@ func (s *Server) claimCapture(sess *capture.Session) (*internal.Engine, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.activeCapture != nil {
+	if s.session.currentCapture() != nil {
 		return nil, status.Error(codes.FailedPrecondition, "another capture is already running")
 	}
 	engine, err := s.getCaptureEngineLocked()
 	if err != nil {
 		return nil, err
 	}
-	s.activeCapture = sess
+	s.session.setCapture(sess)
 	return engine, nil
 }
 
@@ -325,8 +325,8 @@ func (s *Server) claimCapture(sess *capture.Session) (*internal.Engine, error) {
 func (s *Server) releaseCapture(sess *capture.Session) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.activeCapture == sess {
-		s.activeCapture = nil
+	if s.session.currentCapture() == sess {
+		s.session.setCapture(nil)
 	}
 }
 
@@ -334,13 +334,13 @@ func (s *Server) releaseCapture(sess *capture.Session) {
 func (s *Server) clearCaptureIfOwner(sess *capture.Session, engine *internal.Engine) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.activeCapture != sess {
+	if s.session.currentCapture() != sess {
 		return
 	}
 	if err := engine.SetCapture(nil); err != nil {
 		log.Debugf("clear capture: %v", err)
 	}
-	s.activeCapture = nil
+	s.session.setCapture(nil)
 }
 
 func (s *Server) getCaptureEngineLocked() (*internal.Engine, error) {
