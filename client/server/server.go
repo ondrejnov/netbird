@@ -2920,6 +2920,7 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 	}
 
 	s.mutex.Lock()
+	_, cancelledRun := s.session.runChans()
 	s.session.cancelAct()
 	ctx, cancel := context.WithCancel(callerCtx)
 	if md, ok := metadata.FromIncomingContext(callerCtx); ok {
@@ -2946,7 +2947,10 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, msg *proto.
 		return nil, nil, false, fmt.Errorf("active profile state: %w", err)
 	}
 
-	if err := s.restoreOwnResidual(s.rootCtx, activeProf.SessionKey()); err != nil {
+	s.mutex.Lock()
+	err = s.restoreLoginResidual(s.rootCtx, activeProf.SessionKey(), cancelledRun)
+	s.mutex.Unlock()
+	if err != nil {
 		log.Warnf(errRestoreResidualState, err)
 	}
 

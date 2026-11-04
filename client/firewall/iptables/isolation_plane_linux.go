@@ -46,10 +46,13 @@ type isolationPlane struct {
 	installed bool
 	// ifaceSets holds the interfaces in each set of the list, the index is the set's number.
 	ifaceSets []map[IfaceName]struct{}
+	// addIfaceEntry adds to an interface set. Only a test replaces it: the kernel has no way
+	// to accept one half of the address space and refuse the other on demand.
+	addIfaceEntry func(setName string, entry *ipset.Entry) error
 }
 
 func newIsolationPlane(client *iptables.IPTables, v6 bool) *isolationPlane {
-	return &isolationPlane{client: client, v6: v6}
+	return &isolationPlane{client: client, v6: v6, addIfaceEntry: ipset.Add}
 }
 
 func (p *isolationPlane) setName(base string) string {
@@ -282,11 +285,12 @@ func (p *isolationPlane) placeInterface(name IfaceName) error {
 			members[name] = struct{}{}
 			return nil
 		}
-		if !errors.Is(err, errIPSetHashFull) {
-			return err
-		}
+		// The member is recorded only after both halves, so removeMember would miss the first.
 		if rerr := p.removeFromIfaceSet(index, name); rerr != nil {
 			return fmt.Errorf("%w; rollback: %v", err, rerr)
+		}
+		if !errors.Is(err, errIPSetHashFull) {
+			return err
 		}
 	}
 
@@ -300,6 +304,9 @@ func (p *isolationPlane) placeInterface(name IfaceName) error {
 	}
 	p.ifaceSets = append(p.ifaceSets, map[IfaceName]struct{}{})
 	if err := p.addToIfaceSet(index, name); err != nil {
+		if rerr := p.removeFromIfaceSet(index, name); rerr != nil {
+			return fmt.Errorf("%w; rollback: %v", err, rerr)
+		}
 		return err
 	}
 	p.ifaceSets[index][name] = struct{}{}
@@ -308,7 +315,7 @@ func (p *isolationPlane) placeInterface(name IfaceName) error {
 
 func (p *isolationPlane) addToIfaceSet(index int, name IfaceName) error {
 	for _, half := range halfSpaces(p.v6) {
-		if err := ipset.Add(p.ifaceSetName(index), prefixEntry(half, name)); err != nil {
+		if err := p.addIfaceEntry(p.ifaceSetName(index), prefixEntry(half, name)); err != nil {
 			return fmt.Errorf("add interface to ipset %s: %w", p.ifaceSetName(index), err)
 		}
 	}

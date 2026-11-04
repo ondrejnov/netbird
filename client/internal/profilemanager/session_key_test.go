@@ -103,3 +103,65 @@ func TestGetStatePath_MatchesKeyOfActiveProfile(t *testing.T) {
 	assert.Equal(t, filepath.Join(dir, "work.state.json"), sm.GetStatePath(), "state path of the active profile")
 	assert.Equal(t, sm.GetStatePathFor(active.SessionKey()), sm.GetStatePath(), "both lookups must name one file")
 }
+
+func TestStateFileProfiles(t *testing.T) {
+	dir := statePathTestDir(t)
+	ConfigDirOverride = ""
+	sm := NewServiceManager("")
+
+	write := func(parts ...string) string {
+		path := filepath.Join(append([]string{dir}, parts...)...)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
+		return path
+	}
+
+	keys, err := sm.StateFileProfiles()
+	require.NoError(t, err)
+	assert.Empty(t, keys, "an empty directory holds no state file")
+
+	write("state.json")
+	work := write("alice", "work.state.json")
+	write("bob", "work.state.json")
+	write("bob", "work.json")
+	write("bob", "work.prefs.json")
+	write("bob", "work.state.json.corrupted.1")
+	write("bob", "not.a.stem.state.json")
+	write("not.a.user", "home.state.json")
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "bob", "dir.state.json"), 0o700))
+	require.NoError(t, os.Symlink(work, filepath.Join(dir, "bob", "link.state.json")))
+
+	keys, err = sm.StateFileProfiles()
+	require.NoError(t, err)
+	assert.Equal(t, []SessionKey{
+		{Profile: defaultProfileName},
+		{Profile: "work", Username: "alice"},
+		{Profile: "work", Username: "bob"},
+	}, keys, "only the regular state files of profiles should be found")
+
+	assert.Equal(t, work, sm.GetStatePathFor(keys[1]), "a found key should lead back to its file")
+	assert.NoDirExists(t, filepath.Join(dir, "notauser"), "looking must not create a directory")
+}
+
+func TestStateFileProfiles_OverrideHoldsAllUsers(t *testing.T) {
+	dir := statePathTestDir(t)
+	sm := NewServiceManager("")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "work.state.json"), []byte("{}"), 0o600))
+
+	keys, err := sm.StateFileProfiles()
+	require.NoError(t, err)
+	assert.Equal(t, []SessionKey{{Profile: "work"}}, keys, "the state file should be found in the override directory")
+}
+
+// A failure in one place must leave what was found elsewhere usable.
+func TestStateFileProfiles_ReportsWhatItCouldNotRead(t *testing.T) {
+	dir := statePathTestDir(t)
+	blocker := filepath.Join(dir, "file")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+	ConfigDirOverride = ""
+	DefaultConfigPathDir = blocker
+
+	keys, err := NewServiceManager("").StateFileProfiles()
+	assert.Error(t, err, "an unreadable directory must not read as having no state files")
+	assert.Empty(t, keys, "nothing could be found")
+}

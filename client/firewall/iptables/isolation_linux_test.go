@@ -3,6 +3,7 @@
 package iptables
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -618,6 +619,68 @@ func TestIsolationAddFailsClosed(t *testing.T) {
 		overlapping := wgaddr.Address{Network: netip.MustParsePrefix("100.64.0.0/16")}
 		assert.ErrorIs(t, addToIsolation(isolation, "wt2", overlapping), ErrOverlayOverlap)
 		assert.Equal(t, 1, isoRuleCount(t, isoChainForward), "the refused session must not have a rule")
+		assert.NoError(t, isolation.Verify())
+	})
+}
+
+// failIfaceEntries makes the plane refuse entries for one set from the given attempt on, counting
+// from 1, and passes everything else on to the kernel.
+func failIfaceEntries(t *testing.T, plane *isolationPlane, setName string, from int, refusal error) {
+	t.Helper()
+	next := plane.addIfaceEntry
+	t.Cleanup(func() { plane.addIfaceEntry = next })
+	attempt := 0
+	plane.addIfaceEntry = func(name string, entry *ipset.Entry) error {
+		if name != setName {
+			return next(name, entry)
+		}
+		attempt++
+		if attempt >= from {
+			return refusal
+		}
+		return next(name, entry)
+	}
+}
+
+// An interface takes two entries, and the member is recorded only after both. A session that
+// did not start must not leave the first one behind: the next Verify would find the set
+// different from what it expects and would take the running sessions down.
+func TestIsolationFailedAddLeavesNoHalfMember(t *testing.T) {
+	refused := errors.New("refused by the test")
+
+	t.Run("set the interface does not fit in", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-0", 2, refused)
+
+		assert.ErrorIs(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)), refused)
+
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-0"), "only the running session may stay in the set")
+		assert.NoError(t, isolation.Verify(), "the failed session must not disturb the running one")
+	})
+
+	t.Run("set created for the interface", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-0", 1, errIPSetHashFull)
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-1", 2, refused)
+
+		assert.ErrorIs(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)), refused)
+
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-0"), "only the running session may stay in the first set")
+		assert.Equal(t, 0, isoEntryCount(t, isoSetIfaces+"-1"), "the new set must stay empty")
+		assert.NoError(t, isolation.Verify(), "the failed session must not disturb the running one")
+	})
+
+	t.Run("full set still moves on to the next", func(t *testing.T) {
+		isolation := newTestIsolation(t)
+		require.NoError(t, addToIsolation(isolation, "wt1", isoFakeAddress(1)))
+		failIfaceEntries(t, isolation.plane4, isoSetIfaces+"-0", 2, errIPSetHashFull)
+
+		require.NoError(t, addToIsolation(isolation, "wt2", isoFakeAddress(2)))
+
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-0"), "the full set must keep only the first session")
+		assert.Equal(t, 2, isoEntryCount(t, isoSetIfaces+"-1"), "the second session must be in the next set")
 		assert.NoError(t, isolation.Verify())
 	})
 }
