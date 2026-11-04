@@ -50,6 +50,9 @@ type Manager struct {
 	rConn   *nftables.Conn
 	wgIface iFaceMapper
 
+	tableName string
+	scope     *sessionScope
+
 	family4 *family
 	// IPv6 counterpart, nil when no v6 overlay.
 	family6 *family
@@ -59,29 +62,48 @@ type Manager struct {
 
 // Create nftables firewall manager
 func Create(wgIface iFaceMapper, mtu uint16) (*Manager, error) {
+	return newManager(wgIface, mtu, getTableName(), nil), nil
+}
+
+// CreateForSession creates an nftables firewall manager for one of several sessions on
+// the host. It owns only the given names and never opens the table of another session or
+// the isolation table.
+func CreateForSession(wgIface iFaceMapper, mtu uint16, names SessionNames) (*Manager, error) {
+	scope, err := newSessionScope(names)
+	if err != nil {
+		return nil, err
+	}
+	return newManager(wgIface, mtu, names.Table, scope), nil
+}
+
+func newManager(wgIface iFaceMapper, mtu uint16, tableName string, scope *sessionScope) *Manager {
 	m := &Manager{
-		rConn:   &nftables.Conn{},
-		wgIface: wgIface,
+		rConn:     &nftables.Conn{},
+		wgIface:   wgIface,
+		tableName: tableName,
+		scope:     scope,
 	}
 
-	tableName := getTableName()
 	workTable := &nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv4}
 
 	m.family4 = newFamily(workTable, wgIface, mtu)
+	m.family4.bindSession(scope)
 
 	if wgIface.Address().HasIPv6() {
 		m.createIPv6Components(tableName, wgIface, mtu)
 	}
 
 	m.extMonitor = newExternalChainMonitor(m)
+	m.extMonitor.scope = scope
 
-	return m, nil
+	return m
 }
 
 func (m *Manager) createIPv6Components(tableName string, wgIface iFaceMapper, mtu uint16) {
 	workTable6 := &nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv6}
 
 	m.family6 = newFamily(workTable6, wgIface, mtu)
+	m.family6.bindSession(m.scope)
 
 	// Share the per-family forwarding refcounter with the v4 family so a v4
 	// rule and a v6 rule against the same state machine cooperate cleanly.
@@ -176,13 +198,7 @@ func (m *Manager) initFirewall() (err error) {
 func (m *Manager) persistState(stateManager *statemanager.Manager) {
 	stateManager.RegisterState(&ShutdownState{})
 
-	if err := stateManager.UpdateState(&ShutdownState{
-		InterfaceState: &InterfaceState{
-			NameStr:   m.wgIface.Name(),
-			WGAddress: m.wgIface.Address(),
-			MTU:       m.family4.mtu,
-		},
-	}); err != nil {
+	if err := stateManager.UpdateState(m.shutdownState()); err != nil {
 		log.Errorf("failed to update state: %v", err)
 	}
 
@@ -191,6 +207,21 @@ func (m *Manager) persistState(stateManager *statemanager.Manager) {
 			log.Errorf("failed to persist state: %v", err)
 		}
 	}()
+}
+
+func (m *Manager) shutdownState() *ShutdownState {
+	state := &ShutdownState{
+		InterfaceState: &InterfaceState{
+			NameStr:   m.wgIface.Name(),
+			WGAddress: m.wgIface.Address(),
+			MTU:       m.family4.mtu,
+		},
+	}
+	if m.scope != nil && m.scope.names.TagSuffix != "" {
+		state.TableName = m.scope.names.Table
+		state.TagSuffix = m.scope.names.TagSuffix
+	}
+	return state
 }
 
 // rollbackInit performs best-effort cleanup of already-initialized state when Init fails partway through.
@@ -391,9 +422,8 @@ func (m *Manager) cleanupNetbirdTables() error {
 		return fmt.Errorf("list tables: %w", err)
 	}
 
-	tableName := getTableName()
 	for _, t := range tables {
-		if t.Name == tableName {
+		if t.Name == m.tableName {
 			m.rConn.DelTable(t)
 		}
 	}
@@ -528,14 +558,13 @@ func (m *Manager) createWorkTableFamily(family nftables.TableFamily) (*nftables.
 		return nil, fmt.Errorf("list of tables: %w", err)
 	}
 
-	tableName := getTableName()
 	for _, t := range tables {
-		if t.Name == tableName {
+		if t.Name == m.tableName {
 			m.rConn.DelTable(t)
 		}
 	}
 
-	table := m.rConn.AddTable(&nftables.Table{Name: tableName, Family: family})
+	table := m.rConn.AddTable(&nftables.Table{Name: m.tableName, Family: family})
 	err = m.rConn.Flush()
 	return table, err
 }

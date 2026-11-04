@@ -3,7 +3,6 @@
 package nftables
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"slices"
@@ -336,7 +335,7 @@ func (r *family) insertForwardAcceptRules(chain *nftables.Chain, intf []byte) {
 }
 
 func (r *family) insertForwardIifRule(chain *nftables.Chain, intf []byte, existing map[string]bool) {
-	if existing[userDataAcceptForwardRuleIif] {
+	if existing[r.tags.forwardIif] {
 		return
 	}
 	r.conn.InsertRule(&nftables.Rule{
@@ -348,12 +347,12 @@ func (r *family) insertForwardIifRule(chain *nftables.Chain, intf []byte, existi
 			&expr.Counter{},
 			&expr.Verdict{Kind: expr.VerdictAccept},
 		},
-		UserData: []byte(userDataAcceptForwardRuleIif),
+		UserData: []byte(r.tags.forwardIif),
 	})
 }
 
 func (r *family) insertForwardOifEstablishedRule(chain *nftables.Chain, intf []byte, existing map[string]bool) {
-	if existing[userDataAcceptForwardRuleOif] {
+	if existing[r.tags.forwardOif] {
 		return
 	}
 	exprs := []expr.Any{
@@ -364,7 +363,7 @@ func (r *family) insertForwardOifEstablishedRule(chain *nftables.Chain, intf []b
 		Table:    chain.Table,
 		Chain:    chain,
 		Exprs:    append(exprs, getEstablishedExprs(2)...),
-		UserData: []byte(userDataAcceptForwardRuleOif),
+		UserData: []byte(r.tags.forwardOif),
 	})
 }
 
@@ -374,7 +373,7 @@ func (r *family) insertInputAcceptRule(chain *nftables.Chain, intf []byte) {
 		log.Warnf("skip input accept rule in %s/%s: %v", chain.Table.Name, chain.Name, err)
 		return
 	}
-	if existing[userDataAcceptInputRule] {
+	if existing[r.tags.input] {
 		return
 	}
 	r.conn.InsertRule(&nftables.Rule{
@@ -386,7 +385,7 @@ func (r *family) insertInputAcceptRule(chain *nftables.Chain, intf []byte) {
 			&expr.Counter{},
 			&expr.Verdict{Kind: expr.VerdictAccept},
 		},
-		UserData: []byte(userDataAcceptInputRule),
+		UserData: []byte(r.tags.input),
 	})
 }
 
@@ -398,22 +397,12 @@ func (r *family) existingNetbirdRulesInChain(chain *nftables.Chain) (map[string]
 	}
 	present := map[string]bool{}
 	for _, rule := range rules {
-		if !isNetbirdAcceptRuleTag(rule.UserData) {
+		if !r.tags.contains(rule.UserData) {
 			continue
 		}
 		present[string(rule.UserData)] = true
 	}
 	return present, nil
-}
-
-func isNetbirdAcceptRuleTag(userData []byte) bool {
-	switch string(userData) {
-	case userDataAcceptForwardRuleIif,
-		userDataAcceptForwardRuleOif,
-		userDataAcceptInputRule:
-		return true
-	}
-	return false
 }
 
 func (r *family) removeAcceptFilterRules() error {
@@ -478,9 +467,7 @@ func (r *family) removeAcceptRulesFromChain(table *nftables.Table, chain *nftabl
 	}
 
 	for _, rule := range rules {
-		if bytes.Equal(rule.UserData, []byte(userDataAcceptForwardRuleIif)) ||
-			bytes.Equal(rule.UserData, []byte(userDataAcceptForwardRuleOif)) ||
-			bytes.Equal(rule.UserData, []byte(userDataAcceptInputRule)) {
+		if r.tags.contains(rule.UserData) {
 			if err := r.conn.DelRule(rule); err != nil {
 				return fmt.Errorf("delete rule from %s/%s: %v", table.Name, chain.Name, err)
 			}
@@ -538,6 +525,10 @@ func (r *family) findExternalChains() []*nftables.Chain {
 
 func (r *family) isExternalChain(chain *nftables.Chain) bool {
 	if r.workTable != nil && chain.Table.Name == r.workTable.Name {
+		return false
+	}
+
+	if r.scope.ownsTable(chain.Table.Name) {
 		return false
 	}
 

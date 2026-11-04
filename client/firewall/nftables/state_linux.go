@@ -1,6 +1,7 @@
 package nftables
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/netbirdio/netbird/client/iface"
@@ -23,6 +24,10 @@ func (i *InterfaceState) Address() wgaddr.Address {
 
 type ShutdownState struct {
 	InterfaceState *InterfaceState `json:"interface_state,omitempty"`
+	// TableName and TagSuffix stay empty unless the session has a suffix, so a state file
+	// of slot 0 keeps its format and one without them still means the default names.
+	TableName string `json:"table_name,omitempty"`
+	TagSuffix string `json:"tag_suffix,omitempty"`
 }
 
 func (s *ShutdownState) Name() string {
@@ -30,11 +35,14 @@ func (s *ShutdownState) Name() string {
 }
 
 func (s *ShutdownState) Cleanup() error {
+	if s.InterfaceState == nil {
+		return errors.New("state has no interface state")
+	}
 	mtu := s.InterfaceState.MTU
 	if mtu == 0 {
 		mtu = iface.DefaultMTU
 	}
-	nft, err := Create(s.InterfaceState, mtu)
+	nft, err := s.createManager(mtu)
 	if err != nil {
 		return fmt.Errorf("create nftables manager: %w", err)
 	}
@@ -44,4 +52,15 @@ func (s *ShutdownState) Cleanup() error {
 	}
 
 	return nil
+}
+
+func (s *ShutdownState) createManager(mtu uint16) (*Manager, error) {
+	if s.TagSuffix == "" {
+		// Only a session with a suffix writes its names, so a table name alone is damage.
+		if s.TableName != "" {
+			return nil, fmt.Errorf("table %q has no tag suffix", s.TableName)
+		}
+		return Create(s.InterfaceState, mtu)
+	}
+	return CreateForSession(s.InterfaceState, mtu, SessionNames{Table: s.TableName, TagSuffix: s.TagSuffix})
 }
