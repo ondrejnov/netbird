@@ -514,9 +514,7 @@ func TestIsolationStaysClosedWithoutSessionScope(t *testing.T) {
 				}
 
 				// The tag in a table created last shows the monitor ran with the isolation visible.
-				foreign := addHookedTable(t, "nbtest_foreign_late")
-				require.Eventually(t, func() bool { return len(foreign.tags(t)) > 0 },
-					5*time.Second, 50*time.Millisecond, "the monitor must open a table that appears later")
+				requireMonitorOpensLateTable(t)
 				require.NoError(t, reconcile())
 
 				assertNoAcceptTags(t, IsolationTableName, "isolation table")
@@ -528,6 +526,25 @@ func TestIsolationStaysClosedWithoutSessionScope(t *testing.T) {
 		}
 	}
 }
+
+// requireMonitorOpensLateTable retries with a new table because the monitor subscribes on its
+// own goroutine, and it misses a table created before the subscription is in place.
+func requireMonitorOpensLateTable(t *testing.T) {
+	t.Helper()
+	for attempt := range 5 {
+		foreign := addHookedTable(t, fmt.Sprintf("nbtest_foreign_late%d", attempt))
+		if assert.Eventually(&ignoredFailures{}, func() bool { return len(foreign.tags(t)) > 0 },
+			2*time.Second, 50*time.Millisecond) {
+			return
+		}
+	}
+	require.Fail(t, "the monitor must open a table that appears later")
+}
+
+// ignoredFailures lets a retry poll with assert.Eventually without failing the test.
+type ignoredFailures struct{}
+
+func (*ignoredFailures) Errorf(string, ...any) {}
 
 // TestIsolationAddFailsClosed covers the paths where a session must not start: nothing may look
 // installed afterwards.

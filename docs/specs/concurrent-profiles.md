@@ -112,6 +112,13 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q20 | Foreground režim a zámek `sessions.json` | Druhá instance se odmítne. Návrh: foreground `Slots` vůbec neotevírá | 7, 13 |
 | Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
 | Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
+| Q23 | Selhání v6 části izolace u session s v6 v nainstalované rovině iptables | Add vrací chybu, pokus bez overlaye nejde v harnessu otestovat | 5 |
+| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. S gate může `Up` téhož profilu sáhnout na výchozí názvy běžící session (I2), řešit v PR 13 | 11, 13 |
+| Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu | 11 |
+| Q26 | `RemoveProfile` běžícího profilu | Projde, běh skončí až při MDM restartu. `profile remove` má podle 5.7 vracet chybu, řešit v PR 16 | 11, 16 |
+| Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
+| Q28 | `onMDMPolicyChange` čeká na `giveUpChan` pod `Server.mutex` | Vada z upstreamu, stále se týká RPC po dobu čekání. Řešit před F3 | 13 |
+| Q29 | Config běhu proti configu vybraného profilu v `Status`, debug bundlu a kill switchích | Neřešeno, PR 13 je přepne na config běhu nebo oddělí | 13 |
 
 **Nový nález, globální stav v závislosti:** `allocSetID` v `github.com/google/nftables@v0.3.0/set.go:48,505` je
 nesynchronizovaný čítač procesu. Na `origin/main` ho shodí `TestEngine_MultiplePeers` pod `-race` (1 ze 4 běhů).
