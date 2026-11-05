@@ -144,8 +144,8 @@ func TestSessionFlowsStayWithTheirNetwork(t *testing.T) {
 
 	workKey := hostcoord.SessionKey{Profile: profilemanager.ID("work")}
 	homeKey := hostcoord.SessionKey{Profile: profilemanager.ID("home")}
-	work := startFlowSession(t, "wt0", workAddr, host.Session(workKey).conntrackOptions())
-	home := startFlowSession(t, "wt1", homeAddr, host.Session(homeKey).conntrackOptions())
+	work := startFlowSession(t, "wt0", workAddr, host.Session(workKey, nil).conntrackOptions())
+	home := startFlowSession(t, "wt1", homeAddr, host.Session(homeKey, nil).conntrackOptions())
 	var noGate *SessionHost
 	control := startFlowSession(t, "wt0", workAddr, noGate.conntrackOptions())
 
@@ -213,8 +213,8 @@ func TestSessionFlowsStayWithTheirNetworkOnIPv6(t *testing.T) {
 
 	workKey := hostcoord.SessionKey{Profile: profilemanager.ID("work")}
 	homeKey := hostcoord.SessionKey{Profile: profilemanager.ID("home")}
-	work := startFlowSession(t, "wt0", workAddr, host.Session(workKey).conntrackOptions())
-	home := startFlowSession(t, "wt1", homeAddr, host.Session(homeKey).conntrackOptions())
+	work := startFlowSession(t, "wt0", workAddr, host.Session(workKey, nil).conntrackOptions())
+	home := startFlowSession(t, "wt1", homeAddr, host.Session(homeKey, nil).conntrackOptions())
 
 	const (
 		homePort     uint16 = 41101

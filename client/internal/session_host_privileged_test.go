@@ -14,8 +14,11 @@ import (
 
 	"github.com/netbirdio/netbird/client/iface"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
+	"github.com/netbirdio/netbird/client/internal/dns"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
+	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
+	cProto "github.com/netbirdio/netbird/client/proto"
 )
 
 func newTestDaemonHost(t *testing.T) *DaemonHost {
@@ -34,7 +37,7 @@ func attachTestSession(t *testing.T, host *DaemonHost, profile string, addr wgad
 	t.Helper()
 	config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort}
 	engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: addr}
-	detach, err := host.Session(hostcoord.SessionKey{Profile: profilemanager.ID(profile)}).attach(config, engineConfig)
+	detach, err := host.Session(hostcoord.SessionKey{Profile: profilemanager.ID(profile)}, nil).attach(config, engineConfig)
 	return engineConfig, detach, err
 }
 
@@ -106,6 +109,77 @@ func TestAttachDropsOverlappingIPv6(t *testing.T) {
 		assert.True(t, prefix.Addr().Is4(), "the second session must not claim an IPv6 overlay, has %s", prefix)
 	}
 	assert.NoError(t, host.Isolation().Verify())
+}
+
+// Section 6: the session carries on without its IPv6 overlay and hears of it, under its own profile.
+func TestAttachWarnsAboutTheSkippedIPv6(t *testing.T) {
+	host := newTestDaemonHost(t)
+
+	_, detach, err := attachTestSession(t, host, "work", v6Address(t, "100.71.0.1/16", "fd00:1234::1/64"))
+	require.NoError(t, err)
+	t.Cleanup(detach)
+
+	recorder := peer.NewRecorder("")
+	recorder.SetEventProfile("home")
+	addr := v6Address(t, "100.72.0.1/16", "fd00:1234::2/64")
+	config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort}
+	engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: addr}
+	detachSecond, err := host.Session(hostcoord.SessionKey{Profile: "home"}, recorder).attach(config, engineConfig)
+	require.NoError(t, err)
+	t.Cleanup(detachSecond)
+
+	events := recorder.GetEventHistory()
+	require.Len(t, events, 1, "the session should be warned once")
+	assert.Equal(t, cProto.SystemEvent_WARNING, events[0].GetSeverity())
+	assert.Equal(t, eventIPv6Skipped, events[0].GetMetadata()[cProto.MetadataKindKey])
+	assert.Equal(t, "home", events[0].GetProfileId())
+	assert.False(t, engineConfig.WgAddr.HasIPv6(), "the session should run on IPv4")
+	assert.Equal(t, addr.IP, engineConfig.WgAddr.IP, "the session keeps its IPv4 address")
+}
+
+// Each kind has its text, and a route in it.
+func TestRouteEventsAreWarningsOfTheirSession(t *testing.T) {
+	for kind := range routeEventMessages {
+		t.Run(string(kind), func(t *testing.T) {
+			recorder := peer.NewRecorder("")
+			recorder.SetEventProfile("home")
+			host := NewDaemonHost(nil)
+			prefix := netip.MustParsePrefix("10.77.0.0/16")
+
+			host.Session(hostcoord.SessionKey{Profile: "home"}, recorder).routeEvent(hostcoord.RouteEvent{Kind: kind, Prefix: prefix})
+
+			events := recorder.GetEventHistory()
+			require.Len(t, events, 1)
+			assert.Equal(t, "home", events[0].GetProfileId())
+			assert.Equal(t, cProto.SystemEvent_WARNING, events[0].GetSeverity())
+			assert.Equal(t, string(kind), events[0].GetMetadata()[cProto.MetadataKindKey])
+			assert.Equal(t, prefix.String(), events[0].GetMetadata()[cProto.MetadataPrefixKey])
+			assert.Contains(t, events[0].GetUserMessage(), prefix.String())
+			assert.NotContains(t, events[0].GetUserMessage(), "%!", "the text should take the route")
+		})
+	}
+}
+
+// The DNS warnings reach the session they are for, a shared domain with its name.
+func TestDNSWarningsAreEventsOfTheirSession(t *testing.T) {
+	host := NewDaemonHost(nil)
+	recorder := peer.NewRecorder("")
+	recorder.SetEventProfile("home")
+	session := host.Session(hostcoord.SessionKey{Profile: "home"}, recorder)
+
+	coordinator := session.hostDNS()
+	coordinator.WarnHostDNS(dns.HostDNSWarning{Kind: dns.HostDNSHeld})
+	coordinator.WarnHostDNS(dns.HostDNSWarning{Kind: dns.HostDNSCatchAllHeld})
+	coordinator.WarnHostDNS(dns.HostDNSWarning{Kind: dns.HostDNSDomainShared, Domains: []string{"netbird.selfhosted"}})
+
+	events := recorder.GetEventHistory()
+	require.Len(t, events, 3)
+	for _, event := range events {
+		assert.Equal(t, "home", event.GetProfileId())
+		assert.Equal(t, cProto.SystemEvent_DNS, event.GetCategory())
+		assert.Equal(t, cProto.SystemEvent_WARNING, event.GetSeverity())
+	}
+	assert.Equal(t, "netbird.selfhosted", events[2].GetMetadata()[cProto.MetadataDomainsKey])
 }
 
 // The handover a failed attempt left waiting runs when an interface is back.

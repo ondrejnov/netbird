@@ -172,6 +172,10 @@ func (s *Server) SelectNetworks(ctx context.Context, req *proto.SelectNetworksRe
 		return nil, fmt.Errorf("no route manager")
 	}
 
+	if err := s.refuseHeldExitNode(ss, routeManager, req); err != nil {
+		return nil, err
+	}
+
 	if req.GetAll() {
 		routeManager.SelectAllRoutes()
 	} else if err := routeManager.SelectRoutes(toNetIDs(req.GetNetworkIDs()), req.GetAppend()); err != nil {

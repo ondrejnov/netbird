@@ -91,7 +91,7 @@ func (s *Server) prepareConcurrentStart() (concurrentStart, error) {
 
 	key := sessionKeyOf(activeProf.ID, activeProf.Username)
 	ss := s.focusedSession()
-	ss.key = key
+	ss.bindKey(key)
 	s.sessions[key] = ss
 
 	s.startDaemonServices(ss)
@@ -226,6 +226,10 @@ func (s *Server) launchSession(ctx context.Context, ss *session, launch sessionL
 	s.mutex.Unlock()
 	defer ss.setHostClaim(false)
 
+	if err := s.refuseResidualBesideOthers(ss, others); err != nil {
+		return err
+	}
+
 	config, err := launch.resolve()
 	if err != nil {
 		log.Errorf("failed to get profile config: %v", err)
@@ -281,10 +285,10 @@ func (s *Server) storeDesiredUp(key profilemanager.SessionKey) error {
 }
 
 // restoreLaunchResidual cleans what the profile left on the host. Its state records host names
-// another session can be using by now, so it is left in the file while one runs.
+// another session can be using by now, so with one running there is nothing to do here: a state with
+// anything in it has refused the launch, see refuseResidualBesideOthers.
 func (s *Server) restoreLaunchResidual(ctx context.Context, ss *session, others int) {
 	if others > 0 {
-		log.Debugf("leaving the residual state of profile %s, another session is running", ss.key.Profile)
 		return
 	}
 	if err := s.restoreResidualAlone(ctx, ss.key); err != nil {

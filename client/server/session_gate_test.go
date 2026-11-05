@@ -726,13 +726,9 @@ func TestGate_ResidualStaysWhileAnotherSessionRuns(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, residual(), "a login next to a running session must leave the state")
 
-	require.NoError(t, f.up(f.second))
+	requireCode(t, codes.FailedPrecondition, f.up(f.second))
 	assert.True(t, residual(), "an Up next to a running session must leave the state")
 
-	_, err = f.s.CleanState(f.ctx, &proto.CleanStateRequest{All: true})
-	requireCode(t, codes.FailedPrecondition, err)
-	_, err = f.s.Down(f.ctx, &proto.DownRequest{})
-	require.NoError(t, err)
 	_, err = f.s.CleanState(f.ctx, &proto.CleanStateRequest{All: true})
 	requireCode(t, codes.FailedPrecondition, err)
 	assert.True(t, residual(), "a state cleanup next to a running session must be refused")

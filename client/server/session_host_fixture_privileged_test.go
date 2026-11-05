@@ -49,6 +49,12 @@ type hostNetwork struct {
 	router  netip.Addr
 	route   netip.Prefix
 	shared  netip.Prefix
+	// extraRoutes are routes a test adds, with the net IDs extraRouteID returns.
+	extraRoutes []netip.Prefix
+}
+
+func extraRouteID(index int) string {
+	return fmt.Sprintf("extra-%d", index)
 }
 
 var (
@@ -105,6 +111,11 @@ func writeNetworkStore(t *testing.T, network hostNetwork) string {
 		fmt.Sprintf(`INSERT INTO name_server_groups VALUES('ns-primary','%s','primary','','[{"IP":"192.0.2.53","NSType":1,"Port":53}]','["%s"]',1,'[]',1,0);`,
 			fixtureAccount, fixtureGroup),
 	)
+
+	for i, prefix := range network.extraRoutes {
+		lines = append(lines, fmt.Sprintf(`INSERT INTO routes VALUES('route-%s','%s','"%s"',NULL,0,'%s','','router-peer',NULL,1,0,9999,1,'["%s"]',NULL);`,
+			extraRouteID(i), fixtureAccount, prefix, extraRouteID(i), fixtureGroup))
+	}
 
 	path := filepath.Join(t.TempDir(), "store.sql")
 	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600))

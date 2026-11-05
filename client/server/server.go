@@ -367,6 +367,7 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, ss *session, key prof
 	if profileConfig.DisableAutoConnect {
 		if err := s.connect(ctx, ss, key, profileConfig, runningChan); err != nil {
 			log.Debugf("run client connection exited with error: %v", err)
+			noteRefusedRun(ss, err)
 		}
 		log.Tracef("client connection exited")
 		return
@@ -406,6 +407,7 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, ss *session, key prof
 				return backoff.Permanent(err)
 			}
 			if errors.Is(err, internal.ErrSessionRefused) {
+				noteRefusedRun(ss, err)
 				return backoff.Permanent(err)
 			}
 			log.Debugf("run client connection exited with error: %v. Will retry in the background", err)
@@ -1239,6 +1241,9 @@ func (s *Server) waitForUp(callerCtx context.Context, ss *session) (*proto.UpRes
 
 	select {
 	case <-giveUpChan:
+		if err := refusalError(ss); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("client gave up to connect")
 	case <-runningChan:
 		ss.isSessionActive.Store(true)
@@ -2948,7 +2953,7 @@ func (s *Server) connect(ctx context.Context, ss *session, key profilemanager.Se
 	}
 
 	log.Tracef("running client connection")
-	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(key)...)
+	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(ss, key)...)
 	if s.controlsUpdates(ss) {
 		client.SetUpdateManager(s.updateManager)
 	}

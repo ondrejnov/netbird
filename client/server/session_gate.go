@@ -79,10 +79,10 @@ func newSessionSet(concurrentProfiles bool) sessionSet {
 }
 
 // clientOptions binds a client to its profile and, with the gate, to its share of the host.
-func (s *Server) clientOptions(key profilemanager.SessionKey) []internal.ConnectClientOption {
+func (s *Server) clientOptions(ss *session, key profilemanager.SessionKey) []internal.ConnectClientOption {
 	opts := []internal.ConnectClientOption{internal.WithSessionKey(key)}
 	if s.concurrentProfiles {
-		opts = append(opts, internal.WithSessionHost(s.host.Session(key)))
+		opts = append(opts, internal.WithSessionHost(s.host.Session(key, ss.statusRecorder)))
 	}
 	return opts
 }
@@ -151,7 +151,7 @@ func (s *Server) sessionOfLocked(key profilemanager.SessionKey) *session {
 		return ss
 	}
 	ss := newSession()
-	ss.key = key
+	ss.bindKey(key)
 	ss.state.SetOnChange(ss.statusRecorder.NotifyStateChange)
 	s.sessions[key] = ss
 	return ss
@@ -473,6 +473,7 @@ func (s *Server) sessionStatuses(caller sessionCaller, target *session, targetSt
 			ProfileName: s.profileDisplayName(ss.key),
 			Status:      string(status),
 			Focused:     ss == focused,
+			Conflict:    s.conflictOf(ss),
 		}
 		if holdsHost {
 			if resources, running := s.slots.Running(ss.key); running {

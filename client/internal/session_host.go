@@ -15,9 +15,11 @@ import (
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/netflow/conntrack"
 	"github.com/netbirdio/netbird/client/internal/networkmonitor"
+	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/internal/routemanager/notifier"
 	"github.com/netbirdio/netbird/client/internal/routemanager/systemops"
+	cProto "github.com/netbirdio/netbird/client/proto"
 )
 
 // ErrSessionRefused means a session must not run on this host as things are: its resources are
@@ -61,17 +63,19 @@ func (d *DaemonHost) Isolation() *firewall.SessionIsolation {
 	return d.isolation
 }
 
-// Session returns the view of one session.
-func (d *DaemonHost) Session(key hostcoord.SessionKey) *SessionHost {
-	return &SessionHost{daemon: d, key: key}
+// Session returns the view of one session. recorder receives the warnings for that session, and
+// can be nil for a session nobody listens to.
+func (d *DaemonHost) Session(key hostcoord.SessionKey, recorder *peer.Status) *SessionHost {
+	return &SessionHost{daemon: d, key: key, recorder: recorder}
 }
 
 // SessionHost is one session's share of the host. A nil SessionHost means a client that owns the
 // host alone, which is every client without the feature gate. Its methods accept that.
 type SessionHost struct {
-	daemon *DaemonHost
-	key    hostcoord.SessionKey
-	slot   hostcoord.Slot
+	daemon   *DaemonHost
+	key      hostcoord.SessionKey
+	recorder *peer.Status
+	slot     hostcoord.Slot
 }
 
 // attach gives an attempt of the session its resources and isolates it, before the engine exists,
@@ -123,6 +127,7 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 	engineConfig.WgPort = int(resources.Port)
 	if engineConfig.WgAddr.HasIPv6() && !addr.HasIPv6() {
 		log.Warnf("session on %s continues without its IPv6 overlay", resources.Interface)
+		h.warn(cProto.SystemEvent_NETWORK, eventIPv6Skipped, "This session continues without its IPv6 overlay, the overlay overlaps another session or cannot be isolated", nil)
 		// Management keeps sending the address, which must not read as a change every time.
 		engineConfig.DisableIPv6 = true
 	}
@@ -152,6 +157,7 @@ func (h *SessionHost) detach(resources hostcoord.SessionResources) {
 	defer d.attachMu.Unlock()
 
 	d.coordinator.Sessions().Remove(h.key)
+	d.coordinator.DNSOwners().ForgetSession(h.key)
 	if err := d.isolation.Remove(resources.Interface); err != nil {
 		log.Errorf("failed to remove session on %s from the isolation: %v", resources.Interface, err)
 	}
@@ -191,16 +197,10 @@ func (h *SessionHost) newSysOps(e *Engine) func(*notifier.Notifier) *systemops.S
 	coordinator := h.daemon.coordinator
 	return func(n *notifier.Notifier) *systemops.SysOps {
 		return systemops.NewShared(e.wgInterface, n, coordinator, h.key,
-			systemops.WithSharedRoutes(coordinator.Routes(), logRouteEvent),
+			systemops.WithSharedRoutes(coordinator.Routes(), h.routeEvent),
 			systemops.WithOverlayPrefixes(coordinator.Sessions()),
 		)
 	}
-}
-
-// logRouteEvent keeps the prefix at debug, like every address.
-func logRouteEvent(event hostcoord.RouteEvent) {
-	log.Warnf("route of profile %s: %s", event.Session.Profile, event.Kind)
-	log.Debugf("route of profile %s: %s for %s: %v", event.Session.Profile, event.Kind, event.Prefix, event.Err)
 }
 
 func (h *SessionHost) hostDNS() dns.HostDNSCoordinator {
@@ -208,9 +208,7 @@ func (h *SessionHost) hostDNS() dns.HostDNSCoordinator {
 		return nil
 	}
 	sessions := h.daemon.coordinator.Sessions()
-	return h.daemon.coordinator.DNSOwners().Session(h.key, sessions.SessionInterfaces, func(warning dns.HostDNSWarning) {
-		log.Warnf("DNS of profile %s: %s", h.key.Profile, warning.Kind)
-	})
+	return h.daemon.coordinator.DNSOwners().Session(h.key, sessions.SessionInterfaces, h.dnsWarning)
 }
 
 func (h *SessionHost) conntrackOptions() []conntrack.Option {
