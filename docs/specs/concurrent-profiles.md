@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13, PR 14, PR 15 a PR 16 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 17 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13, PR 14, PR 15, PR 16 a PR 18 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Zbývá PR 19 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -455,6 +455,17 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **`probeThrottle`** je na session, sonda jedné session neříká nic o relayích druhé.
 - **Testy:** `session_report_privileged_test.go` na skutečných enginech a Managementech: scrape skutečného endpointu, zip z `DebugBundle`, soubory v `/etc/ssh/ssh_config.d` a state soubory po stopu, MTU linků, updater, firewalld přes falešný `firewall-cmd` (harness nemá system bus). `TestResolverAdvertisesTheMTUOfItsSession` čte EDNS0 velikost na skutečném UDP upstreamu, `TestEngine_SessionsSideBySideAllProve` podepisuje ze skutečného úložiště. Klientské metriky ověřuje řada `netbird_login_duration_seconds_count` s labelem na scrapu a `peer_id` v `metrics.txt`. Mutace: bez `NewForSlot` se soubor slotu 1 neobjeví, bez `ProfileName` nesedí hlavička `status.txt`, metriky focused v cizím adresáři shodí porovnání `peer_id`.
 - **Nález mimo rozsah:** `version.Update.StopWatch` čte `fetchTicker`, který `StartFetcher` zapisuje bez synchronizace, zrušení kontextu těsně po `Manager.Start` je pod `-race` závod. V produkci jde o konec daemonu. Testy updateru proto `rootCtx` nerušit, `version/update.go` se nezměnil.
+
+**PR 18, `f3/fork-build`:**
+
+- **Build řídí tag `multiprofile`.** Bez něj se nemění nic: `fork_off.go` má prázdný `forkMarker`, `NetbirdVersion()` vrací `version` jako dřív a `.goreleaser.yaml` ani workflow se nedotkly. Tag má jen `.goreleaser_multiprofile.yaml`, který staví Linux (amd64, arm64) a balíčky deb a rpm `netbird-multiprofile`. Spuštění: `goreleaser release --snapshot --clean --config .goreleaser_multiprofile.yaml`. `release.disable`, žádný `publishers`, `brews`, `blobs` ani Docker: nic se nenahrává a oficiální repozitář se nepřidává (`install.sh` z `release_files` se pro fork nepoužívá, přidává právě ten repozitář). `TestForkReleaseConfig` hlídá Linux, tag, název balíčku, `conflicts` a `replaces` na `netbird` a nepublikování, `TestUpstreamReleaseConfigHasNoForkTag` hlídá, že tag není v upstream konfiguraci.
+- **Označení verze je build metadata `+multiprofile`** (`0.70.1+multiprofile`, `development+multiprofile`), takže ho nese status, `netbird version`, debug bundle (`status.txt` bere obě verze z `NetbirdVersion()`), User-Agent i verze, kterou klient hlásí Managementu a peerům. Metadata se při porovnání verzí nepočítají a `MeetsMinVersion` i `IsDevelopmentVersion` s nimi pracují, takže fork se řadí jako upstream vydání, ze kterého vychází (`TestForkVersionStaysComparable`). Označení se nepřidá dvakrát, kdyby ho vložil `ldflags`. Prerelease `-multiprofile` jsem nezvolil, protože by se řadilo pod vydání a `sanitizeVersion` ho odřezává.
+- **Dotaz na `pkgs.netbird.io`** (`version.Update.fetchVersion`) se s tagem nepošle: `StartFetcher` skončí hned a `fetchVersion` vrací false. `TestForkBuildDoesNotQueryReleaseEndpoint` počítá požadavky na testovací server, počet je nula. Updater klienta tím nikdy nezjistí „novější“ upstream verzi. Directive z Managementu (`SetVersion`) na Linuxu dál padá na download-only, protože `isAutoUpdateSupported` je tam false.
+- **Windows a macOS:** `isAutoUpdateSupported` vrací false, když `version.ForkBuild()`. Bez tagu se `supported_windows.go` chová jako dřív (`!false`). Fork se pro ty platformy nedistribuuje, build ale projde (`GOOS=windows` a `darwin`, s tagem i bez).
+- **Balíček:** deb a rpm instalují `/usr/bin/netbird` a službu `netbird` jako upstream, proto `conflicts` a `replaces` na `netbird`. Skripty `post_install.sh` a `pre_remove.sh` se berou beze změny. Přechod z upstream balíčku tedy odstraní jeho službu a nainstaluje službu forku (`/var/lib/netbird` zůstává).
+- **Existující testy:** `version/update_test.go` má `//go:build !multiprofile`, protože testuje právě dotaz, který fork vypíná. V `client/status/status_test.go` hlídá `withUpstreamVersion` fixtury s `development` i pro tagovaný build.
+- **Neověřeno:** samotný `goreleaser` v prostředí není, konfiguraci proto čte jen test (YAML), balíček se nestavěl. Test na Windows a macOS se jen kompiluje (`go vet` s tagem), neběží.
+- **Nález mimo rozsah (beze změny):** `TestDoNotUpdate` v `version` je pod `-race` červený, závod `StopWatch` a `StartFetcher` z PR 17 (viz výše). Platí s tagem i bez něj.
 
 **Bezpečnostní revize F3, `f3/security-fixes`:**
 
@@ -1010,7 +1021,7 @@ ve forku běží; co neběží, uveď v PR výslovně.
 | Regrese u uživatelů s jedním profilem | Vysoký | Slot 0 beze změny, gate, snapshot test proti `main` |
 | Upstream vyřeší #446 jinak | Vysoký | Sledovat #446 a slévat pravidelně; při změně směru přehodnotit před dalším slitím |
 | Rozjetí forku vůči upstreamu | Vysoký | Pravidla z 2.1, nová logika v nových souborech, pravidelné slévání |
-| Auto-update přepíše fork oficiální binárkou | Vysoký, na Linuxu neověřeno | F0, případně PR 18 před prvním nasazením |
+| Auto-update přepíše fork oficiální binárkou | Střední | PR 18: build tag `multiprofile`, vlastní balíček, dotaz na `pkgs.netbird.io` vypnutý, `isAutoUpdateSupported` false |
 | Omylem push do upstreamu | Střední | `origin` je fork, push URL `upstream` je zablokovaná, v `gh` vždy `--repo` |
 | Únik provozu mezi sítěmi | Vysoký | I3, I4, I6, testy paketů ve všech režimech, security review před F3 |
 | Bouře restartů přes network monitor | Střední | I8, omezený souběh startů (5.8) |
