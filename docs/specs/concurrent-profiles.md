@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 a obě poloviny PR 13 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 14 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13 a PR 14 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 15 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -332,7 +332,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   `NB_DNS_STATE_FILE`. Platí i pro první session a pro obnovu po startu.
 - **Bez selektoru `focused`, jiný selektor `FailedPrecondition`:** `checkSessionSelector` je na začátku všech RPC s
   polem `session` a platí i bez gate. Všechna selhání mají stejnou odpověď, takže selektor neprozradí existenci profilu.
-  Kontrola identity je PR 14.
+  S gate od PR 14 selektor směruje, viz `f3/rpc-routing` níže.
 - **`Down`** s `all` míří na všechny, kombinace se selektorem je `InvalidArgument`. `Down` a `Logout` zapisují `desired=down`.
   Zastavení služby jde přes `StopSessions`, které `desired` nemění, a stejně tak sleep.
 - **`Status`:** `sessions` se plní jen s gate a obsahuje běžící session a `focused`. `interface_name` je od druhé poloviny ze `Slots.Running`.
@@ -343,15 +343,14 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   Poškozený `sessions.json` s gate odmítne start služby a soubor zůstane na místě.
 - **Sleep a MDM** běží přes všechny session souběžně (`forEachSession`). Probuzení vrací jen to, co sleep vzal dolů. MDM obnoví
   config i session bez běhu, protože z něj čtou kill switche. Běh, který vzdal, se nevrátí, pokud mezitím limit zaplnily jiné session.
-- **`Login` s gate** cílí jen na focused, jiný profil je `FailedPrecondition`, protože navazující `WaitSSOLogin` jinou session
-  zatím nepojmenuje a `Login` focus nepřesouvá. `up --profile X` z dnešního CLI funguje, protože nejdřív přepne.
+- **`Login` s gate** cílil jen na focused. Od PR 14 cílí na pojmenovanou session, viz `f3/rpc-routing`. `up --profile X` z dnešního
+  CLI funguje dál, protože nejdřív přepne.
 - **`Logout` a `RemoveProfile` s gate** běžící session odmítnou před deregistrací (5.7).
-- **Přesunuto na session:** `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`. Záchyty si pamatují vlastníka, focus se
-  může během záchytu změnit. **Zůstává na `Server`:** `bundleCapture`, `persistSyncResponse`, `probeThrottle` (PR 14, 17).
+- **Přesunuto na session:** `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`, od PR 14 i `bundleCapture` a
+  `persistSyncResponse`. **Zůstává na `Server`:** `probeThrottle` (PR 17).
 - **Zatím nepokryto:** `localMetrics` a `updateManager` jsou svázané se session focused při startu (PR 17). `generateDebugBundle` běží celý pod `Server.mutex` a zdrží ostatní
-  session (PR 17). `SubscribeStatus` a `SubscribeEvents` zůstávají na session focused v okamžiku přihlášení (PR 14). Událost
-  o změně seznamu profilů proto jde na předchozí i nový focus. `Profile.connection_status` a `SystemEvent.profile_id` se
-  neplní (PR 16, 17).
+  session (PR 17). Událost o změně seznamu profilů jde na předchozí i nový focus. `Profile.connection_status` a
+  `SystemEvent.profile_id` se neplní (PR 16, 17).
 
 **PR 13, druhá polovina, `f3/host-wiring`:**
 
@@ -390,6 +389,32 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - Zahození v `Logger` by nestačilo, kernel režim nemá po `relevantFlow` jinou kontrolu. Userspace režim conntrack hostitele nepoužívá, flow bere z vlastního uspfilteru.
 - **Filtr čte session v okamžiku události.** Flow s adresou session, která už skončila nebo ještě nezačala, filtr jako flow mezi sítěmi nepozná. Týká se to jen případu dvou sítí v jednom tuple, včetně konce flow, jehož začátek se zahodil.
 - **Test** běží v `client/internal`, aby šel přes skutečné volby z `SessionHost`. Skutečné události jádra v netns, `CONNMARK` jako pravidla session, skutečný `Logger`, IPv4 i IPv6. Mutace: bez větve v `relevantFlow` projdou flow druhé sítě do obou loggerů, bez kontroly ostatních session projde flow mezi sítěmi, vlastní IP místo prefixu ztratí flow routing peeru a bez v6 části vlastní v6 flow.
+
+**PR 14, `f3/rpc-routing`:**
+
+- **Rozsah:** selektor směruje 24 RPC, oprávnění podle 5.6 a nálezy z revize F3: `CallerIdentity` u nových povrchů, TOCTOU mezi selektorem a focusem, logout nefocused profilu a `bundleCapture`. Bez gate se nemění nic, selektor jiné session zůstává `FailedPrecondition` a identita se nečte, testy to hlídají.
+- **Kód:** `session_access.go`. `checkSessionSelector` vrací session a handler dál pracuje jen s ní, druhý pohled na focus nikde není. `checkOpenSelector` je totéž pro `Down`, `Status` a `SubscribeStatus`, které bez selektoru neověřují nikoho.
+- **Kdo je vlastník:** `key.Username` se přes účetní databázi hostitele (`user.Lookup`) převede na UID a porovná s UID z `CallerIdentity`. Tím se shodne i alias stejného UID. Neznámý účet s číselným jménem rovným UID volajícího je vlastní, protože tak `InvokingUser` pojmenuje uživatele bez záznamu v `passwd`. Selhání databáze znamená cizí session (I6). Klíč se sanitizovaným jménem ze state souboru (2.4) vlastníka nenajde, ovládá ho jen root. Dva účty, jejichž jména se sanitizují stejně, sdílejí adresář profilů už dnes, session mají ale každý svou. Privilegovaný je `IsPrivilegedCaller`, takže i bezrootový kontejner.
+- **Pořadí kontrol:** identita běží před rozlišením handle, takže cizí uživatel dostane stejnou odpověď bez ohledu na to, jestli profil existuje, a neprozradí se ani kandidáti nejednoznačného handle. Vlastní uživatel dostane `NotFound` nebo `InvalidArgument`. Selektor bez handle, případně s handle jiným než `default` a bez jména uživatele, je `InvalidArgument`. Rozlišení je `ResolveProfile`: ID, unikátní jméno, unikátní prefix ID.
+- **Zvolený výklad, potvrdit při revizi:**
+  - **Volající s neurčenou identitou** dosáhne na sdílenou default session, protože není cizí. Na ostatní ne.
+  - **Bez selektoru** projdou všichni jen u `Down`, `Status` a `SubscribeStatus`. Ostatní RPC ověří, že focused session volajícímu patří. Bez toho by selektor nic nechránil, `SwitchProfile` a RPC bez selektoru by ho obešly.
+  - **`Status` se selektorem** popisuje v polích 1 až 4 pojmenovanou session, i když komentář v 5.6 říká „vždy focused". Bez selektoru je to focused. Příznak `SessionStatus.focused` ukazuje skutečný focus.
+- **RPC pojmenovávající profil** se kontrolují stejně, jsou to povrchy řízení a čtení téže session: `Up`, `Login`, `Logout`, `RemoveProfile`, `SwitchProfile`, `GetConfig`, `SetConfig`. `SwitchProfile` na cizí session by jinak otevřel cestu přes `Down` bez selektoru. `ListProfiles`, `AddProfile` a `RenameProfile` session neřídí a zůstávají beze změny, viz otázky níže.
+- **`Down{all}`** bere jen session, na které volající dosáhne, ostatní běží dál a `desired` se jim nemění. Když žádná nebyla nahoře, vrací `ErrServiceNotUp`. **`Status.sessions`** se filtruje stejně, cizí záznam nevznikne, takže nevznikne ani jeho `full_status`.
+- **Co zůstává podle rozhodnutí:** `Down` a `Status` bez selektoru na cizím focusu fungují jako dnes, takže kdokoli lokální přečte horní pole `Status` včetně `full_status` focused session a shodí ji. Ochrana platí, jen když focus patří volajícímu nebo je default.
+- **`Login`** cílí na pojmenovanou session a nemění focus ani aktivní profil. Metriky se srovnávají jen u focused. Kill switch profilů hlídá login jiné než focused session, jako dřív přepnutí. Brány `Login` čtou uložený config z klíče session, ne z druhého rozlišení handle, které by mohlo vést jinam. `Logout` ze stejného důvodu odmítne, když handle mezitím ukazuje na jiný profil.
+- **`Logout` s gate** na cílové session zruší čekající flow včetně čekání, vyčistí `jwtCache`, výzvu k výběru účtu a nastaví `NeedsLogin`, focused nebo ne. Flow jde první, protože `cleanupConnection` záznam smaže bez zrušení čekání.
+- **State soubor:** `ListStates`, `CleanState`, `DeleteState` a debug bundle ho s gate berou z `ss.key` přes `GetStatePathFor`, bez gate zůstává `GetStatePath`. Bez gate nemá session vlastní klíč, jedna session sleduje aktivní profil. `CleanState` nově kontroluje běh až po získání nároku, běh spuštěný během čekání by jinak přišel o stav.
+- **`bundleCapture` a `persistSyncResponse` jsou na session.** Bundle přibalí jen záchyt téže session a jiné session na záchyt nesahá. `RemoveProfile` záchyt ukončí, jinak by na něj nic nedosáhlo a soubor by zůstal. `bc.owner` je pryč. Bundle dál obsahuje log celého daemonu, to řeší PR 17.
+- **Streamy:** se selektorem zůstávají na session. Bez selektoru sledují focus: `SubscribeStatus` se přepíše při změně a `switchFocus` ho probudí přes `NotifyStateChange` předchozí session. `SubscribeEvents` se přepne po první události. Když focus přejde na session, kterou volající nesmí číst, stream skončí `PermissionDenied` a událost, která přepnutí ohlásila, se mu už nepošle, protože by nesla název cizího profilu.
+- **`nil` config:** session pojmenovaná selektorem může být bez configu. `buildStatusResponse` to snese. `networksDisabledFor` pak spadne na příznak služby, RPC sítí stejně skončí na `not connected`.
+- **Harness:** `TestSessionAccessOverTheRealSocket` pustí test binárku jako `nobody` a roota proti skutečnému unix socketu s `SO_PEERCRED` a skutečné databázi `passwd`, včetně podvržených metadat `x-netbird-fwd-*`. Tabulkový test spojuje 24 RPC, čtyři volající a tři cíle. Propuštěná volání dostanou zrušený kontext, ptají se jen, kdo projde. `TestSelectorReachesTheEngineOfItsSession` běží na skutečných enginech a kontroluje sítě, výběr sítí a pcap v bundlu.
+
+**Otázky k PR 14:**
+
+- `ListProfiles`, `AddProfile` a `RenameProfile` s cizím `username` zůstávají otevřené, jako dnes. Spec je nezmiňuje, nejde o session. Má je 5.6 pokrýt? `ListProfiles` čte názvy profilů cizího uživatele, zbylé dva zapisují do jeho adresáře.
+- `SetLogLevel` posílá úroveň jen klientovi focused session, proces ji má ale globální. Patří to sem, nebo do PR 17?
 
 **Otevřené po PR 13:**
 
@@ -661,8 +686,11 @@ message SessionStatus {
 **Oprávnění (v handleru, ne v klientovi):** identita přichází z `ipcauth.CallerIdentity(ctx)`,
 nikdy z pole `username`. Neprivilegovaný volající může řídit a číst jen své a sdílené
 default session. Pokud identitu nelze určit, požadavek na cizí session se **odmítne**.
-`Down` a `Status` bez selektoru se chovají jako dnes. Rozhraní je novým bezpečnostním
-povrchem, proto ho schvaluje člověk.
+`Down` a `Status` bez selektoru se chovají jako dnes. `Down{all}` provede neprivilegovaný volající
+jen na svých a sdílených session a ostatní nechá běžet, se selektorem zároveň je to
+`InvalidArgument`. `Status.sessions` se filtruje stejně, včetně `full_status`. `Up` s cizím
+`username` se odmítne. Selektor jiné session bez gate zůstává `FailedPrecondition`. Rozhraní je
+novým bezpečnostním povrchem, proto ho schvaluje člověk. Výklad a poznatky jsou v 2.5, `f3/rpc-routing`.
 
 ### 5.7 CLI
 
