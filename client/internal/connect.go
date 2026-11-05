@@ -561,7 +561,13 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 			}
 		}
 
-		<-engineCtx.Done()
+		select {
+		case <-engineCtx.Done():
+		case err := <-c.sessionHost.isolationLost():
+			log.Error(err)
+			c.stopRefusedEngine(engine)
+			return backoff.Permanent(wrapErr(err))
+		}
 
 		c.engineMutex.Lock()
 		c.engine = nil

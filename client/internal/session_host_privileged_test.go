@@ -7,11 +7,13 @@ import (
 	"net/netip"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	"github.com/netbirdio/netbird/client/firewall"
 	"github.com/netbirdio/netbird/client/iface"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	"github.com/netbirdio/netbird/client/internal/dns"
@@ -262,4 +264,31 @@ func TestDetachOfAnOldAttemptLeavesTheNewOneIsolated(t *testing.T) {
 	// The isolation answers for itself, whichever backend the host has.
 	_, err = host.Isolation().Add("wt9", addr)
 	assert.Error(t, err, "the isolation should still hold the overlay of the new attempt")
+}
+
+// Nothing can isolate a session without a native firewall and with its own disabled. The refusal has
+// to come back, and it must not hold on to the lock all sessions need to come and go.
+func TestAttachWithoutAnyFirewallRefusesAndMovesOn(t *testing.T) {
+	// Discovery finds neither backend: no iptables binary and the nftables check off.
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv(firewall.SkipNftablesEnv, "true")
+	host := newTestDaemonHost(t)
+
+	refused := make(chan error, 1)
+	go func() {
+		config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort, DisableFirewall: true}
+		engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: wgaddr.MustParseWGAddress("100.71.0.1/16")}
+		_, err := host.Session(hostcoord.SessionKey{Profile: "work"}, nil).attach(config, engineConfig)
+		refused <- err
+	}()
+
+	select {
+	case err := <-refused:
+		assert.ErrorIs(t, err, ErrSessionRefused)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the refusal should not wait for anything")
+	}
+
+	_, running := host.slots.Running(hostcoord.SessionKey{Profile: "work"})
+	assert.False(t, running, "a refused session must not keep its reservation")
 }

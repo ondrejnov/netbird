@@ -34,6 +34,8 @@ const (
 
 	msgOverlayRefused = "This session was not started: its overlay range overlaps another running session. " +
 		"Change network_range in the Management of one of the networks, or bring the other session down"
+	msgIsolationLost = "This session was stopped: something on this host changed the rules that keep the networks of this daemon apart, " +
+		"and they could not be put back. Find out what changes the firewall, then bring the session up again"
 	msgInterfaceRefused = "This session was not started: its interface name is used by another running session. " +
 		"Change the interface name of one of the profiles, or bring the other session down"
 	msgPortRefused = "This session was not started: its port is used by another running session. " +
@@ -51,6 +53,8 @@ type SessionRefusal struct {
 // addresses and of the name of the other session, which can belong to another user.
 func RefusalOf(err error) SessionRefusal {
 	switch {
+	case errors.Is(err, ErrIsolationLost):
+		return SessionRefusal{Message: msgIsolationLost}
 	case errors.Is(err, ErrOverlayOverlap):
 		return SessionRefusal{Conflict: ConflictOverlay, Message: msgOverlayRefused}
 	case errors.Is(err, hostcoord.ErrInterfaceConflict):

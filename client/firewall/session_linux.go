@@ -150,6 +150,40 @@ func (i *SessionIsolation) Verify() error {
 	return nil
 }
 
+// Restore puts the isolation back as it should be, with all sessions, after Verify found it changed.
+func (i *SessionIsolation) Restore() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	switch i.backend {
+	case NFTABLES:
+		return i.nft.Restore()
+	case IPTABLES:
+		return i.ipt.Restore()
+	}
+	return nil
+}
+
+// RemoveAll drops all sessions and whatever is left of the isolation in the kernel. Sessions that
+// failed to leave one by one, because the isolation was gone, would otherwise count forever.
+func (i *SessionIsolation) RemoveAll() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	var err error
+	switch i.backend {
+	case NFTABLES:
+		err = i.nft.RemoveAll()
+	case IPTABLES:
+		err = i.ipt.RemoveAll()
+	}
+	if err != nil {
+		return err
+	}
+	clear(i.members)
+	return nil
+}
+
 // kernelEnforces reports whether the kernel isolates the interface name, and whether the host has
 // a native backend that should.
 func (i *SessionIsolation) kernelEnforces(name string) (enforced, native bool) {

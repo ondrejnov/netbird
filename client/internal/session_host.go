@@ -32,6 +32,9 @@ var ErrSessionRefused = errors.New("session refused")
 // ErrOverlayOverlap means the IPv4 overlay of a session overlaps the one of another session.
 var ErrOverlayOverlap = errors.New("overlay overlaps another session")
 
+// ErrIsolationLost means the rules between the sessions changed while they ran and could not be put back.
+var ErrIsolationLost = errors.New("the isolation between the sessions was lost")
+
 // DaemonHost is what the sessions of one daemon share on the host. There is one per daemon, passed
 // on as a dependency.
 type DaemonHost struct {
@@ -43,6 +46,8 @@ type DaemonHost struct {
 	// attachMu makes the check of the overlays and what follows from it one step. It covers no
 	// network wait, only the allocator and the rule updates.
 	attachMu sync.Mutex
+	// watch checks the isolation while sessions run. Guarded by attachMu.
+	watch isolationWatch
 }
 
 // NewDaemonHost returns the shared state of a daemon that stores its slots in slots.
@@ -52,6 +57,7 @@ func NewDaemonHost(slots *hostcoord.Slots) *DaemonHost {
 		slots:       slots,
 		isolation:   firewall.NewSessionIsolation(),
 		accounting:  conntrack.NewAccounting(),
+		watch:       isolationWatch{interval: isolationCheckInterval, sessions: make(map[*SessionHost]chan error)},
 	}
 }
 
@@ -85,6 +91,9 @@ type SessionHost struct {
 	key      hostcoord.SessionKey
 	recorder *peer.Status
 	slot     hostcoord.Slot
+	// lost is what the run of the current attempt hears on when the isolation fails. It belongs to
+	// the goroutine of the run, the watch has its own reference.
+	lost <-chan error
 }
 
 // attach gives an attempt of the session its resources and isolates it, before the engine exists,
@@ -95,6 +104,10 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 	d := h.daemon
 	d.attachMu.Lock()
 	defer d.attachMu.Unlock()
+
+	if err := d.recoverIsolationLocked(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
+	}
 
 	resources, err := d.slots.Reserve(h.key, hostcoord.ResourceRequest{WgIface: config.WgIface, WgPort: config.WgPort})
 	if err != nil {
@@ -113,9 +126,8 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 		return nil, fmt.Errorf("%w: isolate session: %w", ErrSessionRefused, err)
 	}
 
-	detach := func() { h.detach(resources) }
 	if !result.Kernel && config.DisableFirewall {
-		detach()
+		h.detachLocked(resources)
 		return nil, fmt.Errorf("%w: the host has no native firewall and the session disables its own, nothing would isolate it", ErrSessionRefused)
 	}
 	if result.IPv6Disabled {
@@ -127,7 +139,7 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 		prefixes = append(prefixes, addr.IPv6Net)
 	}
 	if err := d.coordinator.Sessions().Set(h.key, resources.Interface, prefixes...); err != nil {
-		detach()
+		h.detachLocked(resources)
 		return nil, fmt.Errorf("%w: record session: %w", ErrSessionRefused, err)
 	}
 
@@ -143,7 +155,8 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 	engineConfig.WgAddr = addr
 	engineConfig.Sessions = d.coordinator.Sessions()
 	engineConfig.Session = h
-	return detach, nil
+	h.lost = d.watchSessionLocked(h)
+	return func() { h.detach(resources) }, nil
 }
 
 func (h *SessionHost) excludeSessionAddresses(info *system.Info) {
@@ -182,6 +195,12 @@ func (h *SessionHost) detach(resources hostcoord.SessionResources) {
 	d := h.daemon
 	d.attachMu.Lock()
 	defer d.attachMu.Unlock()
+	h.detachLocked(resources)
+}
+
+func (h *SessionHost) detachLocked(resources hostcoord.SessionResources) {
+	d := h.daemon
+	d.unwatchSessionLocked(h)
 
 	// A newer attempt of the session took the resources over, and they keep it isolated.
 	if !d.slots.Release(resources.Lease) {
@@ -194,6 +213,7 @@ func (h *SessionHost) detach(resources hostcoord.SessionResources) {
 	if err := d.isolation.Remove(resources.Interface); err != nil {
 		log.Errorf("failed to remove session on %s from the isolation: %v", resources.Interface, err)
 	}
+	d.resetLostIsolationLocked()
 }
 
 // verifyIsolation runs once the engine has installed its rules, which is when a rule of another
