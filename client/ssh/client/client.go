@@ -372,7 +372,13 @@ func dialWithJWT(ctx context.Context, network, addr string, config *ssh.ClientCo
 		return nil, fmt.Errorf("request JWT token: %w", err)
 	}
 
+	hostKeyCallback, err := jwtHostKeyCallback(jwtCtx, config.HostKeyCallback, daemonAddr, session)
+	if err != nil {
+		return nil, fmt.Errorf("check the features of the daemon: %w", err)
+	}
+
 	configWithJWT := nbssh.AddJWTAuth(config, jwtToken)
+	configWithJWT.HostKeyCallback = hostKeyCallback
 	return dialSSH(ctx, network, addr, configWithJWT)
 }
 
