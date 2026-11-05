@@ -234,3 +234,32 @@ func TestNilSessionHostKeepsTodaysBehavior(t *testing.T) {
 	assert.Nil(t, host.newSysOps(nil))
 	host.retryHandovers()
 }
+
+// The end of an attempt must not take the resources of the attempt that replaced it: the session would
+// run on without isolation, its name would be free for a session with the same overlay, and Verify
+// would not notice, because the records and the kernel agree on that.
+func TestDetachOfAnOldAttemptLeavesTheNewOneIsolated(t *testing.T) {
+	host := newTestDaemonHost(t)
+	addr := wgaddr.MustParseWGAddress("100.71.0.1/16")
+
+	_, detachOld, err := attachTestSession(t, host, "work", addr)
+	require.NoError(t, err)
+	_, detachNew, err := attachTestSession(t, host, "work", addr)
+	require.NoError(t, err)
+	t.Cleanup(detachNew)
+
+	detachOld()
+
+	key := hostcoord.SessionKey{Profile: "work"}
+	_, running := host.slots.Running(key)
+	assert.True(t, running, "the new attempt should keep its reservation")
+	assert.Equal(t, []string{"wt0"}, host.coordinator.Sessions().SessionInterfaces(), "the new attempt should stay on record")
+	assert.NoError(t, host.Isolation().Verify())
+
+	_, _, err = attachTestSession(t, host, "home", wgaddr.MustParseWGAddress("100.71.0.2/16"))
+	assert.ErrorIs(t, err, ErrOverlayOverlap, "the overlay of the running attempt should still count")
+
+	// The isolation answers for itself, whichever backend the host has.
+	_, err = host.Isolation().Add("wt9", addr)
+	assert.Error(t, err, "the isolation should still hold the overlay of the new attempt")
+}

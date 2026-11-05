@@ -161,7 +161,6 @@ func (h *SessionHost) detach(resources hostcoord.SessionResources) {
 	if err := d.isolation.Remove(resources.Interface); err != nil {
 		log.Errorf("failed to remove session on %s from the isolation: %v", resources.Interface, err)
 	}
-	d.slots.Release(resources.Lease)
 }
 
 // verifyIsolation runs once the engine has installed its rules, which is when a rule of another
@@ -183,6 +182,12 @@ func (h *SessionHost) newFirewall(e *Engine) (firewallManager.Manager, error) {
 		Source:    h.daemon.coordinator.Sessions().IsolationSource(h.key),
 	})
 	if errors.Is(err, firewall.ErrSessionNotIsolated) {
+	// A newer attempt of the session took the resources over, and they keep it isolated.
+	if !d.slots.Release(resources.Lease) {
+		log.Warnf("session on %s was attached again before its previous attempt ended", resources.Interface)
+		return
+	}
+
 		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
 	}
 	return fm, err

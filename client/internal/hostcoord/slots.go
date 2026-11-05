@@ -247,14 +247,22 @@ func (s *Slots) Reserve(key SessionKey, req ResourceRequest) (SessionResources, 
 	return res, nil
 }
 
-// Release gives back the interface and port held by lease. The slot stays with the
-// session. A lease replaced by a later Reserve holds nothing, so releasing it does too.
-func (s *Slots) Release(lease Lease) {
+// Release gives back the interface and port held by lease, and reports whether the lease still
+// held them. The slot stays with the session. A lease replaced by a later Reserve holds nothing, so
+// releasing it does nothing either, and whoever holds it has no say about the session anymore. After
+// Close there is no successor to protect, as nothing can be reserved.
+func (s *Slots) Release(lease Lease) bool {
 	s.bringUpMu.Lock()
 	defer s.bringUpMu.Unlock()
-	if held, running := s.running[lease.key]; running && held.Lease == lease {
-		delete(s.running, lease.key)
+	if s.closed {
+		return true
 	}
+	held, running := s.running[lease.key]
+	if !running || held.Lease != lease {
+		return false
+	}
+	delete(s.running, lease.key)
+	return true
 }
 
 // Running returns the resources key holds at the moment, if any.
