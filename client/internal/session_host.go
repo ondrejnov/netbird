@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -105,24 +106,28 @@ type SessionHost struct {
 // attach gives an attempt of the session its resources and isolates it, before the engine exists,
 // so no peer can reach the host outside the isolation (I6). The caller runs the returned func once
 // the engine has stopped. The config stays as it is: a default in it means the slot decides, and
-// the name of the slot is not written back.
-func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *EngineConfig) (func(), error) {
+// the name of the slot is not written back. ctx ends the wait for the interface of a previous attempt.
+func (h *SessionHost) attach(ctx context.Context, config *profilemanager.Config, engineConfig *EngineConfig) (func(), error) {
 	d := h.daemon
+
+	resources, err := h.reserve(config)
+	if err != nil {
+		return nil, err
+	}
+	// Outside attachMu, the other sessions have nothing to wait for here.
+	if err := hostcoord.RefuseForeignLink(ctx, resources.Interface); err != nil {
+		d.slots.Release(resources.Lease)
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
+	}
+
 	d.attachMu.Lock()
 	defer d.attachMu.Unlock()
 
+	// The isolation can have been lost during the wait.
 	if err := d.recoverIsolationLocked(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
-	}
-	if config.WgIface != iface.WgInterfaceDefault {
-		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, ErrExplicitInterface)
-	}
-
-	resources, err := d.slots.Reserve(h.key, hostcoord.ResourceRequest{WgIface: config.WgIface, WgPort: config.WgPort})
-	if err != nil {
-		return nil, fmt.Errorf("%w: reserve resources: %w", ErrSessionRefused, err)
-	}
-	if err := hostcoord.RefuseForeignLink(resources.Interface); err != nil {
 		d.slots.Release(resources.Lease)
 		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
 	}
@@ -170,6 +175,26 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 	engineConfig.Session = h
 	h.lost = d.watchSessionLocked(h)
 	return func() { h.detach(resources) }, nil
+}
+
+// reserve gives the attempt its resources, once it is clear the session may run at all.
+func (h *SessionHost) reserve(config *profilemanager.Config) (hostcoord.SessionResources, error) {
+	d := h.daemon
+	d.attachMu.Lock()
+	defer d.attachMu.Unlock()
+
+	if err := d.recoverIsolationLocked(); err != nil {
+		return hostcoord.SessionResources{}, fmt.Errorf("%w: %w", ErrSessionRefused, err)
+	}
+	if config.WgIface != iface.WgInterfaceDefault {
+		return hostcoord.SessionResources{}, fmt.Errorf("%w: %w", ErrSessionRefused, ErrExplicitInterface)
+	}
+
+	resources, err := d.slots.Reserve(h.key, hostcoord.ResourceRequest{WgIface: config.WgIface, WgPort: config.WgPort})
+	if err != nil {
+		return hostcoord.SessionResources{}, fmt.Errorf("%w: reserve resources: %w", ErrSessionRefused, err)
+	}
+	return resources, nil
 }
 
 func (h *SessionHost) excludeSessionAddresses(info *system.Info) {

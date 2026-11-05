@@ -42,7 +42,7 @@ func attachTestSession(t *testing.T, host *DaemonHost, profile string, addr wgad
 	t.Helper()
 	config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort}
 	engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: addr}
-	detach, err := host.Session(hostcoord.SessionKey{Profile: profilemanager.ID(profile)}, nil).attach(config, engineConfig)
+	detach, err := host.Session(hostcoord.SessionKey{Profile: profilemanager.ID(profile)}, nil).attach(t.Context(), config, engineConfig)
 	return engineConfig, detach, err
 }
 
@@ -129,7 +129,7 @@ func TestAttachWarnsAboutTheSkippedIPv6(t *testing.T) {
 	addr := v6Address(t, "100.72.0.1/16", "fd00:1234::2/64")
 	config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort}
 	engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: addr}
-	detachSecond, err := host.Session(hostcoord.SessionKey{Profile: "home"}, recorder).attach(config, engineConfig)
+	detachSecond, err := host.Session(hostcoord.SessionKey{Profile: "home"}, recorder).attach(t.Context(), config, engineConfig)
 	require.NoError(t, err)
 	t.Cleanup(detachSecond)
 
@@ -281,7 +281,7 @@ func TestAttachWithoutAnyFirewallRefusesAndMovesOn(t *testing.T) {
 	go func() {
 		config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort, DisableFirewall: true}
 		engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: wgaddr.MustParseWGAddress("100.71.0.1/16")}
-		_, err := host.Session(hostcoord.SessionKey{Profile: "work"}, nil).attach(config, engineConfig)
+		_, err := host.Session(hostcoord.SessionKey{Profile: "work"}, nil).attach(t.Context(), config, engineConfig)
 		refused <- err
 	}()
 
