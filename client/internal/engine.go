@@ -1509,18 +1509,7 @@ func (e *Engine) handleBundle(params *mgmProto.BundleParameters) (*mgmProto.JobR
 		log.Warnf("get latest sync response: %v", err)
 	}
 
-	bundleDeps := debug.GeneratorDependencies{
-		InternalConfig: e.config.ProfileConfig,
-		StatusRecorder: e.statusRecorder,
-		SyncResponse:   syncResponse,
-		LogPath:        e.config.LogPath,
-		TempDir:        e.config.TempDir,
-		ClientMetrics:  e.clientMetrics,
-		DaemonVersion:  version.NetbirdVersion(),
-		RefreshStatus: func() {
-			e.RunHealthProbes(e.ctx, true)
-		},
-	}
+	bundleDeps := e.remoteBundleDependencies(syncResponse)
 
 	bundleJobParams := debug.BundleConfig{
 		Anonymize:         params.Anonymize,
@@ -1542,6 +1531,23 @@ func (e *Engine) handleBundle(params *mgmProto.BundleParameters) (*mgmProto.JobR
 		},
 	}
 	return response, nil
+}
+
+func (e *Engine) remoteBundleDependencies(syncResponse *mgmProto.SyncResponse) debug.GeneratorDependencies {
+	deps := debug.GeneratorDependencies{
+		InternalConfig: e.config.ProfileConfig,
+		StatusRecorder: e.statusRecorder,
+		SyncResponse:   syncResponse,
+		LogPath:        e.config.LogPath,
+		TempDir:        e.config.TempDir,
+		ClientMetrics:  e.clientMetrics,
+		DaemonVersion:  version.NetbirdVersion(),
+		RefreshStatus: func() {
+			e.RunHealthProbes(e.ctx, true)
+		},
+	}
+	e.config.Session.scopeRemoteBundle(&deps)
+	return deps
 }
 
 // validateBundleUploadURL sanity-checks a management-supplied upload URL for a

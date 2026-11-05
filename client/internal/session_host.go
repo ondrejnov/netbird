@@ -11,6 +11,7 @@ import (
 	"github.com/netbirdio/netbird/client/firewall"
 	firewallManager "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
+	"github.com/netbirdio/netbird/client/internal/debug"
 	"github.com/netbirdio/netbird/client/internal/dns"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/netflow/conntrack"
@@ -20,8 +21,8 @@ import (
 	"github.com/netbirdio/netbird/client/internal/routemanager/notifier"
 	"github.com/netbirdio/netbird/client/internal/routemanager/systemops"
 	cProto "github.com/netbirdio/netbird/client/proto"
-)
 	"github.com/netbirdio/netbird/client/system"
+)
 
 // ErrSessionRefused means a session must not run on this host as things are: its resources are
 // taken, its overlay overlaps another one, or it could not be isolated. Trying again would change
@@ -64,7 +65,6 @@ func (d *DaemonHost) Isolation() *firewall.SessionIsolation {
 	return d.isolation
 }
 
-// Session returns the view of one session. recorder receives the warnings for that session, and
 // ExcludeSessionAddresses keeps the addresses of all sessions out of info, which is about to go to the
 // Management of one of them (I5). A login needs it as much as a sync: it is the first thing a network
 // hears from this host, and it runs before the session is on record itself.
@@ -72,6 +72,7 @@ func (d *DaemonHost) ExcludeSessionAddresses(info *system.Info) {
 	excludeAddressesOf(d.coordinator.Sessions(), info)
 }
 
+// Session returns the view of one session. recorder receives the warnings for that session, and
 // can be nil for a session nobody listens to.
 func (d *DaemonHost) Session(key hostcoord.SessionKey, recorder *peer.Status) *SessionHost {
 	return &SessionHost{daemon: d, key: key, recorder: recorder}
@@ -145,7 +146,6 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 	return detach, nil
 }
 
-// checkOverlays refuses an IPv4 overlay that overlaps another session and drops an IPv6 one that
 func (h *SessionHost) excludeSessionAddresses(info *system.Info) {
 	if h != nil {
 		h.daemon.ExcludeSessionAddresses(info)
@@ -164,6 +164,7 @@ func (h *SessionHost) scopeRemoteBundle(deps *debug.GeneratorDependencies) {
 	deps.OmitHostWide = true
 }
 
+// checkOverlays refuses an IPv4 overlay that overlaps another session and drops an IPv6 one that
 // does (section 6). The kernel isolation checks the same, but the userspace firewall has only this.
 func (h *SessionHost) checkOverlays(addr wgaddr.Address) (wgaddr.Address, error) {
 	for _, other := range h.daemon.coordinator.Sessions().OverlayPrefixesExcept(h.key) {
@@ -181,6 +182,12 @@ func (h *SessionHost) detach(resources hostcoord.SessionResources) {
 	d := h.daemon
 	d.attachMu.Lock()
 	defer d.attachMu.Unlock()
+
+	// A newer attempt of the session took the resources over, and they keep it isolated.
+	if !d.slots.Release(resources.Lease) {
+		log.Warnf("session on %s was attached again before its previous attempt ended", resources.Interface)
+		return
+	}
 
 	d.coordinator.Sessions().Remove(h.key)
 	d.coordinator.DNSOwners().ForgetSession(h.key)
@@ -208,12 +215,6 @@ func (h *SessionHost) newFirewall(e *Engine) (firewallManager.Manager, error) {
 		Source:    h.daemon.coordinator.Sessions().IsolationSource(h.key),
 	})
 	if errors.Is(err, firewall.ErrSessionNotIsolated) {
-	// A newer attempt of the session took the resources over, and they keep it isolated.
-	if !d.slots.Release(resources.Lease) {
-		log.Warnf("session on %s was attached again before its previous attempt ended", resources.Interface)
-		return
-	}
-
 		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
 	}
 	return fm, err
