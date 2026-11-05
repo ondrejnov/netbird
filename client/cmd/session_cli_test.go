@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 
@@ -614,15 +617,90 @@ func TestSSH_SessionOfTheFlag(t *testing.T) {
 
 // A TCP socket carries no identity, and the sessions of different users are told apart by who asks.
 func TestConcurrentProfilesRefuseASocketWithoutIdentity(t *testing.T) {
-	original := concurrentProfiles
-	t.Cleanup(func() { concurrentProfiles = original })
+	unixSocket := func(t *testing.T, name string) string {
+		t.Helper()
+		// t.TempDir would be too long for the path of a unix socket.
+		dir, err := os.MkdirTemp("", "nb-gate")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		return "unix://" + filepath.Join(dir, name)
+	}
 
-	concurrentProfiles = true
-	err := checkConcurrentProfilesTransport("tcp")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unix", "the operator should be told what to change")
-	assert.NoError(t, checkConcurrentProfilesTransport("unix"))
+	for _, tc := range []struct {
+		name       string
+		daemon     func(t *testing.T) string
+		jsonSocket func(t *testing.T) string
+		wantFlag   string
+	}{
+		{
+			name:       "the control socket on TCP",
+			daemon:     func(*testing.T) string { return "tcp://127.0.0.1:0" },
+			jsonSocket: func(*testing.T) string { return "" },
+			wantFlag:   "--daemon-addr",
+		},
+		{
+			name:       "the JSON socket on TCP",
+			daemon:     func(t *testing.T) string { return unixSocket(t, "daemon.sock") },
+			jsonSocket: func(*testing.T) string { return "tcp://127.0.0.1:0" },
+			wantFlag:   "--json-socket",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			json := tc.jsonSocket(t)
+			useServiceSockets(t, true, tc.daemon(t), json, json != "")
 
-	concurrentProfiles = false
-	assert.NoError(t, checkConcurrentProfilesTransport("tcp"), "without the gate the socket stays what it is")
+			// Through Start, as a check it does not call protects nothing.
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			p := newProgram(ctx, cancel)
+			err := p.Start(nil)
+			if err == nil {
+				t.Cleanup(func() { p.serv.Stop() })
+			}
+
+			require.Error(t, err, "a service with the gate must not start on a socket without identity")
+			assert.Contains(t, err.Error(), "unix", "the operator should be told what to change")
+			assert.Contains(t, err.Error(), tc.wantFlag, "the operator should be told which socket it is")
+			assert.Nil(t, p.serv, "a refused start must not have set up the server")
+		})
+	}
+}
+
+func TestConcurrentProfilesAcceptSocketsWithIdentity(t *testing.T) {
+	const unix, tcp = "unix:///var/run/netbird.sock", "tcp://127.0.0.1:0"
+
+	for _, tc := range []struct {
+		name        string
+		gate        bool
+		daemon      string
+		json        string
+		jsonEnabled bool
+		wantErr     bool
+	}{
+		{name: "the gate on unix sockets", gate: true, daemon: unix, json: unix, jsonEnabled: true},
+		{name: "a JSON socket that stays closed does not count", gate: true, daemon: unix, json: tcp, jsonEnabled: false},
+		{name: "a JSON socket with an unreadable address is refused", gate: true, daemon: unix, json: "nonsense", jsonEnabled: true, wantErr: true},
+		{name: "without the gate the sockets stay what they are", gate: false, daemon: tcp, json: tcp, jsonEnabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useServiceSockets(t, tc.gate, tc.daemon, tc.json, tc.jsonEnabled)
+
+			err := checkConcurrentProfilesSockets()
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// useServiceSockets sets what the service reads its sockets and the gate from.
+func useServiceSockets(t *testing.T, gate bool, daemon, json string, jsonEnabled bool) {
+	t.Helper()
+	originalGate, originalDaemon, originalJSON, originalEnabled := concurrentProfiles, daemonAddr, jsonSocket, enableJSONSocket
+	t.Cleanup(func() {
+		concurrentProfiles, daemonAddr, jsonSocket, enableJSONSocket = originalGate, originalDaemon, originalJSON, originalEnabled
+	})
+	concurrentProfiles, daemonAddr, jsonSocket, enableJSONSocket = gate, daemon, json, jsonEnabled
 }

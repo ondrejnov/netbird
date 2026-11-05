@@ -23,7 +23,7 @@ sudo netbird service reconfigure --enable-concurrent-profiles
 ```
 
 Hodnota se ukládá do `service.json` a platí po restartu služby. Gate odmítne start služby mimo Linux a na TCP
-socketu daemonu, kde volající nemá identitu.
+socketu daemonu nebo zapnutém JSON socketu na TCP, kde volající nemá identitu.
 
 Session se s gate nespustí, když:
 
