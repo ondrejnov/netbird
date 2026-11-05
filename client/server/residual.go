@@ -71,6 +71,13 @@ func (s *Server) removeSessionLinks(records []hostcoord.SlotRecord) error {
 	return hostcoord.RemoveSessionLinks(records)
 }
 
+func (s *Server) verifySessionLinks(records []hostcoord.SlotRecord) error {
+	if s.verifyLinksFn != nil {
+		return s.verifyLinksFn(records)
+	}
+	return hostcoord.VerifyNoSessionLinks(records)
+}
+
 // residualStatePaths lists each state file once, because NB_DNS_STATE_FILE gives all
 // profiles the same one.
 func (s *Server) residualStatePaths(records []hostcoord.SlotRecord, onDisk []profilemanager.SessionKey) []string {

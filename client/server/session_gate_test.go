@@ -69,6 +69,9 @@ func prepareGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 		failRuns: make(map[profilemanager.SessionKey]error),
 	}
 	s.flushRoutesFn = func() error { return nil }
+	// These tests run without a harness, next to whatever interfaces the host has.
+	s.removeLinksFn = func([]hostcoord.SlotRecord) error { return nil }
+	s.verifyLinksFn = func([]hostcoord.SlotRecord) error { return nil }
 	s.advancedRoutingFn = func() bool { return true }
 	s.connectFn = f.connect
 

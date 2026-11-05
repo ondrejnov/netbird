@@ -48,6 +48,8 @@ func newResidualFixture(t *testing.T) *residualFixture {
 		f.flushes++
 		return nil
 	}
+	// These tests run without a harness, next to whatever interfaces the host has.
+	s.removeLinksFn = func([]hostcoord.SlotRecord) error { return nil }
 
 	// Nothing may leave the test host, whichever profile a test ends up connecting.
 	for _, path := range []string{cfgPath, filepath.Join(filepath.Dir(cfgPath), "other-profile.json")} {

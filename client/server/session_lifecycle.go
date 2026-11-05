@@ -97,7 +97,7 @@ func (s *Server) prepareConcurrentStart() (concurrentStart, error) {
 	s.startDaemonServices(ss)
 
 	// A session interface the cleanup could not take away carries peers no session answers for (I6).
-	if err := hostcoord.VerifyNoSessionLinks(slots.Records()); err != nil {
+	if err := s.verifySessionLinks(slots.Records()); err != nil {
 		s.slots = nil
 		s.host = nil
 		if closeErr := slots.Close(); closeErr != nil {

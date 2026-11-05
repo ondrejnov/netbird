@@ -57,12 +57,13 @@ type sessionSet struct {
 	host *internal.DaemonHost
 
 	// connectFn stands in for a client run, stopEngineFn for stopping an engine,
-	// advancedRoutingFn for the routing probe and removeLinksFn for deleting the session links.
-	// Tests set them; production leaves them nil.
+	// advancedRoutingFn for the routing probe, and removeLinksFn and verifyLinksFn for the session
+	// links of the host. Tests set them; production leaves them nil.
 	connectFn         func(ctx context.Context, ss *session, key profilemanager.SessionKey, config *profilemanager.Config, runningChan chan struct{}) error
 	stopEngineFn      func(engine *internal.Engine) error
 	advancedRoutingFn func() bool
 	removeLinksFn     func(records []hostcoord.SlotRecord) error
+	verifyLinksFn     func(records []hostcoord.SlotRecord) error
 }
 
 func newSessionSet(concurrentProfiles bool) sessionSet {
