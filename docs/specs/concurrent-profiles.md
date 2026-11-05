@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 až PR 19 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter` a bezpečnostní revize, viz 2.5. Kritérium 5.8 pro zvýšení limitu je změřené a prošlo, limit zůstává 4 podle rozhodnutí vlastníka. Omezovač souběhu startů z 5.8 není implementovaný, viz otázky k PR 19 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 až PR 19 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter` a bezpečnostní revize, viz 2.5. Kritérium 5.8 pro zvýšení limitu je změřené a prošlo, limit zůstává 4 podle rozhodnutí vlastníka. Omezovač souběhu startů z 5.8 není implementovaný, viz otázky k PR 19. **Brána v1 prošla 2026-11-05:** e2e test se dvěma Managementy běží ve čtyřech režimech. F4: dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md), viz `f3/e2e-docs` v 2.5 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -562,6 +562,28 @@ Userspace WireGuard, nftables (iptables se liší jen ve stejném rozsahu jako v
 - **Interval kontroly 5 s** je volba bez měření. Netlink událost by okno zkrátila, ale znamenala by další vlastní kód pro oba backendy.
 - **`Status` a `Down` bez selektoru** dál čtou a shazují cizí focus kýmkoli lokálním (5.6). Revize je nezpochybnila, zůstávají.
 
+**Brána v1 a F4, `f3/e2e-docs`:**
+
+- **Test:** `e2e/concurrentprofiles` na harnessu z `e2e/harness`: dva `harness.StartCombined`, v každé síti peer ze `StartClient` a kontejner s daemonem s gate, připojený na obě sítě a ovládaný jen skutečným CLI. Běží ve čtyřech režimech: kernel a userspace interface, nftables a iptables. Jeden režim trvá asi 30 s.
+- **Co ověřuje:** `up --profile` obou profilů, `status` s `wt0` a `wt1` a adresami ze sítí, ping na peera a na adresu za routou každé sítě a zpět z peera, interface podle `ip route get` a čítače odeslaných paketů, DNS odpověď serveru session. Po `down --profile doma` je to, co zbylo z routes, rules, nft, iptables, ipset, sysctl a `resolv.conf`, shodné s předchozím stavem, `wt0` má stejný ifindex a nezůstane nic druhé session. Překryv se vyvolá skutečnou změnou `network_range`: `up` skončí nenulovým kódem s `overlaps`, `conflict=overlay`, hostitel se nezmění ani řádkem. Po vrácení rozsahu session běží na stejném `wt1`. Po `down --all` je jmenný prostor jako před prvním `up`.
+- **Kontroly:** bez `--enable-concurrent-profiles` test skončí na `status lists both sessions: []`. Smazání routy `wt0` z tabulky 7120 hned po `down` shodí porovnání i další ping, `nft flush table ip netbird` shodí porovnání, přičemž ping projde dál, takže na pravidla se spoléhá jen porovnání.
+- **Spouštění:** harness potřebuje Docker a buildx, kontejner `make test-privileged` je neměl. `PRIV_E2E_DOCKER=1` v `client/testutil/privileged` mu přidá socket Dockeru hostitele, `docker-cli`, buildx, tag `e2e` a adresář `/tmp/nb-e2e-work` se stejnou cestou na obou stranách, testovací proces tedy běží v kontejneru a kontejnery sady vedle něj. Bez proměnné se harness nemění. Sada žádný kontejner nepouští na `/var/run/netbird.sock`, daemony mají `/var/run/nb-e2e.sock`. Stačí síťový dosah na Docker Hub a Go moduly při prvním sestavení.
+- **Změny harnessu:** `WithDomain`, protože klient na dvou sítích by stejný alias `netbird.local` řešil na kterýkoli server. `WithClientEnv`, `StartDaemon` a v `Dockerfile.client` balíčky `nftables` a `ipset`, jen kvůli čtení stavu.
+- **Daemon v kontejneru je privilegovaný:** Docker jinak mountuje `/proc/sys` jen pro čtení a nastavení sysctl daemonu selže (`read-only file system`, jen `ERRO` v logu). Reálný hostitel takový není a I7 se má týkat i sysctl.
+- **Výběr backendu:** v privilegovaném kontejneru daemon volí iptables, protože Docker v jmenném prostoru založí své chainy. nftables vybere chain v tabulce `filter`, iptables `NB_SKIP_NFTABLES_CHECK=true`. Test kontroluje, že režim opravdu běží na tom, co říká.
+- **Poznatky ze spuštění:**
+  - Čerstvý daemon `default` nepřipojí (`not trying to connect when configuration was just created`), proto první `up --profile` dostane `wt0`, jak říká sekce 1. V tabulce `status` je `default` jako `NeedsLogin`. Host `api.netbird.io` je v kontejneru přesměrovaný na localhost, kdyby se daemon přece jen pokusil o login.
+  - S backendem `file` druhá session dostane `conflict=dns`, i když mají sítě různé domény, protože hostitelský DNS má jedna session (5.3). Hodnota přijde až po prvním použití DNS configu, takže těsně po `up` ve `status` být nemusí. Test proto `conflict` po návratu nekontroluje na prázdnou hodnotu.
+  - **Nález mimo klienta, Management:** peer, který se po změně `network_range` znovu připojuje, může při další změně během svého přihlášení zůstat na adrese z předchozí změny. Reprodukce na obyčejném klientovi bez gate: 9 opakování dvou změn za sebou s odstupem 0,5 až 2,1 s, přičemž v 9. kole dostal login a první sync starou adresu a během 45 s nepřišla žádná další aktualizace. Předtím nastavoval novou adresu do 2 s, jednou po 22 s. V sadě se to před úpravou projevilo jednou (`the peer of doma must have an address of its network`), po ní prošly tři běhy celé sady za sebou. Peer dotčené sítě proto při změně rozsahu stojí, `netbird up` pak dostane adresu z loginu. Místo v kódu Managementu jsem nehledal, je mimo rozsah (sekce 1). Dokumentace uvádí jak to poznat a napravit.
+  - `nft list` vypisuje prvky setu `ifaces` izolace jako `""`, protože sada s holým názvem interface nemá v knihovně byte order. V jádře jsou správně a sety se spojením názvu s adresou ho vypisují. Při ladění to mate, test takové řádky vynechává.
+- **Dokumentace:** `docs/concurrent-profiles.md`: zapnutí gate včetně podmínek odmítnutí, použití, `network_range` a `dns_domain` na self-hosted, omezení z 5.7, 6 a 2.3 pro provozovatele, upgrade a vypnutí. Text chyb a `status` jsou opsané ze skutečného běhu.
+- **Neověřeno:** `service install` a `reconfigure` s gate v kontejneru bez init systému, test používá `service run --enable-concurrent-profiles`. Vypnutí gate a upgrade popisuje dokumentace podle kódu a dřívějších testů v `client/server`, e2e je neprochází. DNS jen backend `file` (Q8). Data přes IPv6 overlay se nepingají. Sestavení balíčku viz PR 18.
+
+**Otázky k bráně v1:**
+
+- `up --profile X` při odmítnutí přesto přesune focus na X, protože přepnutí běží před `Up`. Prosté `netbird down` pak míří na odmítnutou session a `prace` běží dál mimo focus. Má odmítnutý `up` focus vracet? Souvisí s otázkou k PR 16, jestli se má focus při `up --profile` měnit vůbec.
+- Otevření `PRIV_E2E_DOCKER` dává privilegovanému kontejneru socket Dockeru hostitele, a tím root na hostiteli. Testovací proces ho používá jen na spuštění kontejnerů sady. Vyhovuje to, nebo má sada běžet v izolovaném stroji a na hostiteli nikdy?
+
 **Otázky k PR 17:**
 
 - Focused bez metrik a jiná session s metrikami: endpoint neběží. Má ho držet kterákoli zapnutá session, a čí adresa pak platí? Zvoleno nejmenší: adresu i existenci určuje focused, dvě různé adresy se nespouští.
@@ -1020,10 +1042,12 @@ a `uspfilter`, které F0 neověřil. PR závislé na otevřeném rozhodnutí (vi
 
 **Brána v1:** `e2e/` test se dvěma Management instancemi prochází a akceptační scénář funguje.
 Před zapnutím gate v provozu proběhne bezpečnostní revize I3 až I6 a oprávnění RPC.
+**Prošla 2026-11-05**, test je `e2e/concurrentprofiles`, výsledky v 2.5 `f3/e2e-docs`, revize je v 2.5 `f3/security-fixes`.
 
 ### F4: Dokumentace a provoz
 
 Dokumentace ve forku: zapnutí gate, známá omezení ze sekce 6 a 5.7, řešení konfliktu overlay sítí.
+**Hotovo 2026-11-05:** [concurrent-profiles.md](../concurrent-profiles.md).
 
 ### Po v1 (vyžaduje nové rozhodnutí)
 
