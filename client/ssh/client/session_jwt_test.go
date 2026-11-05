@@ -42,6 +42,11 @@ func (d *jwtDaemon) GetFeatures(context.Context, *proto.GetFeaturesRequest) (*pr
 	return d.features, nil
 }
 
+// GetActiveProfile names the focused session, which a connection without --profile is fixed to.
+func (d *jwtDaemon) GetActiveProfile(context.Context, *proto.GetActiveProfileRequest) (*proto.GetActiveProfileResponse, error) {
+	return &proto.GetActiveProfileResponse{Id: "work", ProfileName: "work", Username: "alice"}, nil
+}
+
 func (d *jwtDaemon) RequestJWTAuth(context.Context, *proto.RequestJWTAuthRequest) (*proto.RequestJWTAuthResponse, error) {
 	return &proto.RequestJWTAuthResponse{CachedToken: jwtOfTheSession}, nil
 }
