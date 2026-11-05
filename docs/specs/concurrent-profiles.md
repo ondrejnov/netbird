@@ -103,12 +103,12 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q11 | Minimální jádro | `own` potřebuje jádro 5.6 a novější, na starším se session nespustí | 5 |
 | Q12 | iptables bez modulů ipset | Izolace odmítne session (I6), bez fallbacku | 5 |
 | Q13 | Session s v6 bez funkční v6 izolace | **Rozhodnuto a napojeno:** v6 se odebere a session pokračuje na v4 | 5, 13 |
-| Q14 | Opakování `Verify` | Jen po instalaci enginu, cizí pravidlo nad skokem v iptables by do té doby izolaci obešlo | 5, 13 |
+| Q14 | Opakování `Verify` | **Změněno revizí:** kontrola běží každých 5 s, rozdíl izolaci obnoví a když to nejde, zastaví všechny session, viz `f3/security-fixes` v 2.5 | 5, 13 |
 | Q15 | Překryv v6 u běžící session | `Add` běží při každém pokusu enginu a změna adresy z Managementu engine restartuje, `IPv6Disabled` proto odebere v6 v dalším pokusu. Session, která v6 ztratila, ho po odchodu druhé session získá až po svém restartu | 5, 13, 15 |
 | Q16 | Adresy na interface jiné session mimo její prefix, např. `fe80::` | Nezahrnuto do `overlays` | 5 |
 | Q17 | Formát `sessions.json` | **Schváleno:** `{version:1, sessions:[{profile, username, slot, desired}]}`, neznámé pole je poškození | 7 |
 | Q18 | Explicitní `WgPort` obsazený cizím procesem | Port z alokátoru jako dnes, alternativa je odmítnutí | 7 |
-| Q19 | Název kolidující s cizím linkem, který není session | Úklid po pádu maže jen link typu `wireguard` se jménem slotu, viz `f3/residual-links` v 2.5. Cizí WireGuard se stejným jménem od zbytku odlišit neumí a `wg_link_linux.go` při startu session smaže cokoli se stejným jménem, to je dál neřešené | 7, 13 |
+| Q19 | Název kolidující s cizím linkem, který není session | Úklid po pádu maže jen link typu `wireguard` se jménem slotu, viz `f3/residual-links` v 2.5. Cizí WireGuard se stejným jménem od zbytku odlišit neumí. `wg_link_linux.go` při startu session smaže cokoli se stejným jménem, s gate se proto cizí typ odmítne už v `attach`, viz `f3/security-fixes` v 2.5 | 7, 13 |
 | Q20 | Foreground režim a zámek `sessions.json` | Druhá instance se odmítne. Návrh: foreground `Slots` vůbec neotevírá | 7, 13 |
 | Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
 | Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
@@ -376,7 +376,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Bez `sessions.json`** se nic nemaže (I1). Soubor z dřívějšího běhu s gate spustí úklid i po jejím vypnutí, stejně jako u izolace.
 - **Zůstává krátké okno:** mezi úklidem state souboru a smazáním linku je link živý bez pravidel své session, izolace ale ještě platí. Trvá po dobu úklidu.
 - **Test** spouští skutečný daemon v podprocesu a zabíjí ho přes `SIGKILL`, takže na hostiteli zůstane přesně to, co po pádu. Peer je kernel WireGuard v samostatném netns přes veth. Kontrola před restartem ověří, že tunel přes `wt1` doručuje, což neprůchodnost po startu dělá průkaznou. Test čeká na peera ve stavu session, protože ACL se aplikuje dřív než peery a před první network mapou by firewall session peera nepustil.
-- **Neřešeno, čeká na rozhodnutí:** session s explicitním `WgIface` má jméno jen v profilovém configu, její link po pádu zůstane. Viz „Otevřené po PR 13".
+- **Session s explicitním `WgIface`** má jméno jen v profilovém configu, její link po pádu zůstane. Od `f3/security-fixes` ji gate odmítne.
 
 **`f3/flow-filter`, R1:**
 
@@ -394,11 +394,11 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Kód:** `session_access.go`. `checkSessionSelector` vrací session a handler dál pracuje jen s ní, druhý pohled na focus nikde není. `checkOpenSelector` je totéž pro `Down`, `Status` a `SubscribeStatus`, které bez selektoru neověřují nikoho.
 - **Kdo je vlastník:** `key.Username` se přes účetní databázi hostitele (`user.Lookup`) převede na UID a porovná s UID z `CallerIdentity`. Tím se shodne i alias stejného UID. Neznámý účet s číselným jménem rovným UID volajícího je vlastní, protože tak `InvokingUser` pojmenuje uživatele bez záznamu v `passwd`. Selhání databáze znamená cizí session (I6). Klíč se sanitizovaným jménem ze state souboru (2.4) vlastníka nenajde, ovládá ho jen root. Dva účty, jejichž jména se sanitizují stejně, sdílejí adresář profilů už dnes, session mají ale každý svou. Privilegovaný je `IsPrivilegedCaller`, takže i bezrootový kontejner.
 - **Pořadí kontrol:** identita běží před rozlišením handle, takže cizí uživatel dostane stejnou odpověď bez ohledu na to, jestli profil existuje, a neprozradí se ani kandidáti nejednoznačného handle. Vlastní uživatel dostane `NotFound` nebo `InvalidArgument`. Selektor bez handle, případně s handle jiným než `default` a bez jména uživatele, je `InvalidArgument`. Rozlišení je `ResolveProfile`: ID, unikátní jméno, unikátní prefix ID.
-- **Zvolený výklad, potvrdit při revizi:**
-  - **Volající s neurčenou identitou** dosáhne na sdílenou default session, protože není cizí. Na ostatní ne.
+- **Zvolený výklad, potvrzený revizí, až na jeden bod:**
+  - **Volající s neurčenou identitou** nedosáhne na nic, ani na default session (změna v `f3/security-fixes`, AGENTS Security).
   - **Bez selektoru** projdou všichni jen u `Down`, `Status` a `SubscribeStatus`. Ostatní RPC ověří, že focused session volajícímu patří. Bez toho by selektor nic nechránil, `SwitchProfile` a RPC bez selektoru by ho obešly.
   - **`Status` se selektorem** popisuje v polích 1 až 4 pojmenovanou session, i když komentář v 5.6 říká „vždy focused". Bez selektoru je to focused. Příznak `SessionStatus.focused` ukazuje skutečný focus.
-- **RPC pojmenovávající profil** se kontrolují stejně, jsou to povrchy řízení a čtení téže session: `Up`, `Login`, `Logout`, `RemoveProfile`, `SwitchProfile`, `GetConfig`, `SetConfig`. `SwitchProfile` na cizí session by jinak otevřel cestu přes `Down` bez selektoru. `ListProfiles`, `AddProfile` a `RenameProfile` session neřídí a zůstávají beze změny, viz otázky níže.
+- **RPC pojmenovávající profil** se kontrolují stejně, jsou to povrchy řízení a čtení téže session: `Up`, `Login`, `Logout`, `RemoveProfile`, `SwitchProfile`, `GetConfig`, `SetConfig`. `SwitchProfile` na cizí session by jinak otevřel cestu přes `Down` bez selektoru. `ListProfiles`, `AddProfile`, `RenameProfile` a `GetActiveProfile` kontroluje od `f3/security-fixes` `authorizeProfilesOf` a `authorizeActiveProfile`.
 - **`Down{all}`** bere jen session, na které volající dosáhne, ostatní běží dál a `desired` se jim nemění. Když žádná nebyla nahoře, vrací `ErrServiceNotUp`. **`Status.sessions`** se filtruje stejně, cizí záznam nevznikne, takže nevznikne ani jeho `full_status`.
 - **Co zůstává podle rozhodnutí:** `Down` a `Status` bez selektoru na cizím focusu fungují jako dnes, takže kdokoli lokální přečte horní pole `Status` včetně `full_status` focused session a shodí ji. Ochrana platí, jen když focus patří volajícímu nebo je default.
 - **`Login`** cílí na pojmenovanou session a nemění focus ani aktivní profil. Metriky se srovnávají jen u focused. Kill switch profilů hlídá login jiné než focused session, jako dřív přepnutí. Brány `Login` čtou uložený config z klíče session, ne z druhého rozlišení handle, které by mohlo vést jinam. `Logout` ze stejného důvodu odmítne, když handle mezitím ukazuje na jiný profil.
@@ -436,7 +436,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **`status`:** `--profile X` pošle selektor a zobrazí souhrn X. S gate se za souhrn (výchozí i `--detail`) přidá tabulka `Sessions:` (jméno, stav, interface, overlay, `focused`, `conflict: ...`). `--table`, `--ipv4`, `--ipv6` jsou beze změny. JSON a YAML dostanou pole `sessions` (`omitempty`), ostatní pole zůstávají. Overlay adresy se při `--anonymize` anonymizují. Bez gate je výstup bajt po bajtu dnešní, test to hlídá textem i klíči JSON.
 - **`profile select`** s gate nevolá `Status` ani `Down`. **`profile list`** s gate přidá sloupec `STATUS` ze `Status.sessions`, profil bez session je `Idle`. Má-li daemon `Profile.connection_status`, má přednost. **`profile remove` a `deregister`** s gate překládají `FailedPrecondition` daemonu na zprávu s příkazem `netbird down --profile <jméno>`. Bez gate zůstává původní chyba.
 - **`networks`, `debug bundle|persistence|config|for`, `expose`, `ssh`** mají `--profile`. `debug for` pošle selektor i na `Status`, `Up`, `Down`, záchyt a persistenci. `debug config` předá ID jako `profileName` v `GetConfigRequest`, která selektor nemá. `ssh` předává selektor přes interceptor v `client/ssh/client`, který doplní `GetPeerSSHHostKey`, `RequestJWTAuth` a `WaitJWTToken`, takže se nemění podpisy exportovaných funkcí.
-- **Testy:** `session_cli_test.go` běží proti falešnému daemonu s vlastní TCP adresou (zaznamenává RPC a jejich pořadí), `TestCLI_TwoSessionsOnARealDaemon` (privileged) proti skutečnému daemonu s gate v podprocesu, se dvěma Managementy, skutečnými enginy a unix socketem s `SO_PEERCRED`. Daemon je v podprocesu, protože CLI při každém příkazu volá `util.InitLog` a to je pod `-race` závod s gRPC logováním (stejný jako u `TestLogin`). Žádný test nepoužívá výchozí socket. `TestUpDaemon` v `client/cmd` selhává se „setup key is invalid" i na `f3/conflicts`, tedy bez PR 16, s `-race` i bez něj.
+- **Testy:** `session_cli_test.go` běží proti falešnému daemonu s vlastní TCP adresou (zaznamenává RPC a jejich pořadí), `TestCLI_TwoSessionsOnARealDaemon` (privileged) proti skutečnému daemonu s gate v podprocesu, se dvěma Managementy, skutečnými enginy a unix socketem s `SO_PEERCRED`. Daemon je v podprocesu, protože CLI při každém příkazu volá `util.InitLog` a to je pod `-race` závod s gRPC logováním (stejný jako u `TestLogin`). Žádný test nepoužívá výchozí socket. Příčina dřívějšího selhání `TestUpDaemon` se „setup key is invalid" je v `f3/security-fixes` níže.
 - **UI přepínač (5.7):** `TestGate_UISwitchLeavesTheOriginalSessionRunning` v `client/server` na skutečném daemonu s gate: po `SwitchProfile` a prosté `Down{}` skončí session nového focusu a původní běží dál. `profileswitcher_test.go` v `client/ui/services` hlídá, že přepínač posílá `Down` bez selektoru a bez `all` až po přepnutí. **Tento test se v harnessu nespustí:** balíček `services` závisí na Wails, který potřebuje GTK4 a WebKitGTK, a image `golang:alpine` je nemá. Prošel jen `go vet`.
 
 **PR 17, `f3/per-session`:**
@@ -455,6 +455,34 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **`probeThrottle`** je na session, sonda jedné session neříká nic o relayích druhé.
 - **Testy:** `session_report_privileged_test.go` na skutečných enginech a Managementech: scrape skutečného endpointu, zip z `DebugBundle`, soubory v `/etc/ssh/ssh_config.d` a state soubory po stopu, MTU linků, updater, firewalld přes falešný `firewall-cmd` (harness nemá system bus). `TestResolverAdvertisesTheMTUOfItsSession` čte EDNS0 velikost na skutečném UDP upstreamu, `TestEngine_SessionsSideBySideAllProve` podepisuje ze skutečného úložiště. Klientské metriky ověřuje řada `netbird_login_duration_seconds_count` s labelem na scrapu a `peer_id` v `metrics.txt`. Mutace: bez `NewForSlot` se soubor slotu 1 neobjeví, bez `ProfileName` nesedí hlavička `status.txt`, metriky focused v cizím adresáři shodí porovnání `peer_id`.
 - **Nález mimo rozsah:** `version.Update.StopWatch` čte `fetchTicker`, který `StartFetcher` zapisuje bez synchronizace, zrušení kontextu těsně po `Manager.Start` je pod `-race` závod. V produkci jde o konec daemonu. Testy updateru proto `rootCtx` nerušit, `version/update.go` se nezměnil.
+
+**Bezpečnostní revize F3, `f3/security-fixes`:**
+
+- **Překryv běhů:** `Down` čeká na konec běhu 5 s, `engine.Stop` může trvat déle a další `Up` spustil druhý běh vedle prvního. Konec prvního pak odebral druhému izolaci. `launchSession` teď čeká na konec předchozího běhu, nejvýš minutu nebo do kontextu volajícího, pak `FailedPrecondition`. `lifecycle` přitom drží, takže `Down` téže session čeká s ním. Navíc `Slots.Release` hlásí, zda lease ještě platil, a `detach` s nahrazeným lease nesahá na nic. Po `Close` hlásí platnost, protože nic nového už nevznikne a izolaci je potřeba odebrat.
+- **I5 při loginu:** filtr adres je na všech cestách k Managementu: login běhu, `Login`, registrace, `IsLoginRequired`, `ExtendAuthSession`. `auth.NewAuth` má volbu `WithInfoFilter`, server ji předává jen s gate. Filtr je podle prefixu všech session. Foreground, embed a mobilní klienti filtr nemají, protože nemají session.
+- **Vzdálený bundle:** s `config.Session` má state soubor a název své session a `OmitHostWide`. Log a systémové informace tedy Management přes job nedostane ani při jediné session. Bez gate beze změny.
+- **Izolace za běhu:** `DaemonHost` spouští s první session kontrolu každých 5 s (`session_isolation_watch.go`), poslední session ji končí. Rozdíl znamená `Restore`: nftables jednou dávkou, iptables po krocích (nemá dávku, do konce obnovy jde izolaci obejít, stejně jako před ní). Každá session dostane událost `isolation_restored` (WARNING). Když obnova nebo další `Verify` selže, všechny session skončí přes `ErrIsolationLost`: `Idle`, `session_refused`, `desired` zůstává `up`, `conflict` prázdný. Nová session čeká, až půjde zbytek pravidel odstranit (`recoverIsolationLocked`). **Zůstává:** okno až 5 s a vlastní tabulky session po `flush ruleset` nikdo neobnoví, to je stejné jako bez gate.
+- **Nález navíc, zablokování:** `attach` při odmítnutí bez firewallu a při selhání `Sessions.Set` volal `detach`, který bere `attachMu`, držený už v `attach`. Běh i všechny další `attach` a `detach` by stály navždy. Regresní test `TestAttachWithoutAnyFirewallRefusesAndMovesOn`.
+- **Explicitní `WgIface`, odchylka od 5.1:** s gate se odmítne v `attach` (`ErrExplicitInterface`, `conflict=interface`), i pro roota. Tím končí oba nálezy: link se jménem, které `sessions.json` nezná, a smazání cizího linku přes `SetConfig{interface_name}` bez oprávnění. Do `privilegedConfigChange` se změna nepřidala, s gate by nic nechránila a bez gate by porušila I1. Config se zapíše dál, session pak hlásí, co změnit.
+- **Cizí link na jméně slotu:** `RefuseForeignLink` v `attach` odmítne existující link jiného typu než `wireguard` a `tun`, chyba zjišťování také. `tun` projde, protože zavíraný TUN předchozího pokusu může krátce zůstat, cizí TUN se jménem `wtN` by proto v kernel režimu `recreate` smazal. Cizí WireGuard viz Q19.
+- **RPC profilů:** `ListProfiles`, `AddProfile`, `RenameProfile` a `GetActiveProfile` kontrolují identitu jen s gate. `GetActiveProfile` na cizí focus vrací `PermissionDenied`, CLI (`getActiveProfileName`) to bere jako prázdný název. Událost `Profile list changed` s gate nenese název profilu, UI z ní čte jen `kind`.
+- **Sanitizované jméno:** `owns` navíc žádá, aby se jméno sanitizací neměnilo a aby žádný jiný UID ve `/etc/passwd` nesdílel stejný adresář. Chybějící soubor znamená žádné účty, jiné selhání odmítnutí. NSS neumí účty vypsat, účet jen v LDAP s jiným sanitizovaným jménem se proto pozná jen, když sám volá. **Cena:** uživatel s tečkou ve jméně má s gate bez oprávnění jen default session, viz otázky.
+- **Neurčená identita:** `mayReach` a `requireProfileReachable` ji odmítnou i pro default session. `Down` a `Status` bez selektoru zůstávají podle 5.6 otevřené. Služba s gate navíc odmítne start na TCP socketu (`checkConcurrentProfilesTransport`), kde by neurčený byl každý.
+- **Bundle:** log se vynechá, když je v mapě nebo v `sessions.json` jakákoli cizí session, i zastavená. Stačí jediný záznam jiného uživatele, takže na sdíleném hostiteli neprivilegovaný volající log prakticky nedostane.
+- **JWT u `netbird ssh`:** s gate ověří server vyžadující JWT jen daemon, ve stejné session jako token. `known_hosts` ani vypnutá kontrola neplatí. Bez `--profile` to znamená, že peer v jiné session skončí chybou host key. Neznámý stav gate znamená odmítnutí, `Unimplemented` starý daemon. Token se přitom od daemonu vyžádá dřív než handshake, neodejde ale ven.
+- **`TestUpDaemon`:** „setup key is invalid" nepocházel z testovacího Managementu, ale z `api.netbird.io`. Stejně selhává na `multi-profile`, regrese těchto větví to není. Upstream `a8dff998e` změnil foreground login na `ReadConfigOrDefault`, který `--management-url` nečte, a test tak každým během posílal testovací klíč a metadata hostitele na produkční službu. Test má teď configy s vlastním Managementem a výchozí config ve vlastním adresáři. **Pod `-race` dál selhává** na `grpclog.SetLoggerV2` z `util.InitLog` (známý závod jako u `TestLogin`), bez `-race` prochází celý. **Nález upstreamu:** `netbird login -m X` ve foreground režimu `-m` ignoruje.
+- **Testy:** `session_isolation_privileged_test.go` na skutečných enginech s oběma backendy, po obnově znovu `assertIsolated` s pakety. `TestLostIsolationStopsAllSessions` drží ipset cizím pravidlem, skutečně tak selže teardown. Falešný Management `client/testutil/mgmtmeta` čte skutečný `PeerSystemMeta`. `TestJWTGoesOnlyToAServerTheSessionKnows` má skutečný SSH handshake se serverem, který token zaznamenává.
+- **Historie větve:** první dva commity a oprava testu po nich se kvůli špatně vystagovaným hunkům `session_host.go` nepřeloží, opravuje to commit `[client] Keep a remote debug bundle to the session that asked`. Historie se podle zadání nepřepisovala. Při slévání squash nevadí, `git bisect` by tyto tři commity musel přeskočit.
+
+**Otázky k revizi:**
+
+- **Explicitní `WgIface`:** odmítnutí je odchylka od 5.1 „explicitní název se respektuje". Má zůstat, nebo se má jméno ukládat do `sessions.json` (změna schváleného formátu Q17, starší daemon by soubor bral jako poškozený)?
+- **Uživatel s tečkou ve jméně** nemá s gate bez oprávnění vlastní profily, ani když kolize neexistuje. Zvoleno podle revize. Alternativa je povolit ho, dokud žádný účet adresář nesdílí, nebo adresář klíčovat přes UID (změna formátu na disku).
+- **`interface_name` bez gate:** neprivilegovaný volající dál smí přes `SetConfig` a `Up` smazat libovolný link, i na `main`. I1 brání opravě ve forku. Hlásit upstreamu přes security policy?
+- **`99-netbird-N.conf` (0644)** ukazuje overlay IP a FQDN až 200 peerů komukoli lokálnímu, což obchází filtr 5.6. Nechá se to popsat jako známé omezení, nebo se má soubor slotu N přesunout do `~/.ssh` vlastníka (změna CLI a chování OpenSSH)? Soubor s 0600 nejde, OpenSSH by ho vlastník nepřečetl.
+- **Vlastní tabulky session po `flush ruleset`:** kontrola obnoví jen izolaci. ACL session zůstanou pryč do jejího restartu, jako bez gate. Má je kontrola také hlídat a session při rozdílu restartovat?
+- **Interval kontroly 5 s** je volba bez měření. Netlink událost by okno zkrátila, ale znamenala by další vlastní kód pro oba backendy.
+- **`Status` a `Down` bez selektoru** dál čtou a shazují cizí focus kýmkoli lokálním (5.6). Revize je nezpochybnila, zůstávají.
 
 **Otázky k PR 17:**
 
@@ -482,7 +510,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 
 **Otázky k PR 14:**
 
-- `ListProfiles`, `AddProfile` a `RenameProfile` s cizím `username` zůstávají otevřené, jako dnes. Spec je nezmiňuje, nejde o session. Má je 5.6 pokrýt? `ListProfiles` čte názvy profilů cizího uživatele, zbylé dva zapisují do jeho adresáře.
+- `ListProfiles`, `AddProfile` a `RenameProfile` s cizím `username`: 5.6 je pokrýt má, opraveno v `f3/security-fixes`.
 - `SetLogLevel` posílá úroveň jen klientovi focused session, proces ji má ale globální. Patří to sem, nebo do PR 17?
 
 **Otevřené po PR 13:**
@@ -490,7 +518,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Residual, session sama (Q24):** když `Cleanup` selže a na hostiteli nic jiného neběží, `Up` jen zaloguje varování a běh záznam přepíše. Zadání PR 15 řeší jen případ vedle běžící session.
 - **Klíč slotu 0 ze souboru (2.4):** nese sanitizované jméno uživatele. Důsledek je jen nevyužitý záznam a jiné číslo slotu pro `first.last`, názvy jsou po napojení na slotu, ne na profilu. Neřešeno.
 - **DNS:** ověřen jen backend `file`, který v kontejneru vybere daemon. Pro resolved a NM platí Q8.
-- **Link s explicitním `WgIface` po pádu:** úklid zná jen jména slotů, link s vlastním názvem přežije mimo izolaci. Rozhoduje vlastník: smazat link typu `wireguard` se jménem z profilového configu, nebo explicitní název při gate odmítnout (odchylka od 5.1).
+- **Link s explicitním `WgIface` po pádu:** vyřešeno odmítnutím v `f3/security-fixes`, viz otázky k revizi. Zůstává link z běhu před zapnutím gate, ten v `sessions.json` není.
 - **Cizí WireGuard na jméně slotu:** typ a jméno ho od zbytku po pádu neodliší, start ho smaže. Odlišit by šel porovnáním veřejného klíče zařízení s klíčem profilu, nečitelný config by pak ale znamenal živý link bez izolace nebo odmítnutí startu. Rozhoduje vlastník.
 
 ## 3. Architektura: proč jeden daemon
@@ -612,6 +640,7 @@ Windows GUID a netsh, macOS `utun` a scutil řeší až pozdější rozšířen�
 - `config.WgIface == WgInterfaceDefault` znamená "automaticky" a použije se jméno slotu.
   **Hodnota se nezapisuje zpět do configu.**
 - Explicitní vlastní název se respektuje. Kolize s běžící session znamená odmítnutí, nikdy smazání linku.
+  **S gate se od `f3/security-fixes` explicitní název odmítá, viz 2.5.**
 - Stejně se chová `WgPort`. Porty a sloty alokuje koordinátor pod krátkým zámkem `bringUpMu`, který
   serializuje jen alokaci, aby se odstranil závod ve `freePort`. Rosenpass má stejný vzor. Zámek se nedrží
   přes login ani síťové čekání, souběh celých startů omezuje 5.8.

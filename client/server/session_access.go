@@ -103,10 +103,10 @@ func (c sessionCaller) holdsAccount(username string) bool {
 // aloneInDirectory reports whether the profiles of username can be only those of its account. The
 // directory comes from the sanitized name while ownership goes by the account, so john.doe and johndoe
 // would have different sessions on the same files, keys included. Only a privileged caller can reach
-// such a directory.
+// such a directory. It runs on every read of a status, so the refusal stays at debug level.
 func (c sessionCaller) aloneInDirectory(username string) bool {
 	if profilemanager.SanitizedUsername(username) != username {
-		log.Warnf("denying access to the profiles of %s for an unprivileged caller: the name of their directory differs from the name of the account", username)
+		log.Debugf("denying access to the profiles of %s for an unprivileged caller: the name of their directory differs from the name of the account", username)
 		return false
 	}
 
@@ -117,7 +117,7 @@ func (c sessionCaller) aloneInDirectory(username string) bool {
 	}
 	for _, account := range accounts {
 		if account.uid != c.id.UID && profilemanager.SanitizedUsername(account.name) == username {
-			log.Warnf("denying access to the profiles of %s for an unprivileged caller: the account %s shares their directory", username, account.name)
+			log.Debugf("denying access to the profiles of %s for an unprivileged caller: the account %s shares their directory", username, account.name)
 			return false
 		}
 	}
