@@ -151,7 +151,15 @@ func (m *externalChainMonitor) subscribe() (chan *nftables.MonitorEvent, func(),
 	if err != nil {
 		return nil, nil, fmt.Errorf("add netlink monitor: %w", err)
 	}
-	return events, func() { _ = mon.Close() }, nil
+	return events, func() {
+		_ = mon.Close()
+		// The library hands over events on unbuffered channels, and its goroutines end only once
+		// the ones already received are taken.
+		go func() {
+			for range events {
+			}
+		}()
+	}, nil
 }
 
 // resetDebounce reschedules a pending debounce timer without leaking a stale
