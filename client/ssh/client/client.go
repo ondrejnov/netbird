@@ -281,6 +281,9 @@ type DialOptions struct {
 	SkipCachedToken    bool
 	InsecureSkipVerify bool
 	NoBrowser          bool
+	// Session names the session of the daemon that holds the peer, host keys and login. Nil is
+	// the focused session.
+	Session *proto.SessionSelector
 }
 
 // Dial connects to the given ssh server with specified options
@@ -310,7 +313,7 @@ func Dial(ctx context.Context, addr, user string, opts DialOptions) (*Client, er
 		config.Auth = append(config.Auth, authMethod)
 	}
 
-	return dialWithJWT(ctx, "tcp", addr, config, daemonAddr, opts.SkipCachedToken, opts.NoBrowser)
+	return dialWithJWT(ctx, "tcp", addr, config, daemonAddr, opts.Session, opts.SkipCachedToken, opts.NoBrowser)
 }
 
 // dialSSH establishes an SSH connection without JWT authentication
@@ -338,7 +341,7 @@ func dialSSH(ctx context.Context, network, addr string, config *ssh.ClientConfig
 }
 
 // dialWithJWT establishes an SSH connection with optional JWT authentication based on server detection
-func dialWithJWT(ctx context.Context, network, addr string, config *ssh.ClientConfig, daemonAddr string, skipCache, noBrowser bool) (*Client, error) {
+func dialWithJWT(ctx context.Context, network, addr string, config *ssh.ClientConfig, daemonAddr string, session *proto.SessionSelector, skipCache, noBrowser bool) (*Client, error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("parse address %s: %w", addr, err)
@@ -364,7 +367,7 @@ func dialWithJWT(ctx context.Context, network, addr string, config *ssh.ClientCo
 	jwtCtx, cancel := context.WithTimeout(ctx, config.Timeout)
 	defer cancel()
 
-	jwtToken, err := requestJWTToken(jwtCtx, daemonAddr, skipCache, noBrowser)
+	jwtToken, err := requestJWTToken(jwtCtx, daemonAddr, session, skipCache, noBrowser)
 	if err != nil {
 		return nil, fmt.Errorf("request JWT token: %w", err)
 	}
@@ -374,10 +377,10 @@ func dialWithJWT(ctx context.Context, network, addr string, config *ssh.ClientCo
 }
 
 // requestJWTToken requests a JWT token from the NetBird daemon
-func requestJWTToken(ctx context.Context, daemonAddr string, skipCache, noBrowser bool) (string, error) {
+func requestJWTToken(ctx context.Context, daemonAddr string, session *proto.SessionSelector, skipCache, noBrowser bool) (string, error) {
 	hint := profilemanager.GetLoginHint()
 
-	conn, err := connectToDaemon(daemonAddr)
+	conn, err := connectToDaemon(daemonAddr, session)
 	if err != nil {
 		return "", fmt.Errorf("connect to daemon: %w", err)
 	}
@@ -394,8 +397,8 @@ func requestJWTToken(ctx context.Context, daemonAddr string, skipCache, noBrowse
 }
 
 // verifyHostKeyViaDaemon verifies SSH host key by querying the NetBird daemon
-func verifyHostKeyViaDaemon(hostname string, remote net.Addr, key ssh.PublicKey, daemonAddr string) error {
-	conn, err := connectToDaemon(daemonAddr)
+func verifyHostKeyViaDaemon(hostname string, remote net.Addr, key ssh.PublicKey, daemonAddr string, session *proto.SessionSelector) error {
+	conn, err := connectToDaemon(daemonAddr, session)
 	if err != nil {
 		return err
 	}
@@ -411,8 +414,11 @@ func verifyHostKeyViaDaemon(hostname string, remote net.Addr, key ssh.PublicKey,
 	return callback(hostname, remote, key)
 }
 
-func connectToDaemon(daemonAddr string) (*grpc.ClientConn, error) {
+func connectToDaemon(daemonAddr string, session *proto.SessionSelector) (*grpc.ClientConn, error) {
 	target, opts := daemonaddr.DialTarget(daemonAddr)
+	if session != nil {
+		opts = append(opts, grpc.WithUnaryInterceptor(sessionInterceptor(session)))
+	}
 
 	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
@@ -456,18 +462,18 @@ func createHostKeyCallback(opts DialOptions) (ssh.HostKeyCallback, error) {
 	}
 
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		if err := tryDaemonVerification(hostname, remote, key, opts.DaemonAddr); err == nil {
+		if err := tryDaemonVerification(hostname, remote, key, opts.DaemonAddr, opts.Session); err == nil {
 			return nil
 		}
 		return tryKnownHostsVerification(hostname, remote, key, opts.KnownHostsFile)
 	}, nil
 }
 
-func tryDaemonVerification(hostname string, remote net.Addr, key ssh.PublicKey, daemonAddr string) error {
+func tryDaemonVerification(hostname string, remote net.Addr, key ssh.PublicKey, daemonAddr string, session *proto.SessionSelector) error {
 	if daemonAddr == "" {
 		return fmt.Errorf("no daemon address")
 	}
-	return verifyHostKeyViaDaemon(hostname, remote, key, daemonAddr)
+	return verifyHostKeyViaDaemon(hostname, remote, key, daemonAddr, session)
 }
 
 func tryKnownHostsVerification(hostname string, remote net.Addr, key ssh.PublicKey, knownHostsFile string) error {
