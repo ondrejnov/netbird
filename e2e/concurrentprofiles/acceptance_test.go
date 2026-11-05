@@ -116,9 +116,17 @@ func runScenario(t *testing.T, mode daemonMode) {
 	d.pingThrough(ctx, t, work.routedHost, "wt0")
 	assert.Equal(t, work.peerIP(ctx, t).String(), d.resolve(ctx, t, work, mode, workIP, work.peerFQDN), "the DNS of the first network keeps answering")
 
-	// An overlapping network is refused, says why, and touches nothing.
+	// An overlapping network is refused, says why, and touches nothing. The peer of that network
+	// stays out of it: Management can leave a peer that reconnects during a change of the range on
+	// the previous address until its next reconnect, which has nothing to do with this daemon.
+	home.stopPeer(ctx, t)
 	require.NoError(t, home.setOverlay(ctx, work.overlay))
-	t.Cleanup(func() { require.NoError(t, home.setOverlay(context.Background(), home.overlay)) })
+	overlapping := true
+	t.Cleanup(func() {
+		if overlapping {
+			home.restoreOverlay(context.Background(), t)
+		}
+	})
 
 	code, out := d.exec(ctx, t, "netbird", "up", "--profile", home.profile)
 	assert.NotZero(t, code, "up of an overlapping network must fail: %s", out)
@@ -134,7 +142,8 @@ func runScenario(t *testing.T, mode daemonMode) {
 	d.pingThrough(ctx, t, work.peerIP(ctx, t), "wt0")
 
 	// The way out of the overlap the documentation gives: another range, and up again.
-	require.NoError(t, home.setOverlay(ctx, home.overlay))
+	overlapping = false
+	home.restoreOverlay(ctx, t)
 	d.cli(ctx, t, "up", "--profile", home.profile)
 	back := d.status(ctx, t, "--profile", home.profile)
 	// The file backend gives the DNS of the host to one session, so dns is a valid value here.
@@ -303,6 +312,20 @@ func (n *overlayNetwork) peerIP(ctx context.Context, t *testing.T) netip.Addr {
 		}
 	}, connectTimeout, time.Second, "the peer of %s must have an address of its network", n.profile)
 	return addr
+}
+
+func (n *overlayNetwork) stopPeer(ctx context.Context, t *testing.T) {
+	t.Helper()
+	code, out, err := n.peer.Exec(ctx, "netbird", "down")
+	require.NoError(t, err, "stop the peer of %s", n.profile)
+	require.Zerof(t, code, "stop the peer of %s: %s", n.profile, out)
+}
+
+// restoreOverlay gives the network its own range back and brings the stopped peer up in it.
+func (n *overlayNetwork) restoreOverlay(ctx context.Context, t *testing.T) {
+	t.Helper()
+	require.NoError(t, n.setOverlay(ctx, n.overlay))
+	require.NoError(t, n.peer.Up(ctx), "bring the peer of %s up again", n.profile)
 }
 
 // pingThrough pings the target until the tunnel carries it, and then shows that the packets of
