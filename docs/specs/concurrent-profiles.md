@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13 a PR 14 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 15 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13, PR 14 a PR 15 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 16 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -95,7 +95,7 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q3 | Kam patří `ShutdownState` session | Slot nese state, klíč v souboru se nemění. Dva sloty ve sdíleném state manageru by si ho přepsaly, proto má každá session vlastní state soubor (PR 9, 11) | 4, 6 |
 | Q4 | Předání uvolněného DNS | Bez aktivního předání, další update se stejnou konfigurací zkusí claim znovu | 6 |
 | Q5 | Debian `resolvconf` | Výhradní backend jako openresolv, bez ověření | 6 |
-| Q6 | Kolize DNS domény (sekce 6) | Neimplementováno, rozhraní pro zjištění kolize není známé | 6 |
+| Q6 | Kolize DNS domény (sekce 6) | Kolize jména se nezjišťuje, rozhraní není známé. Od PR 15 se varuje při shodné doméně na dvou linkách, viz 2.5 | 6, 15 |
 | Q7 | Prefixové porovnání v ICE blacklistu | `wt1` vyloučí i `wt10`, chyba na straně vyloučení | 8 |
 | Q8 | Ověření DNS na reálném resolved a NM | Harness je Alpine bez systemd, testy běží proti falešným službám na D-Bus | 6 |
 | Q9 | **Vynucení I3, I4 v userspace režimu (sekce 7)** | **Rozhodnuto a napojeno:** vynucení se řídí typem firewallu, jaderná izolace je povinná všude, kde existuje nativní backend, viz 2.5 | 5, 13 |
@@ -113,7 +113,7 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q21 | `ip_forward` po poslední session | Sdílený stav ho vrací (I7), bez gate zůstává jako dnes zapnutý | 5 |
 | Q22 | Originály sysctl po pádu daemonu (I7) | Jen v paměti, po pádu se ztratí | 5, 11 |
 | Q23 | Selhání v6 části izolace u session s v6 v nainstalované rovině iptables | Add vrací chybu, pokus bez overlaye nejde v harnessu otestovat | 5 |
-| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. **Zatím vyřešeno odmítnutím:** vedle běžící session `Up` a `Login` zbytek neuklízí a `CleanState` se odmítne, viz 2.5. Napojení prostředků to nemění: soubor z běhu před sloty nese názvy slotu 0, otevřené v 2.5 | 11, 13 |
+| Q24 | Selhaný residual `Cleanup` | Zůstává v souboru a opakuje se při startu. **Rozhodnuto:** vedle běžící session `Login` zbytek neuklízí, `CleanState` se odmítne a `Up` vrátí `FailedPrecondition`, viz 2.5 | 11, 13, 15 |
 | Q25 | Foreground `netbird up` vedle startujícího daemonu | Daemon uklidí i jeho state soubor neaktivního profilu a se `sessions.json` smaže i jeho link se jménem slotu | 11 |
 | Q26 | `RemoveProfile` běžícího profilu | **Rozhodnuto a opraveno** ve `f3/run-config`: `FailedPrecondition` před deregistrací. `logout` podle 5.7 zůstává na PR 16 | 11, 16 |
 | Q27 | Probe pravidlo 32321 po pádu | Zůstává, od cizího nejde odlišit, proces kvůli němu nepřejde na legacy. Odporuje I7 | 9 |
@@ -411,6 +411,29 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **`nil` config:** session pojmenovaná selektorem může být bez configu. `buildStatusResponse` to snese. `networksDisabledFor` pak spadne na příznak služby, RPC sítí stejně skončí na `not connected`.
 - **Harness:** `TestSessionAccessOverTheRealSocket` pustí test binárku jako `nobody` a roota proti skutečnému unix socketu s `SO_PEERCRED` a skutečné databázi `passwd`, včetně podvržených metadat `x-netbird-fwd-*`. Tabulkový test spojuje 24 RPC, čtyři volající a tři cíle. Propuštěná volání dostanou zrušený kontext, ptají se jen, kdo projde. `TestSelectorReachesTheEngineOfItsSession` běží na skutečných enginech a kontroluje sítě, výběr sítí a pcap v bundlu.
 
+**PR 15, `f3/conflicts`:**
+
+- **Odmítnutí:** `noteRefusedRun` uloží `session.refusal` dřív, než se zavře `giveUp`, takže `waitForUp` vrátí `FailedPrecondition` se srozumitelnou hláškou místo `client gave up to connect`. Přidá se `SystemEvent` `session_refused` (ERROR). Odmítnutí vymaže nový běh (`beginRun`, tedy i MDM restart) a `Down`, `Logout` (`markClientDown`). Pozdní záznam po `Down` se zahodí, oba zápisy jsou pod `session.mu`. Stav je `Idle`, `conflict` a událost říkají proč.
+- **Kde se kontroluje překryv:** `attach` po loginu a před `NewEngine`. Změna adresy z Managementu jde cestou `updateConfig`, `ErrResetConnection`, nový login a znovu `attach`. Test mění `network_range` skutečným `UpdateAccountSettings`.
+- **`conflict` se ve stavu odvozuje:** odmítnutí má přednost, jinak `DaemonHost.Conflict` čte aktuální stav z `Routes` a `DNSOwners`. Nic se neukládá, takže nemůže zastarat, když se například vlastník uvolní. Pole je jedno, pořadí je odmítnutí, `exit_node`, `dns`. Session s exit nodem i DNS konfliktem hlásí jen `exit_node`.
+- **Hodnoty:** `overlay`, `interface` (i pro obsazený port), `exit_node`, `dns`. **Odmítnutí bez konfliktu** (selhaná izolace I6) nemá hodnotu, důvod říká jen `Up` a událost, viz otázky níže.
+- **Hlášky a události nejmenují druhou session,** může patřit jinému uživateli (5.6), a hláška o konfliktu neobsahuje adresy. Událost obsahuje vlastní prefix routy, čte ji jen ten, kdo smí číst tuto session.
+- **Události:** `peer.Status.SetEventProfile` razí `profile_id` na všechny události recorderu session, jen s gate (I1). Mapování `RouteEvent` na `SystemEvent` je v `client/internal/session_conflict.go`. `kind` v metadatech: `route_shadowed`, `route_acquired`, `route_handover_failed`, `exit_node_held`, `exit_node_released`, `route_overlay_refused`, `host_dns_held`, `dns_catch_all_held`, `dns_domain_shared`, `ipv6_overlay_skipped`, `session_refused`.
+- **Callback:** běží na gorutině session, která změnu způsobila, a sahá jen na recorder cílové session, kde `PublishEvent` nečeká (neblokující zápis do streamu). Žádný zámek `Server` ani `session`. `TestRouteWarningDoesNotWaitForAnySession` ho spouští s drženým `Server.mutex` a `session.mu` a `lifecycle` obou session.
+- **Exit node:** ruční výběr hlídá `refuseHeldExitNode` v `SelectNetworks` před změnou výběru, celý požadavek se odmítne a výběr zůstane. Vlastník je ten, kdo má routu v tabulce, ne ten, kdo ji vybral: výběr, jehož peer ještě není připojený, nic nedrží. `All` není ruční výběr, spadne na auto-apply. Auto-apply se přeskočí v `Routes.addDefault`, varování a `conflict` z toho plynou.
+- **Známé chování exit nodu:** přeskočený exit node zůstává v `ListNetworks` jako `Selected`, watcher ho považuje za nainstalovaný. Po odchodu vlastníka se požadavek zahodí (R4), opětovný `SelectNetworks` na už vybranou síť nic neudělá, je potřeba `DeselectNetworks` a pak `SelectNetworks`. Přepočet watcheru (změna routing peeru) může volnou routu zabrat sám, to je nový požadavek, ne předání.
+- **Routa přes cizí overlay:** `validateRoute` ji odmítal už od PR 5, nově `route_overlay_refused`, jednou za engine a prefix, protože route manager se ptá opakovaně.
+- **IPv6:** překryv dál jen odebere v6 v `attach`, nově s událostí `ipv6_overlay_skipped`. Událost navíc oproti tabulce sekce 6, `conflict` se nenastavuje, session běží.
+- **DNS:** `HostDNSCoordinator.ServeDomains` po každém úspěšném použití configu na per-link backendu. Shodná doména varuje obě session, jednou, dokud se sdílení nezmění. Kořen je catch-all, ten má vlastní claim. Kolize jména se nezjišťuje (Q6), varování je proto přísnější: platí pro doménu, ne pro jméno. Dvě sítě s výchozí `netbird.selfhosted` ho dostanou vždy. `DNSOwners` si pamatuje odmítnuté claimy, `ForgetSession` v `detach` je smaže, držené claimy neruší.
+- **Q24:** `refuseResidualBesideOthers` čte state soubor jen přes `GetSavedStateNames`, nemění ho. Stav s obsahem i nečitelný soubor znamenají `FailedPrecondition` před zápisem `desired`, takže odmítnutý `Up` session po restartu nevrátí. Prázdný soubor z čistého stopu nevadí, `null` hodnoty se nepočítají. Při obnově po startu se taková session jen zaloguje, `desired` jí zůstane.
+- **Testy:** tabulka sekce 6 je v `session_conflict_privileged_test.go` na skutečných enginech, limit v `TestGate_RefusedSessionLeavesEverythingAlone`, v6 v `TestAttachWarnsAboutTheSkippedIPv6`, doména na dvou linkách v `TestResolved_SharedDomainWarnsBothSessions` proti falešnému resolved (Q8).
+
+**Otázky k PR 15:**
+
+- Odmítnutí bez konfliktu (selhaná izolace) nemá v `SessionStatus` žádnou hodnotu, 5.6 zná jen čtyři. Má přibýt pátá, například `isolation`?
+- Routa z dřívějška, když cizí overlay vznikne až po ní, zůstává v tabulce a varování nepřijde. Sekce 6 ten případ neřeší. Pravidlo 105 dává přednost `main` (kde je connected route overlaye), takže provoz na cizí overlay do ní nejde, ale ostatní cíle v jejím rozsahu ano. Má se přidat kontrola při příchodu session?
+- Má být přeskočený exit node v `ListNetworks` vidět jako nevybraný? Vyžadovalo by to zásah do route manageru, proto zůstává, viz výše.
+
 **Otázky k PR 14:**
 
 - `ListProfiles`, `AddProfile` a `RenameProfile` s cizím `username` zůstávají otevřené, jako dnes. Spec je nezmiňuje, nejde o session. Má je 5.6 pokrýt? `ListProfiles` čte názvy profilů cizího uživatele, zbylé dva zapisují do jeho adresáře.
@@ -418,7 +441,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 
 **Otevřené po PR 13:**
 
-- **Residual vedle běžící session (Q24):** soubor z běhu před sloty nese názvy slotu 0, proto `Up` vedle jiné session zbytek dál neuklízí a uklidí ho až start služby. Pokud `Cleanup` selhal a zůstal v souboru, další běh téhož profilu jeho záznam přepíše.
+- **Residual, session sama (Q24):** když `Cleanup` selže a na hostiteli nic jiného neběží, `Up` jen zaloguje varování a běh záznam přepíše. Zadání PR 15 řeší jen případ vedle běžící session.
 - **Klíč slotu 0 ze souboru (2.4):** nese sanitizované jméno uživatele. Důsledek je jen nevyužitý záznam a jiné číslo slotu pro `first.last`, názvy jsou po napojení na slotu, ne na profilu. Neřešeno.
 - **SSH config (`99-netbird.conf`):** jeden soubor pro celý hostitel, stop jedné session ho smaže i druhé (PR 17). V testech je SSH vypnuté.
 - **DNS:** ověřen jen backend `file`, který v kontejneru vybere daemon. Pro resolved a NM platí Q8.
