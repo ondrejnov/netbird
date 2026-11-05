@@ -21,6 +21,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal/routemanager/systemops"
 	cProto "github.com/netbirdio/netbird/client/proto"
 )
+	"github.com/netbirdio/netbird/client/system"
 
 // ErrSessionRefused means a session must not run on this host as things are: its resources are
 // taken, its overlay overlaps another one, or it could not be isolated. Trying again would change
@@ -64,6 +65,13 @@ func (d *DaemonHost) Isolation() *firewall.SessionIsolation {
 }
 
 // Session returns the view of one session. recorder receives the warnings for that session, and
+// ExcludeSessionAddresses keeps the addresses of all sessions out of info, which is about to go to the
+// Management of one of them (I5). A login needs it as much as a sync: it is the first thing a network
+// hears from this host, and it runs before the session is on record itself.
+func (d *DaemonHost) ExcludeSessionAddresses(info *system.Info) {
+	excludeAddressesOf(d.coordinator.Sessions(), info)
+}
+
 // can be nil for a session nobody listens to.
 func (d *DaemonHost) Session(key hostcoord.SessionKey, recorder *peer.Status) *SessionHost {
 	return &SessionHost{daemon: d, key: key, recorder: recorder}
@@ -138,6 +146,24 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 }
 
 // checkOverlays refuses an IPv4 overlay that overlaps another session and drops an IPv6 one that
+func (h *SessionHost) excludeSessionAddresses(info *system.Info) {
+	if h != nil {
+		h.daemon.ExcludeSessionAddresses(info)
+	}
+}
+
+// scopeRemoteBundle keeps a debug bundle the Management of this session asked for to this session: it
+// goes to wherever that Management says (I5). The state file is the one of the session and not of the
+// focused one, and what describes the host also describes the other sessions.
+func (h *SessionHost) scopeRemoteBundle(deps *debug.GeneratorDependencies) {
+	if h == nil {
+		return
+	}
+	deps.StatePath = profilemanager.NewServiceManager("").GetStatePathFor(h.key)
+	deps.ProfileName = h.key.Profile.String()
+	deps.OmitHostWide = true
+}
+
 // does (section 6). The kernel isolation checks the same, but the userspace firewall has only this.
 func (h *SessionHost) checkOverlays(addr wgaddr.Address) (wgaddr.Address, error) {
 	for _, other := range h.daemon.coordinator.Sessions().OverlayPrefixesExcept(h.key) {

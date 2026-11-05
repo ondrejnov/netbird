@@ -17,6 +17,7 @@ import (
 	nberrors "github.com/netbirdio/netbird/client/errors"
 	"github.com/netbirdio/netbird/client/iface/netstack"
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/auth"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/internal/updater"
@@ -90,6 +91,16 @@ func (s *Server) clientOptions(ss *session, key profilemanager.SessionKey) []int
 		opts = append(opts, internal.WithSessionHost(s.host.Session(key, ss.statusRecorder)))
 	}
 	return opts
+}
+
+// newAuth returns the client of a login with the Management of config. With the gate the system info
+// it sends leaves out the addresses of all sessions (I5).
+func (s *Server) newAuth(ctx context.Context, config *profilemanager.Config) (*auth.Auth, error) {
+	var opts []auth.Option
+	if s.host != nil {
+		opts = append(opts, auth.WithInfoFilter(s.host.ExcludeSessionAddresses))
+	}
+	return auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config, opts...)
 }
 
 // controlsUpdates reports whether Management may drive the updater through this session. The
