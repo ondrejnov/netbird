@@ -105,8 +105,6 @@ type Server struct {
 
 	localMetrics *localmetrics.Manager
 
-	probeThrottle *probeThrottle
-
 	cpuProfileBuf *bytes.Buffer
 	cpuProfiling  bool
 
@@ -186,7 +184,6 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 		updateSettingsDisabled: updateSettingsDisabled,
 		captureEnabled:         captureEnabled,
 		networksDisabled:       networksDisabled,
-		probeThrottle:          newProbeThrottle(probeThreshold),
 		sessionSet:             newSessionSet(concurrentProfilesEnabled),
 	}
 	for _, opt := range opts {
@@ -197,7 +194,7 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 	s.sleepHandler = sleephandler.New(agent)
 	s.startSleepDetector()
 
-	s.localMetrics = localmetrics.NewManager(ctx, s.focusedSession().statusRecorder, s.clientMetricsGatherer)
+	s.localMetrics = s.newLocalMetrics(ctx)
 
 	return s
 }
@@ -535,6 +532,8 @@ func (s *Server) SetConfig(callerCtx context.Context, msg *proto.SetConfigReques
 		log.Errorf("failed to update profile config: %v", err)
 		return nil, fmt.Errorf("failed to update profile config: %w", err)
 	}
+
+	s.adoptStoredConfigLocked(config.ConfigPath, updatedConf)
 
 	if activeProf, err := s.profileManager.GetActiveProfileState(); err == nil {
 		if activePath, err := activeProf.FilePath(); err == nil && activePath == config.ConfigPath {
@@ -2582,7 +2581,7 @@ func (s *Server) runProbes(ctx context.Context, ss *session, waitForProbeResult 
 		return
 	}
 
-	s.probeThrottle.Run(ctx, engine, ss.statusRecorder, waitForProbeResult)
+	ss.probeThrottle.Run(ctx, engine, ss.statusRecorder, waitForProbeResult)
 }
 
 // GetConfig of the daemon.
@@ -2954,9 +2953,9 @@ func (s *Server) connect(ctx context.Context, ss *session, key profilemanager.Se
 
 	log.Tracef("running client connection")
 	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(ss, key)...)
-	if s.controlsUpdates(ss) {
-		client.SetUpdateManager(s.updateManager)
-	}
+	updateManager, releaseUpdates := s.claimUpdates(ss)
+	defer releaseUpdates()
+	client.SetUpdateManager(updateManager)
 	client.SetSyncResponsePersistence(ss.syncResponsePersistence())
 
 	ss.setClient(client)
@@ -3015,8 +3014,8 @@ func (s *Server) checkUpdateSettingsDisabled() bool {
 	return s.updateSettingsDisabled
 }
 
-func (s *Server) startUpdateManagerForGUI() {
-	if s.updateManager == nil {
+func (s *Server) startUpdateManagerForGUI(ss *session) {
+	if s.updateManager == nil || !s.controlsUpdates(ss) {
 		return
 	}
 	s.updateManager.Start(s.rootCtx)

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hashicorp/go-multierror"
 	log "github.com/sirupsen/logrus"
@@ -18,6 +19,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
+	"github.com/netbirdio/netbird/client/internal/updater"
 	nbnet "github.com/netbirdio/netbird/client/net"
 	"github.com/netbirdio/netbird/client/proto"
 )
@@ -50,6 +52,9 @@ type sessionSet struct {
 	// Guarded by Server.mutex. A session stays until its profile is removed.
 	sessions map[profilemanager.SessionKey]*session
 
+	// updateHolder is the session whose run drives the updater, nil when none does.
+	updateHolder *atomic.Pointer[session]
+
 	// slots stores the slots and the desired states. Set once by the start.
 	slots *hostcoord.Slots
 
@@ -71,7 +76,7 @@ type sessionSet struct {
 }
 
 func newSessionSet(concurrentProfiles bool) sessionSet {
-	set := sessionSet{concurrentProfiles: concurrentProfiles, maxSessions: defaultMaxSessions}
+	set := sessionSet{concurrentProfiles: concurrentProfiles, maxSessions: defaultMaxSessions, updateHolder: &atomic.Pointer[session]{}}
 	if concurrentProfiles {
 		set.sessions = make(map[profilemanager.SessionKey]*session)
 	}
@@ -91,6 +96,24 @@ func (s *Server) clientOptions(ss *session, key profilemanager.SessionKey) []int
 // updater acts on the whole machine, so only the focused session does (5.4).
 func (s *Server) controlsUpdates(ss *session) bool {
 	return !s.concurrentProfiles || s.focusedSession() == ss
+}
+
+// claimUpdates returns the update manager for a run of ss, nil when the run must not drive it, and
+// what the run calls when it ends. The focus is read when the run starts and a run keeps what it
+// got (5.4), so a run that lost the focus can still hold the updater. Until it ends nobody else gets
+// it, as two networks would otherwise take turns telling one machine what to install.
+func (s *Server) claimUpdates(ss *session) (*updater.Manager, func()) {
+	if !s.concurrentProfiles {
+		return s.updateManager, func() {
+			// Nothing to release: the one session always drives the updater.
+		}
+	}
+	if !s.controlsUpdates(ss) || !s.updateHolder.CompareAndSwap(nil, ss) {
+		return nil, func() {
+			// Nothing to release: this run got no updater.
+		}
+	}
+	return s.updateManager, func() { s.updateHolder.CompareAndSwap(ss, nil) }
 }
 
 // checkConcurrentProfilesPlatform refuses the gate on a platform whose host resources do not
@@ -464,7 +487,7 @@ func (s *Server) sessionStatuses(caller sessionCaller, target *session, targetSt
 		holdsHost := ss.holdsHost()
 		if ss == target {
 			status = targetStatus
-		} else if ss != focused && !holdsHost && !ss.isClientRunning() && status == internal.StatusIdle {
+		} else if isQuietSession(ss, focused) {
 			continue
 		}
 
@@ -487,6 +510,12 @@ func (s *Server) sessionStatuses(caller sessionCaller, target *session, targetSt
 		statuses = append(statuses, entry)
 	}
 	return statuses
+}
+
+// isQuietSession reports whether a session has nothing to report: it is not focused, holds nothing
+// on the host and sits idle.
+func isQuietSession(ss, focused *session) bool {
+	return ss != focused && !ss.holdsHost() && !ss.isClientRunning() && ss.state.CurrentStatus() == internal.StatusIdle
 }
 
 // downTargets returns what a Down reaches: ss, or with all whatever the caller may reach. The others

@@ -59,6 +59,7 @@ func prepareGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)
+	s.localMetrics = s.newLocalMetrics(rootCtx)
 
 	f := &gateFixture{
 		s:        s,

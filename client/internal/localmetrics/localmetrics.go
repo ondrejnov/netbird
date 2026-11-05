@@ -46,6 +46,8 @@ type GathererProvider func() prometheus.Gatherer
 type Manager struct {
 	status        statusSource
 	clientMetrics GathererProvider
+	// sessions replaces the two above on a daemon with several sessions.
+	sessions SessionsProvider
 
 	mu   sync.Mutex
 	srv  *http.Server
@@ -83,22 +85,8 @@ func (m *Manager) Reconcile(enabled bool, addr string) {
 	}
 	m.stop()
 
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(newCollector(m.status))
-
-	gatherers := prometheus.Gatherers{registry, prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
-		if m.clientMetrics == nil {
-			return nil, nil
-		}
-		g := m.clientMetrics()
-		if g == nil {
-			return nil, nil
-		}
-		return g.Gather()
-	})}
-
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{}))
+	mux.Handle("/metrics", promhttp.HandlerFor(m.gatherer(), promhttp.HandlerOpts{}))
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -118,6 +106,27 @@ func (m *Manager) Reconcile(enabled bool, addr string) {
 			m.clear(srv)
 		}
 	}()
+}
+
+// gatherer returns what the endpoint serves.
+func (m *Manager) gatherer() prometheus.Gatherer {
+	if m.sessions != nil {
+		return prometheus.GathererFunc(m.gatherSessions)
+	}
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(newCollector(m.status))
+
+	return prometheus.Gatherers{registry, prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
+		if m.clientMetrics == nil {
+			return nil, nil
+		}
+		g := m.clientMetrics()
+		if g == nil {
+			return nil, nil
+		}
+		return g.Gather()
+	})}
 }
 
 // clear drops the reference to srv so a later Reconcile with the same

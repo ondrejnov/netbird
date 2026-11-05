@@ -70,6 +70,7 @@ func newSessionsFixtureInMode(t *testing.T) *sessionsFixture {
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)
+	s.localMetrics = s.newLocalMetrics(rootCtx)
 	t.Cleanup(cancelRoot)
 
 	dir := filepath.Dir(cfgPath)
