@@ -2,7 +2,11 @@
 
 package conntrack
 
-import nftypes "github.com/netbirdio/netbird/client/internal/netflow/types"
+import (
+	"net/netip"
+
+	nftypes "github.com/netbirdio/netbird/client/internal/netflow/types"
+)
 
 // Option configures a connection tracker, which this platform does not have.
 type Option func()
@@ -17,6 +21,11 @@ func NewAccounting() *Accounting {
 
 // WithAccounting does nothing on this platform.
 func WithAccounting(*Accounting) Option {
+	return func() {}
+}
+
+// WithSessionFlows does nothing on this platform.
+func WithSessionFlows(func() []netip.Prefix) Option {
 	return func() {}
 }
 

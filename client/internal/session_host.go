@@ -217,7 +217,11 @@ func (h *SessionHost) conntrackOptions() []conntrack.Option {
 	if h == nil {
 		return nil
 	}
-	return []conntrack.Option{conntrack.WithAccounting(h.daemon.accounting)}
+	sessions := h.daemon.coordinator.Sessions()
+	return []conntrack.Option{
+		conntrack.WithAccounting(h.daemon.accounting),
+		conntrack.WithSessionFlows(func() []netip.Prefix { return sessions.OverlayPrefixesExcept(h.key) }),
+	}
 }
 
 func (h *SessionHost) networkMonitorOptions() []networkmonitor.Option {

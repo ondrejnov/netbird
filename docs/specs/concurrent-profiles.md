@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 a obě poloviny PR 13 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links`, viz 2.5. Další krok je PR 14 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 a obě poloviny PR 13 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 14 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -77,7 +77,7 @@ vlastník schválil 2026-11-04 podle doporučení, R6 potvrdil ve stejný den.
 
 | # | Otázka | Stav | Blokuje |
 |---|---|---|---|
-| R1 | Flow události a sdílené značky (I5) | Při zapnuté gate se bere jen flow s overlay adresou session v tuple, ostatní se zahodí. Flow přes routy bez overlay adresy se nereportuje | PR 15, 17 |
+| R1 | Flow události a sdílené značky (I5) | Při zapnuté gate se bere jen flow s overlay adresou session v tuple, ostatní se zahodí. Flow přes routy bez overlay adresy se nereportuje. Hotovo ve `f3/flow-filter`, viz 2.5 | PR 15, 17 |
 | R2 | Legacy routing při zapnuté gate | `up` se odmítne, pokud `AdvancedRouting()` je false, stejně jako netstack | PR 13 |
 | R3 | Systémový resolver a domény Managementu | Přijaté známé omezení v1: domény Managementu session bez root handleru překládá DNS sítě, která vlastní catch-all | PR 6 |
 | R4 | Odchod vlastníka exit nodu | Žádné automatické předání, provoz jde fyzickým defaultem a session dostane varování v `SystemEvent` | PR 2, 15 |
@@ -380,6 +380,16 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Zůstává krátké okno:** mezi úklidem state souboru a smazáním linku je link živý bez pravidel své session, izolace ale ještě platí. Trvá po dobu úklidu.
 - **Test** spouští skutečný daemon v podprocesu a zabíjí ho přes `SIGKILL`, takže na hostiteli zůstane přesně to, co po pádu. Peer je kernel WireGuard v samostatném netns přes veth. Kontrola před restartem ověří, že tunel přes `wt1` doručuje, což neprůchodnost po startu dělá průkaznou. Test čeká na peera ve stavu session, protože ACL se aplikuje dřív než peery a před první network mapou by firewall session peera nepustil.
 - **Neřešeno, čeká na rozhodnutí:** session s explicitním `WgIface` má jméno jen v profilovém configu, její link po pádu zůstane. Viz „Otevřené po PR 13".
+
+**`f3/flow-filter`, R1:**
+
+- `SessionHost.conntrackOptions` dává session `WithSessionFlows` a značka pro ni nerozhoduje. Bez `SessionHost`, tedy bez gate, se `relevantFlow` nemění a filtr nevzniká.
+- **Overlay adresa znamená prefix, ne vlastní IP.** Provoz routing peeru má v tuple adresu jiného peera téže sítě a je to flow této session. Overlay sítě se mezi session nepřekrývají (sekce 6), takže je prefix jednoznačný.
+- **Navíc oproti doslovnému R1, podle I5:** flow s adresami dvou session se zahodí v obou. Vzniká, když lokální proces pošle z adresy jedné sítě peerovi druhé, izolace hlídá jen input a forward, takže `output` projde a událost přijde. Jinak by Flow služba jedné sítě dostala adresu peera druhé.
+- **Cena podle R1:** flow přes routy bez overlay adresy v tuple se s gate nereportuje, ani když má značku. Test ho ověřuje spolu s kontrolou bez gate, která tytéž události bere.
+- Zahození v `Logger` by nestačilo, kernel režim nemá po `relevantFlow` jinou kontrolu. Userspace režim conntrack hostitele nepoužívá, flow bere z vlastního uspfilteru.
+- **Filtr čte session v okamžiku události.** Flow s adresou session, která už skončila nebo ještě nezačala, filtr jako flow mezi sítěmi nepozná. Týká se to jen případu dvou sítí v jednom tuple, včetně konce flow, jehož začátek se zahodil.
+- **Test** běží v `client/internal`, aby šel přes skutečné volby z `SessionHost`. Skutečné události jádra v netns, `CONNMARK` jako pravidla session, skutečný `Logger`, IPv4 i IPv6. Mutace: bez větve v `relevantFlow` projdou flow druhé sítě do obou loggerů, bez kontroly ostatních session projde flow mezi sítěmi, vlastní IP místo prefixu ztratí flow routing peeru a bez v6 části vlastní v6 flow.
 
 **Otevřené po PR 13:**
 
