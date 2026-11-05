@@ -64,7 +64,11 @@ func NewDaemonHost(slots *hostcoord.Slots) *DaemonHost {
 		slots:       slots,
 		isolation:   firewall.NewSessionIsolation(),
 		accounting:  conntrack.NewAccounting(),
-		watch:       isolationWatch{interval: isolationCheckInterval, sessions: make(map[*SessionHost]chan error)},
+		watch: isolationWatch{
+			interval: isolationCheckInterval,
+			sessions: make(map[*SessionHost]chan error),
+			removals: make(map[string]struct{}),
+		},
 	}
 }
 
@@ -131,6 +135,8 @@ func (h *SessionHost) attach(ctx context.Context, config *profilemanager.Config,
 		d.slots.Release(resources.Lease)
 		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
 	}
+	// A session that failed to leave must not refuse this one, on its overlay or its interface.
+	d.repeatIsolationRemovalsLocked()
 
 	addr, err := h.checkOverlays(engineConfig.WgAddr)
 	if err != nil {
@@ -143,6 +149,7 @@ func (h *SessionHost) attach(ctx context.Context, config *profilemanager.Config,
 		d.slots.Release(resources.Lease)
 		return nil, fmt.Errorf("%w: isolate session: %w", ErrSessionRefused, err)
 	}
+	delete(d.watch.removals, resources.Interface)
 
 	if !result.Kernel && config.DisableFirewall {
 		h.detachLocked(resources)
@@ -249,9 +256,11 @@ func (h *SessionHost) detachLocked(resources hostcoord.SessionResources) {
 	d.coordinator.Sessions().Remove(h.key)
 	d.coordinator.DNSOwners().ForgetSession(h.key)
 	if err := d.isolation.Remove(resources.Interface); err != nil {
-		log.Errorf("failed to remove session on %s from the isolation: %v", resources.Interface, err)
+		log.Errorf("failed to remove session on %s from the isolation, trying again: %v", resources.Interface, err)
+		d.watch.removals[resources.Interface] = struct{}{}
 	}
 	d.resetLostIsolationLocked()
+	d.syncIsolationCheckLocked()
 }
 
 // verifyIsolation runs once the engine has installed its rules, which is when a rule of another
