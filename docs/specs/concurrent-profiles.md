@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13, PR 14 a PR 15 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 16 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13, PR 14, PR 15 a PR 16 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Další krok je PR 17 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -349,8 +349,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Přesunuto na session:** `forceAccountPrompt`, `isSessionActive`, `sessionWatcher`, od PR 14 i `bundleCapture` a
   `persistSyncResponse`. **Zůstává na `Server`:** `probeThrottle` (PR 17).
 - **Zatím nepokryto:** `localMetrics` a `updateManager` jsou svázané se session focused při startu (PR 17). `generateDebugBundle` běží celý pod `Server.mutex` a zdrží ostatní
-  session (PR 17). Událost o změně seznamu profilů jde na předchozí i nový focus. `Profile.connection_status` a
-  `SystemEvent.profile_id` se neplní (PR 16, 17).
+  session (PR 17). Událost o změně seznamu profilů jde na předchozí i nový focus. `Profile.connection_status` se neplní, CLI stav skládá ze `Status.sessions` (PR 16). `SystemEvent.profile_id` se plní od PR 15.
 
 **PR 13, druhá polovina, `f3/host-wiring`:**
 
@@ -427,6 +426,28 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **DNS:** `HostDNSCoordinator.ServeDomains` po každém úspěšném použití configu na per-link backendu. Shodná doména varuje obě session, jednou, dokud se sdílení nezmění. Kořen je catch-all, ten má vlastní claim. Kolize jména se nezjišťuje (Q6), varování je proto přísnější: platí pro doménu, ne pro jméno. Dvě sítě s výchozí `netbird.selfhosted` ho dostanou vždy. `DNSOwners` si pamatuje odmítnuté claimy, `ForgetSession` v `detach` je smaže, držené claimy neruší.
 - **Q24:** `refuseResidualBesideOthers` čte state soubor jen přes `GetSavedStateNames`, nemění ho. Stav s obsahem i nečitelný soubor znamenají `FailedPrecondition` před zápisem `desired`, takže odmítnutý `Up` session po restartu nevrátí. Prázdný soubor z čistého stopu nevadí, `null` hodnoty se nepočítají. Při obnově po startu se taková session jen zaloguje, `desired` jí zůstane.
 - **Testy:** tabulka sekce 6 je v `session_conflict_privileged_test.go` na skutečných enginech, limit v `TestGate_RefusedSessionLeavesEverythingAlone`, v6 v `TestAttachWarnsAboutTheSkippedIPv6`, doména na dvou linkách v `TestResolved_SharedDomainWarnsBothSessions` proti falešnému resolved (Q8).
+
+**PR 16, `f3/cli`:**
+
+- **Zjištění gate:** `GetFeatures`. `Unimplemented` znamená starý daemon, tedy dnešní chování. Jiná chyba příkaz zastaví, protože neznámá odpověď nesmí znamenat „vypnuto": `up --profile` by pak shodil spojení, které měl nechat. Kód je v `client/cmd/session_cli.go`.
+- **Kdy se ptá:** bez `--profile` se `status`, `networks`, `debug`, `expose` a `ssh` nezeptají na nic, jejich RPC jsou tytéž jako dřív. `up --profile` se ptá jen ve větvi, kde by dnes volal `Down` (stav Connected po přepnutí), `down` po úspěchu (kvůli výpisu běžících session), `profile select` a `profile list` vždy. Každé `--profile` ověří gate dřív, než odešle cokoli.
+- **`--profile` se řeší v CLI** přes `ListProfiles` jako ID, unikátní jméno, unikátní prefix ID, stejně jako v daemonu. Selektor nese plné ID a jméno uživatele z `InvokingUser`, takže nejednoznačný handle skončí v CLI s odkazem na `--show-id`. Bez gate: starý daemon i vypnutá gate vrátí chybu „needs concurrent profiles" s tím, co udělat. Starý daemon by selektor ignoroval a zasáhl své jediné spojení.
+- **`up --profile X`** s gate: po přepnutí je `Status` bez selektoru stav X. Connected znamená „Already connected", jinak jde `SetConfig`, `Login`, `Up` pro X a `Down` se nevolá. Přepnutí (`SwitchProfile`) zůstává, takže `up --profile X` přesouvá focus na X a lokální zrcadlo aktivního profilu. Bez gate beze změny.
+- **`down`:** bez parametru `Down{}` (focused), po úspěchu vypíše `Still running: <jméno> (<stav>, <interface>)` pro nefocused session ve stavu Connected nebo Connecting a příkazy, kterými je odpojit. Session čekající na login se nepočítá. Při chybě (focused neběží, jiné ano) se seznam připojí k chybě. `--profile` a `--all` se vylučují už v CLI. Bez gate `--profile`/`--all` vrátí chybu, plain `down` je beze změny včetně textu `Disconnected`.
+- **`status`:** `--profile X` pošle selektor a zobrazí souhrn X. S gate se za souhrn (výchozí i `--detail`) přidá tabulka `Sessions:` (jméno, stav, interface, overlay, `focused`, `conflict: ...`). `--table`, `--ipv4`, `--ipv6` jsou beze změny. JSON a YAML dostanou pole `sessions` (`omitempty`), ostatní pole zůstávají. Overlay adresy se při `--anonymize` anonymizují. Bez gate je výstup bajt po bajtu dnešní, test to hlídá textem i klíči JSON.
+- **`profile select`** s gate nevolá `Status` ani `Down`. **`profile list`** s gate přidá sloupec `STATUS` ze `Status.sessions`, profil bez session je `Idle`. Má-li daemon `Profile.connection_status`, má přednost. **`profile remove` a `deregister`** s gate překládají `FailedPrecondition` daemonu na zprávu s příkazem `netbird down --profile <jméno>`. Bez gate zůstává původní chyba.
+- **`networks`, `debug bundle|persistence|config|for`, `expose`, `ssh`** mají `--profile`. `debug for` pošle selektor i na `Status`, `Up`, `Down`, záchyt a persistenci. `debug config` předá ID jako `profileName` v `GetConfigRequest`, která selektor nemá. `ssh` předává selektor přes interceptor v `client/ssh/client`, který doplní `GetPeerSSHHostKey`, `RequestJWTAuth` a `WaitJWTToken`, takže se nemění podpisy exportovaných funkcí.
+- **Testy:** `session_cli_test.go` běží proti falešnému daemonu s vlastní TCP adresou (zaznamenává RPC a jejich pořadí), `TestCLI_TwoSessionsOnARealDaemon` (privileged) proti skutečnému daemonu s gate v podprocesu, se dvěma Managementy, skutečnými enginy a unix socketem s `SO_PEERCRED`. Daemon je v podprocesu, protože CLI při každém příkazu volá `util.InitLog` a to je pod `-race` závod s gRPC logováním (stejný jako u `TestLogin`). Žádný test nepoužívá výchozí socket. `TestUpDaemon` v `client/cmd` selhává se „setup key is invalid" i na `f3/conflicts`, tedy bez PR 16, s `-race` i bez něj.
+- **UI přepínač (5.7):** `TestGate_UISwitchLeavesTheOriginalSessionRunning` v `client/server` na skutečném daemonu s gate: po `SwitchProfile` a prosté `Down{}` skončí session nového focusu a původní běží dál. `profileswitcher_test.go` v `client/ui/services` hlídá, že přepínač posílá `Down` bez selektoru a bez `all` až po přepnutí. **Tento test se v harnessu nespustí:** balíček `services` závisí na Wails, který potřebuje GTK4 a WebKitGTK, a image `golang:alpine` je nemá. Prošel jen `go vet`.
+
+**Otázky k PR 16:**
+
+- `up --profile X` s gate přesouvá focus na X (zdědil to z dnešního přepnutí před `Up`). Má se focus měnit, nebo má `up --profile` session jen přidat?
+- `login --profile X` (`switchProfileOnDaemon`) volá `Down`, když je po přepnutí Connected. S gate to míří na X, ne na ostatní, 5.7 ho nezmiňuje a nechal jsem ho beze změny.
+- `trace`, `capture` a `state` mají selektor v proto, ale 5.7 u nich `--profile` nezná. Nepřidal jsem ho.
+- `ssh-proxy` (ProxyCommand nativního klienta) selektor nepředává, jde vždy na focused. Patří sem, nebo do PR 17 s generovaným SSH configem?
+- `Profile.connection_status` zůstává v daemonu neplněný. CLI skládá stav ze `Status.sessions`, která je už filtrovaná podle identity. Plnit ho v `ListProfiles` by vyžadovalo kontrolu přístupu u cizího `username`.
+- `Status.sessions` obsahuje i nefocused session ve stavu `NeedsLogin` (například `default` po startu). CLI ji v tabulce ukáže, ale mezi běžící ji nepočítá.
 
 **Otázky k PR 15:**
 
