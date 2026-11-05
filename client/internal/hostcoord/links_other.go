@@ -11,3 +11,8 @@ func RemoveSessionLinks([]SlotRecord) error {
 func VerifyNoSessionLinks([]SlotRecord) error {
 	return nil
 }
+
+// RefuseForeignLink finds nothing to refuse, for the same reason.
+func RefuseForeignLink(string) error {
+	return nil
+}

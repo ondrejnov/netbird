@@ -32,7 +32,10 @@ func newTestDaemonHost(t *testing.T) *DaemonHost {
 	slots, err := hostcoord.NewSlots(t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, slots.Close()) })
-	return NewDaemonHost(slots)
+	host := NewDaemonHost(slots)
+	// The check runs on a goroutine of its own, outside the namespace of this thread.
+	host.SetIsolationCheckInterval(time.Hour)
+	return host
 }
 
 func attachTestSession(t *testing.T, host *DaemonHost, profile string, addr wgaddr.Address) (*EngineConfig, func(), error) {

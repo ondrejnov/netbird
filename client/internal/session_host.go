@@ -10,6 +10,7 @@ import (
 
 	"github.com/netbirdio/netbird/client/firewall"
 	firewallManager "github.com/netbirdio/netbird/client/firewall/manager"
+	"github.com/netbirdio/netbird/client/iface"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	"github.com/netbirdio/netbird/client/internal/debug"
 	"github.com/netbirdio/netbird/client/internal/dns"
@@ -31,6 +32,11 @@ var ErrSessionRefused = errors.New("session refused")
 
 // ErrOverlayOverlap means the IPv4 overlay of a session overlaps the one of another session.
 var ErrOverlayOverlap = errors.New("overlay overlaps another session")
+
+// ErrExplicitInterface means the profile names its own interface, which a session cannot have: the
+// name of the link is not on record, so the cleanup after a crash would leave the link with its peers
+// outside the isolation, and bringing the session up deletes whatever has that name.
+var ErrExplicitInterface = errors.New("a session cannot have an explicit interface name")
 
 // ErrIsolationLost means the rules between the sessions changed while they ran and could not be put back.
 var ErrIsolationLost = errors.New("the isolation between the sessions was lost")
@@ -108,10 +114,17 @@ func (h *SessionHost) attach(config *profilemanager.Config, engineConfig *Engine
 	if err := d.recoverIsolationLocked(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
 	}
+	if config.WgIface != iface.WgInterfaceDefault {
+		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, ErrExplicitInterface)
+	}
 
 	resources, err := d.slots.Reserve(h.key, hostcoord.ResourceRequest{WgIface: config.WgIface, WgPort: config.WgPort})
 	if err != nil {
 		return nil, fmt.Errorf("%w: reserve resources: %w", ErrSessionRefused, err)
+	}
+	if err := hostcoord.RefuseForeignLink(resources.Interface); err != nil {
+		d.slots.Release(resources.Lease)
+		return nil, fmt.Errorf("%w: %w", ErrSessionRefused, err)
 	}
 
 	addr, err := h.checkOverlays(engineConfig.WgAddr)

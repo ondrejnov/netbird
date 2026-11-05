@@ -76,3 +76,18 @@ func TestRemoveSessionLinksWithoutRecordsTouchesNothing(t *testing.T) {
 	assert.NoError(t, VerifyNoSessionLinks(nil))
 	assert.True(t, linkExists(t, "wt0"), "no sessions file means no daemon with the gate ever ran here")
 }
+
+// A session deletes whatever has the name of its interface when it comes up. Only what a session
+// would have left there may go.
+func TestRefuseForeignLink(t *testing.T) {
+	enterLinksNetns(t)
+
+	assert.NoError(t, RefuseForeignLink("wt0"), "a free name")
+
+	require.NoError(t, netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "wt1"}}))
+	assert.ErrorIs(t, RefuseForeignLink("wt1"), ErrForeignLink, "a link that is no interface of a session")
+	assert.True(t, linkExists(t, "wt1"), "the check must leave the link")
+
+	addWireguardLink(t, "wt2")
+	assert.NoError(t, RefuseForeignLink("wt2"), "what a session of a previous attempt can leave")
+}

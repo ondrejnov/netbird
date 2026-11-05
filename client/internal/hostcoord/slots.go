@@ -28,6 +28,8 @@ var (
 	// ErrInterfaceConflict reports an interface name held by a running session.
 	// Bringing the session up anyway would delete the link of the other session.
 	ErrInterfaceConflict = errors.New("interface name is used by a running session")
+	// ErrForeignLink reports an interface under the name of a session that no session created.
+	ErrForeignLink = errors.New("interface name is used by something else on this host")
 	// ErrInvalidInterfaceName reports a name the kernel would refuse.
 	ErrInvalidInterfaceName = errors.New("invalid interface name")
 	// ErrPortConflict reports an explicit port reserved by a running session.

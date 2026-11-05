@@ -7,6 +7,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/netbirdio/netbird/client/iface"
 	"github.com/netbirdio/netbird/client/internal/dns"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	cProto "github.com/netbirdio/netbird/client/proto"
@@ -36,6 +37,10 @@ const (
 		"Change network_range in the Management of one of the networks, or bring the other session down"
 	msgIsolationLost = "This session was stopped: something on this host changed the rules that keep the networks of this daemon apart, " +
 		"and they could not be put back. Find out what changes the firewall, then bring the session up again"
+	msgExplicitInterface = "This session was not started: with concurrent profiles the interface name comes from the session. " +
+		"Set the interface name of this profile back to " + iface.WgInterfaceDefault
+	msgForeignLink = "This session was not started: something else on this host uses the name of its interface. " +
+		"Rename or remove that interface"
 	msgInterfaceRefused = "This session was not started: its interface name is used by another running session. " +
 		"Change the interface name of one of the profiles, or bring the other session down"
 	msgPortRefused = "This session was not started: its port is used by another running session. " +
@@ -57,6 +62,10 @@ func RefusalOf(err error) SessionRefusal {
 		return SessionRefusal{Message: msgIsolationLost}
 	case errors.Is(err, ErrOverlayOverlap):
 		return SessionRefusal{Conflict: ConflictOverlay, Message: msgOverlayRefused}
+	case errors.Is(err, ErrExplicitInterface):
+		return SessionRefusal{Conflict: ConflictInterface, Message: msgExplicitInterface}
+	case errors.Is(err, hostcoord.ErrForeignLink):
+		return SessionRefusal{Conflict: ConflictInterface, Message: msgForeignLink}
 	case errors.Is(err, hostcoord.ErrInterfaceConflict):
 		return SessionRefusal{Conflict: ConflictInterface, Message: msgInterfaceRefused}
 	case errors.Is(err, hostcoord.ErrPortConflict):

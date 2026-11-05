@@ -13,7 +13,12 @@ import (
 	nberrors "github.com/netbirdio/netbird/client/errors"
 )
 
-const wireguardLinkType = "wireguard"
+const (
+	wireguardLinkType = "wireguard"
+	// tunLinkType is the interface of a userspace session. One that is closing can still be there
+	// when the next attempt starts, and it goes away by itself.
+	tunLinkType = "tun"
+)
 
 // RemoveSessionLinks deletes the kernel interfaces stored sessions left behind. They outlive the
 // process with their peers on them, and a session that does not come back would leave its
@@ -53,6 +58,24 @@ func VerifyNoSessionLinks(records []SlotRecord) error {
 		}
 	}
 	return nberrors.FormatErrorOrNil(merr)
+}
+
+// RefuseForeignLink refuses a link called name that cannot be the one of a session. Bringing a session
+// up deletes whatever has its name, so a session must not start on top of such a link. Any lookup
+// failure counts as well, as nobody can tell what is there.
+func RefuseForeignLink(name string) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return nil
+		}
+		return fmt.Errorf("find link %s: %w", name, err)
+	}
+	if linkType := link.Type(); linkType != wireguardLinkType && linkType != tunLinkType {
+		return fmt.Errorf("%w: %s has type %s", ErrForeignLink, name, linkType)
+	}
+	return nil
 }
 
 // sessionLink returns the link called name and whether it can be the one of a session.
