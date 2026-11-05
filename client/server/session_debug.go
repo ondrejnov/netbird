@@ -22,7 +22,8 @@ type bundleScope struct {
 
 // bundleScopeOf decides what a bundle about target holds for this caller. Without a selector it
 // covers each session the caller may read, and a selector asks for that session alone. A session
-// the caller may not read stays out, along with what also describes it (5.6).
+// the caller may not read stays out, along with what also describes it (5.6). The log of the daemon
+// goes back further than what runs now, so any such session that ever was on record counts.
 func (s *Server) bundleScopeOf(ctx context.Context, target *session, req *proto.DebugBundleRequest) bundleScope {
 	if !s.concurrentProfiles {
 		return bundleScope{}
@@ -34,15 +35,20 @@ func (s *Server) bundleScopeOf(ctx context.Context, target *session, req *proto.
 
 	scope := bundleScope{labels: sessionLabels(all)}
 	for _, ss := range all {
-		if ss == target || isQuietSession(ss, focused) {
+		if ss == target {
 			continue
 		}
 		if !caller.mayReach(ss.key) {
 			scope.omitHostWide = true
 			continue
 		}
-		if req.GetSession() == nil {
+		if req.GetSession() == nil && !isQuietSession(ss, focused) {
 			scope.others = append(scope.others, ss)
+		}
+	}
+	for _, record := range s.slots.Records() {
+		if !caller.mayReach(sessionKeyOf(record.Key.Profile, record.Key.Username)) {
+			scope.omitHostWide = true
 		}
 	}
 	return scope
