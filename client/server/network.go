@@ -25,16 +25,16 @@ type selectRoute struct {
 }
 
 // ListNetworks returns a list of all available networks.
-func (s *Server) ListNetworks(_ context.Context, req *proto.ListNetworksRequest) (*proto.ListNetworksResponse, error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+func (s *Server) ListNetworks(ctx context.Context, req *proto.ListNetworksRequest) (*proto.ListNetworksResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
-	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.checkNetworksDisabled() {
+	if s.networksDisabledFor(ss) {
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
@@ -144,16 +144,16 @@ func (s *Server) ListNetworks(_ context.Context, req *proto.ListNetworksRequest)
 }
 
 // SelectNetworks selects specific networks based on the client request.
-func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+func (s *Server) SelectNetworks(ctx context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
-	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.checkNetworksDisabled() {
+	if s.networksDisabledFor(ss) {
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 
@@ -194,16 +194,16 @@ func (s *Server) SelectNetworks(_ context.Context, req *proto.SelectNetworksRequ
 }
 
 // DeselectNetworks deselects specific networks based on the client request.
-func (s *Server) DeselectNetworks(_ context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+func (s *Server) DeselectNetworks(ctx context.Context, req *proto.SelectNetworksRequest) (*proto.SelectNetworksResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
-	ss := s.focusedSession()
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.checkNetworksDisabled() {
+	if s.networksDisabledFor(ss) {
 		return nil, gstatus.Errorf(codes.Unavailable, errNetworksDisabled)
 	}
 

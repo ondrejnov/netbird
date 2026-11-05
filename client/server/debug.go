@@ -26,7 +26,8 @@ import (
 
 // DebugBundle creates a debug bundle and returns the location.
 func (s *Server) DebugBundle(callerCtx context.Context, req *proto.DebugBundleRequest) (resp *proto.DebugBundleResponse, err error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+	ss, err := s.checkSessionSelector(callerCtx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
@@ -39,7 +40,7 @@ func (s *Server) DebugBundle(callerCtx context.Context, req *proto.DebugBundleRe
 	// socket that carries no identity, which skips the UI log.
 	callerID, callerIdentified := ipcauth.CallerIdentity(callerCtx)
 
-	path, managementURL, err := s.generateDebugBundle(req, uiLogOpener(callerID, callerIdentified))
+	path, managementURL, err := s.generateDebugBundle(ss, req, uiLogOpener(callerID, callerIdentified))
 	if err != nil {
 		return nil, err
 	}
@@ -67,12 +68,11 @@ func (s *Server) DebugBundle(callerCtx context.Context, req *proto.DebugBundleRe
 // generateDebugBundle builds the bundle under s.mutex and returns its path plus
 // the management URL captured under the lock, so the caller can run the upload
 // without holding the lock.
-func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener debug.LogOpener) (path string, managementURL string, err error) {
-	ss := s.focusedSession()
+func (s *Server) generateDebugBundle(ss *session, req *proto.DebugBundleRequest, uiOpener debug.LogOpener) (path string, managementURL string, err error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	syncResponse, err := s.getLatestSyncResponse()
+	syncResponse, err := s.getLatestSyncResponse(ss)
 	if err != nil {
 		log.Warnf("failed to get latest sync response: %v", err)
 	}
@@ -96,8 +96,8 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 		}()
 	}
 
-	capturePath := s.bundleCapturePath()
-	defer s.cleanupBundleCapture()
+	capturePath := s.bundleCapturePath(ss)
+	defer s.cleanupBundleCapture(ss)
 
 	var refreshStatus func()
 	if connectClient != nil {
@@ -115,10 +115,7 @@ func (s *Server) generateDebugBundle(req *proto.DebugBundleRequest, uiOpener deb
 
 	// Status, sync response and metrics describe the connection, so do its config and state.
 	config := ss.connectionConfig()
-	var statePath string
-	if key, otherRuns := ss.otherProfileRunKey(); otherRuns {
-		statePath = s.profileManager.GetStatePathFor(key)
-	}
+	statePath := s.bundleStatePath(ss)
 
 	bundleGenerator := debug.NewBundleGenerator(
 		debug.GeneratorDependencies{
@@ -226,8 +223,9 @@ func (s *Server) RegisterUILog(callerCtx context.Context, req *proto.RegisterUIL
 }
 
 // SetSyncResponsePersistence sets the sync response persistence for the server.
-func (s *Server) SetSyncResponsePersistence(_ context.Context, req *proto.SetSyncResponsePersistenceRequest) (*proto.SetSyncResponsePersistenceResponse, error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+func (s *Server) SetSyncResponsePersistence(ctx context.Context, req *proto.SetSyncResponsePersistenceRequest) (*proto.SetSyncResponsePersistenceResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
@@ -235,16 +233,16 @@ func (s *Server) SetSyncResponsePersistence(_ context.Context, req *proto.SetSyn
 	defer s.mutex.Unlock()
 
 	enabled := req.GetEnabled()
-	s.persistSyncResponse = enabled
-	if connectClient := s.focusedSession().client(); connectClient != nil {
+	ss.setSyncResponsePersistence(enabled)
+	if connectClient := ss.client(); connectClient != nil {
 		connectClient.SetSyncResponsePersistence(enabled)
 	}
 
 	return &proto.SetSyncResponsePersistenceResponse{}, nil
 }
 
-func (s *Server) getLatestSyncResponse() (*mgmProto.SyncResponse, error) {
-	cClient := s.focusedSession().client()
+func (s *Server) getLatestSyncResponse(ss *session) (*mgmProto.SyncResponse, error) {
+	cClient := ss.client()
 	if cClient == nil {
 		return nil, errors.New("connect client is not initialized")
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
 
@@ -510,16 +511,30 @@ func TestGate_StatusListsTheSessions(t *testing.T) {
 	}
 }
 
-// Every RPC with a selector, called with one naming a session other than the focused one. A
-// handler that forgets the check would answer about the wrong session without saying so.
+// fakeServerStream carries the context of a caller into a streaming handler and takes what it sends.
+type fakeServerStream[T any] struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (f fakeServerStream[T]) Context() context.Context { return f.ctx }
+
+func (f fakeServerStream[T]) Send(*T) error { return nil }
+
+// Every RPC with a selector. A handler that forgets the check would answer about the wrong session
+// without saying so.
 func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelector) map[string]func() error {
 	return map[string]func() error{
 		"Status": func() error {
 			_, err := s.Status(ctx, &proto.StatusRequest{Session: selector})
 			return err
 		},
-		"SubscribeStatus": func() error { return s.SubscribeStatus(&proto.StatusRequest{Session: selector}, nil) },
-		"SubscribeEvents": func() error { return s.SubscribeEvents(&proto.SubscribeRequest{Session: selector}, nil) },
+		"SubscribeStatus": func() error {
+			return s.SubscribeStatus(&proto.StatusRequest{Session: selector}, fakeServerStream[proto.StatusResponse]{ctx: ctx})
+		},
+		"SubscribeEvents": func() error {
+			return s.SubscribeEvents(&proto.SubscribeRequest{Session: selector}, fakeServerStream[proto.SystemEvent]{ctx: ctx})
+		},
 		"Down": func() error {
 			_, err := s.Down(ctx, &proto.DownRequest{Session: selector})
 			return err
@@ -544,7 +559,9 @@ func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelecto
 			_, err := s.TracePacket(ctx, &proto.TracePacketRequest{Session: selector})
 			return err
 		},
-		"StartCapture": func() error { return s.StartCapture(&proto.StartCaptureRequest{Session: selector}, nil) },
+		"StartCapture": func() error {
+			return s.StartCapture(&proto.StartCaptureRequest{Session: selector}, fakeServerStream[proto.CapturePacket]{ctx: ctx})
+		},
 		"GetPeerSSHHostKey": func() error {
 			_, err := s.GetPeerSSHHostKey(ctx, &proto.GetPeerSSHHostKeyRequest{Session: selector})
 			return err
@@ -569,7 +586,9 @@ func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelecto
 			_, err := s.DismissSessionWarning(ctx, &proto.DismissSessionWarningRequest{Session: selector})
 			return err
 		},
-		"ExposeService": func() error { return s.ExposeService(&proto.ExposeServiceRequest{Session: selector}, nil) },
+		"ExposeService": func() error {
+			return s.ExposeService(&proto.ExposeServiceRequest{Session: selector}, fakeServerStream[proto.ExposeServiceEvent]{ctx: ctx})
+		},
 		"ListStates": func() error {
 			_, err := s.ListStates(ctx, &proto.ListStatesRequest{Session: selector})
 			return err
@@ -601,45 +620,39 @@ func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelecto
 	}
 }
 
-func TestSessionSelector_OtherThanFocusedIsRefused(t *testing.T) {
-	for name, gate := range map[string]bool{"with the gate": true, "without the gate": false} {
-		t.Run(name, func(t *testing.T) {
-			var s *Server
-			var ctx context.Context
-			var username string
-			if gate {
-				f := newGateFixture(t)
-				s, ctx, username = f.s, f.ctx, f.first.Username
-			} else {
-				f := newResidualFixture(t)
-				s, ctx, username = f.s, f.ctx, f.active.Username
-			}
+// Without the gate there is one session, and a selector can only name what it runs.
+func TestSessionSelector_OtherThanFocusedIsRefusedWithoutTheGate(t *testing.T) {
+	f := newResidualFixture(t)
 
-			selectors := map[string]*proto.SessionSelector{
-				"a profile that does not exist": {Profile: "no-such-profile", Username: username},
-				"an empty selector":             {},
-				"a profile that is not focused": {Profile: "default", Username: username},
-			}
-			for selectorName, selector := range selectors {
-				for rpc, call := range selectorRPCs(s, ctx, selector) {
-					requireCode(t, codes.FailedPrecondition, call())
-					assert.Contains(t, call().Error(), errSelectorNotFocused, "%s of %s: every failure gets one answer", rpc, selectorName)
-				}
-			}
-		})
+	selectors := map[string]*proto.SessionSelector{
+		"a profile that does not exist": {Profile: "no-such-profile", Username: f.active.Username},
+		"an empty selector":             {},
+		"a profile that is not focused": {Profile: "default", Username: f.active.Username},
+	}
+	for selectorName, selector := range selectors {
+		calls := selectorRPCs(f.s, f.ctx, selector)
+		require.Len(t, calls, selectorRPCCount)
+		for rpc, call := range calls {
+			err := call()
+			requireCode(t, codes.FailedPrecondition, err)
+			assert.Contains(t, err.Error(), errSelectorNotFocused, "%s of %s: every failure gets one answer", rpc, selectorName)
+		}
 	}
 }
 
-func TestSessionSelector_NamingTheFocusedSessionPasses(t *testing.T) {
-	f := newGateFixture(t)
-	selector := &proto.SessionSelector{Profile: string(f.first.Profile), Username: f.first.Username}
+// The gate must not change who may do what without it: nothing asks for the identity.
+func TestSessionSelector_WithoutTheGateIgnoresTheIdentity(t *testing.T) {
+	f := newResidualFixture(t)
+	selector := &proto.SessionSelector{Profile: string(f.active.Profile), Username: f.active.Username}
 
-	_, err := f.s.Status(f.ctx, &proto.StatusRequest{Session: selector})
-	assert.NoError(t, err)
-
-	f.focus(t, f.second)
-	_, err = f.s.Status(f.ctx, &proto.StatusRequest{Session: selector})
-	requireCode(t, codes.FailedPrecondition, err)
+	for name, ctx := range map[string]context.Context{"another user": userCtx(), "an unknown caller": context.Background()} {
+		for _, session := range []*proto.SessionSelector{nil, selector} {
+			_, err := f.s.Status(ctx, &proto.StatusRequest{Session: session})
+			assert.NoError(t, err, name)
+			_, err = f.s.ListStates(ctx, &proto.ListStatesRequest{Session: session})
+			assert.NoError(t, err, name)
+		}
+	}
 }
 
 func TestGate_UpIsRefusedInAnUnsupportedRuntime(t *testing.T) {
@@ -685,12 +698,6 @@ func TestGate_LoginTouchesOnlyTheFocusedSession(t *testing.T) {
 	assert.Same(t, firstClient, f.session(f.first).client(), "a login of another session must not end this one")
 	assert.Equal(t, internal.StatusConnected, f.session(f.first).state.CurrentStatus())
 	assert.Equal(t, 1, f.runCount(f.first))
-
-	// A login cannot reach a session other than the focused one yet.
-	name, username = string(f.third.Profile), f.third.Username
-	_, err = f.s.Login(f.ctx, &proto.LoginRequest{ProfileName: &name, Username: &username})
-	requireCode(t, codes.FailedPrecondition, err)
-	assert.Equal(t, f.second, f.s.focusedSession().key)
 }
 
 // The state of a profile can record the names of another slot, from a run before the slots. Cleaning

@@ -64,6 +64,10 @@ type sessionSet struct {
 	advancedRoutingFn func() bool
 	removeLinksFn     func(records []hostcoord.SlotRecord) error
 	verifyLinksFn     func(records []hostcoord.SlotRecord) error
+
+	// lookupUIDFn stands in for the account database of the host. Tests set it; production
+	// leaves it nil.
+	lookupUIDFn func(username string) (uint32, error)
 }
 
 func newSessionSet(concurrentProfiles bool) sessionSet {
@@ -242,81 +246,68 @@ func (s *Server) refreshIdleSessionConfig(ss *session) {
 	}
 }
 
-// checkSessionSelector refuses a selector that names anything but the focused session, the only
-// one the RPCs can reach so far. Every failure gets the same answer, so a selector does not tell
-// a caller which profiles exist. No selector means the focused session.
-func (s *Server) checkSessionSelector(selector *proto.SessionSelector) error {
-	if selector == nil {
-		return nil
+// loginTarget returns the session a login is for: the one it names, or the focused one. It leaves
+// the focus alone, and the profiles kill switch keeps guarding what a switch used to do.
+func (s *Server) loginTarget(ctx context.Context, msg *proto.LoginRequest) (*session, error) {
+	if !s.concurrentProfiles || msg.ProfileName == nil {
+		return s.checkSessionSelector(ctx, nil)
 	}
 
-	refused := gstatus.Error(codes.FailedPrecondition, errSelectorNotFocused)
+	ss, err := s.namedSession(s.callerOf(ctx), *msg.ProfileName, msg.GetUsername())
+	if err != nil {
+		return nil, err
+	}
+	if ss != s.focusedSession() && s.checkProfilesDisabled() {
+		return nil, profilesDisabledError()
+	}
+	return ss, nil
+}
 
-	focused, err := s.focusedKey()
-	if err != nil {
-		log.Warnf("failed to read the focused session for a session selector: %v", err)
-		return refused
+// loginProfileState returns the profile a login is for.
+func (s *Server) loginProfileState(ss *session) (*profilemanager.ActiveProfileState, error) {
+	if s.concurrentProfiles {
+		return profileStateOf(ss.key), nil
 	}
-	resolved, err := s.profileManager.ResolveProfile(selector.GetProfile(), selector.GetUsername())
+	activeProf, err := s.profileManager.GetActiveProfileState()
 	if err != nil {
-		log.Debugf("failed to resolve a session selector: %v", err)
-		return refused
+		return nil, fmt.Errorf("failed to get active profile state: %w", err)
 	}
-	if !isSessionProfile(focused, resolved.ID, selector.GetUsername()) {
-		return refused
+	return activeProf, nil
+}
+
+// logoutTarget returns the session a logout decides about.
+func (s *Server) logoutTarget(ctx context.Context, msg *proto.LogoutRequest) (*session, error) {
+	if !s.concurrentProfiles {
+		return s.focusedSession(), nil
+	}
+	if msg.ProfileName == nil || *msg.ProfileName == "" || msg.Username == nil || *msg.Username == "" {
+		return s.checkSessionSelector(ctx, nil)
+	}
+	return s.namedSession(s.callerOf(ctx), *msg.ProfileName, msg.GetUsername())
+}
+
+// requireLogoutTarget refuses a logout whose handle no longer resolves to the session it was checked
+// against: a profile added or renamed in between can move a handle. It would deregister one peer and
+// clear the login of another session.
+func (s *Server) requireLogoutTarget(target *session, id profilemanager.ID, username string) error {
+	if s.concurrentProfiles && target.key != sessionKeyOf(id, username) {
+		return gstatus.Error(codes.FailedPrecondition, "the profile changed during the logout, try again")
 	}
 	return nil
 }
 
-func (s *Server) focusedKey() (profilemanager.SessionKey, error) {
-	if s.concurrentProfiles {
-		return s.focusedSession().key, nil
-	}
-	active, err := s.profileManager.GetActiveProfileState()
-	if err != nil {
-		return profilemanager.SessionKey{}, err
-	}
-	return active.SessionKey(), nil
-}
-
-// loginProfileState returns the profile a login is for. With the gate a login cannot reach
-// another session than the focused one: it would have to leave the focus alone, and the
-// WaitSSOLogin that follows has no way to name another session yet.
-func (s *Server) loginProfileState(ss *session, msg *proto.LoginRequest) (*profilemanager.ActiveProfileState, error) {
-	if !s.concurrentProfiles {
-		activeProf, err := s.profileManager.GetActiveProfileState()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get active profile state: %w", err)
-		}
-		return activeProf, nil
-	}
-
-	if msg.ProfileName != nil {
-		resolved, username, err := s.resolveNamedProfile(*msg.ProfileName, msg.Username)
-		if err != nil {
-			return nil, err
-		}
-		if !isSessionProfile(ss.key, resolved.ID, username) {
-			return nil, gstatus.Errorf(codes.FailedPrecondition, "profile %q is not the focused one, select it before logging in", *msg.ProfileName)
-		}
-	}
-	return profileStateOf(ss.key), nil
-}
-
-// logoutTarget returns the session a logout decides about.
-func (s *Server) logoutTarget(msg *proto.LogoutRequest) (*session, error) {
-	if !s.concurrentProfiles || msg.ProfileName == nil || *msg.ProfileName == "" || msg.Username == nil || *msg.Username == "" {
-		return s.focusedSession(), nil
-	}
-
-	resolved, err := s.resolveProfileHandle(*msg.ProfileName, *msg.Username)
-	if err != nil {
-		return nil, err
-	}
-
+// clearLoggedOutSession leaves nothing of the login of ss behind, focused or not (I9). The flows go
+// first: the connection cleanup clears the login flow without ending the wait on it.
+func (s *Server) clearLoggedOutSession(ss *session) {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	return s.sessionOfLocked(sessionKeyOf(resolved.ID, *msg.Username)), nil
+	s.dropPendingAuthFlows(ss)
+	s.mutex.Unlock()
+
+	if err := s.cleanupConnection(ss); err != nil && !errors.Is(err, ErrServiceNotUp) {
+		log.Errorf("failed to cleanup connection: %v", err)
+	}
+	ss.isSessionActive.Store(false)
+	ss.state.Set(internal.StatusNeedsLogin)
 }
 
 // refuseLogoutOfRunningSession keeps a deregistration from pulling the peer out from under a
@@ -347,6 +338,9 @@ func (s *Server) removeProfileConcurrent(ctx context.Context, msg *proto.RemoveP
 	}
 	if msg.ProfileName == "" {
 		return nil, gstatus.Errorf(codes.InvalidArgument, "profile name must be provided")
+	}
+	if err := s.authorizeNamedProfile(ctx, msg.ProfileName, msg.Username); err != nil {
+		return nil, err
 	}
 	resolved, err := s.resolveProfileHandle(msg.ProfileName, msg.Username)
 	if err != nil {
@@ -380,6 +374,8 @@ func (s *Server) removeProfileConcurrent(ctx context.Context, msg *proto.RemoveP
 		return nil, fmt.Errorf("failed to remove profile: %w", err)
 	}
 	delete(s.sessions, key)
+	s.stopBundleCaptureLocked(ss)
+	s.cleanupBundleCapture(ss)
 	if err := s.slots.Remove(key); err != nil {
 		log.Warnf("failed to free the slot of profile %s: %v", resolved.ID, err)
 	}
@@ -392,7 +388,13 @@ func (s *Server) removeProfileConcurrent(ctx context.Context, msg *proto.RemoveP
 // switchFocus is SwitchProfile with the gate: it changes which session the RPCs without a
 // selector act on, and leaves every session as it is. The focus follows the active profile file,
 // which is why the file is written only once the new session has a config to answer with.
-func (s *Server) switchFocus(msg *proto.SwitchProfileRequest) (*proto.SwitchProfileResponse, error) {
+func (s *Server) switchFocus(ctx context.Context, msg *proto.SwitchProfileRequest) (*proto.SwitchProfileResponse, error) {
+	if msg != nil && msg.ProfileName != nil {
+		if err := s.authorizeNamedProfile(ctx, *msg.ProfileName, msg.GetUsername()); err != nil {
+			return nil, err
+		}
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -430,9 +432,13 @@ func (s *Server) switchFocus(msg *proto.SwitchProfileRequest) (*proto.SwitchProf
 	ss.setConfig(key, config)
 	s.focused.Store(ss)
 	s.localMetrics.Reconcile(config.LocalMetricsEnabled, config.LocalMetricsAddress)
+	if ss != previous {
+		// A status stream without a selector follows the focus, and hears of it from here.
+		previous.statusRecorder.NotifyStateChange()
+	}
 
 	if msg != nil && msg.ProfileName != nil {
-		// A subscriber stays on the recorder it subscribed to, the one of the previous focus.
+		// A subscriber hears it on the recorder of the previous focus before it moves on.
 		s.publishProfileListChangedOn(previous, *msg.ProfileName)
 		if ss != previous {
 			s.publishProfileListChangedOn(ss, *msg.ProfileName)
@@ -442,16 +448,23 @@ func (s *Server) switchFocus(msg *proto.SwitchProfileRequest) (*proto.SwitchProf
 	return &proto.SwitchProfileResponse{Id: key.Profile.String()}, nil
 }
 
-// sessionStatuses describes the sessions that have something to report, along with the focused
-// one. focusedStatus is what the response already says about it.
-func (s *Server) sessionStatuses(focused *session, focusedStatus internal.StatusType, full bool) []*proto.SessionStatus {
+// sessionStatuses describes the sessions the caller may read that have something to report, along
+// with the focused one and target, which the response is about. targetStatus is what the response
+// already says about target.
+func (s *Server) sessionStatuses(caller sessionCaller, target *session, targetStatus internal.StatusType, full bool) []*proto.SessionStatus {
+	focused := s.focusedSession()
+
 	var statuses []*proto.SessionStatus
 	for _, ss := range s.allSessions() {
+		if !caller.mayReach(ss.key) {
+			continue
+		}
+
 		status := ss.state.CurrentStatus()
 		holdsHost := ss.holdsHost()
-		if ss == focused {
-			status = focusedStatus
-		} else if !holdsHost && !ss.isClientRunning() && status == internal.StatusIdle {
+		if ss == target {
+			status = targetStatus
+		} else if ss != focused && !holdsHost && !ss.isClientRunning() && status == internal.StatusIdle {
 			continue
 		}
 
@@ -473,6 +486,23 @@ func (s *Server) sessionStatuses(focused *session, focusedStatus internal.Status
 		statuses = append(statuses, entry)
 	}
 	return statuses
+}
+
+// downTargets returns what a Down reaches: ss, or with all whatever the caller may reach. The others
+// stay up, and it is not an error that they do.
+func (s *Server) downTargets(ctx context.Context, ss *session, all bool) []*session {
+	if !all {
+		return []*session{ss}
+	}
+
+	caller := s.callerOf(ctx)
+	var targets []*session
+	for _, candidate := range s.allSessions() {
+		if caller.mayReach(candidate.key) {
+			targets = append(targets, candidate)
+		}
+	}
+	return targets
 }
 
 func profilesDisabledError() error {

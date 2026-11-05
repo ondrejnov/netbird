@@ -339,12 +339,19 @@ func (s *Server) claimHostAlone(ctx context.Context, ss *session) (func(), error
 
 // upTargetKey returns the profile an Up with the gate is for: the one it names, or the focused
 // one. The profiles kill switch keeps guarding what a switch used to do.
-func (s *Server) upTargetKey(msg *proto.UpRequest) (profilemanager.SessionKey, error) {
+func (s *Server) upTargetKey(ctx context.Context, msg *proto.UpRequest) (profilemanager.SessionKey, error) {
+	caller := s.callerOf(ctx)
 	focused := s.focusedSession().key
 	if msg == nil || msg.ProfileName == nil {
+		if !caller.mayReach(focused) {
+			return profilemanager.SessionKey{}, foreignSessionError(caller)
+		}
 		return focused, nil
 	}
 
+	if err := requireProfileReachable(caller, *msg.ProfileName, msg.GetUsername()); err != nil {
+		return profilemanager.SessionKey{}, err
+	}
 	resolved, username, err := s.resolveNamedProfile(*msg.ProfileName, msg.Username)
 	if err != nil {
 		return profilemanager.SessionKey{}, err
@@ -359,7 +366,7 @@ func (s *Server) upTargetKey(msg *proto.UpRequest) (profilemanager.SessionKey, e
 // upConcurrent is Up with the gate: it starts the session of the requested profile, or joins the
 // run it has, and touches neither the focus nor the other sessions.
 func (s *Server) upConcurrent(callerCtx context.Context, msg *proto.UpRequest) (*proto.UpResponse, error) {
-	key, err := s.upTargetKey(msg)
+	key, err := s.upTargetKey(callerCtx, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -424,11 +431,8 @@ func (s *Server) upSessionLocked(callerCtx context.Context, ss *session, async b
 }
 
 // downConcurrent is Down with the gate. The sessions it takes down stay down after a restart.
-func (s *Server) downConcurrent(ctx context.Context, msg *proto.DownRequest) (*proto.DownResponse, error) {
-	targets := []*session{s.focusedSession()}
-	if msg.GetAll() {
-		targets = s.allSessions()
-	}
+func (s *Server) downConcurrent(ctx context.Context, target *session, all bool) (*proto.DownResponse, error) {
+	targets := s.downTargets(ctx, target, all)
 
 	for _, ss := range targets {
 		s.markDesired(ss, hostcoord.DesiredDown)

@@ -106,6 +106,13 @@ type session struct {
 
 	// activeCapture is the packet capture currently installed on the engine.
 	activeCapture *capture.Session
+
+	// bundleCapture is the capture destined for the debug bundle of this session. Guarded by
+	// Server.mutex.
+	bundleCapture *bundleCapture
+
+	// persistSyncResponse makes the clients of this session keep the latest sync response.
+	persistSyncResponse bool
 }
 
 func newSession() *session {
@@ -115,6 +122,7 @@ func newSession() *session {
 		state:                 internal.NewContextState(),
 		extendAuthSessionFlow: auth.NewPendingFlow(),
 		jwtCache:              newJWTCache(),
+		persistSyncResponse:   true,
 	}
 }
 
@@ -131,6 +139,18 @@ func (ss *session) lockLifecycle(ctx context.Context) error {
 
 func (ss *session) unlockLifecycle() {
 	<-ss.lifecycle
+}
+
+func (ss *session) syncResponsePersistence() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.persistSyncResponse
+}
+
+func (ss *session) setSyncResponsePersistence(enabled bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.persistSyncResponse = enabled
 }
 
 func (ss *session) setHostClaim(claim bool) {
