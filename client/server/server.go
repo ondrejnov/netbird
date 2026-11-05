@@ -2701,6 +2701,10 @@ func (s *Server) GetConfig(ctx context.Context, req *proto.GetConfigRequest) (*p
 
 // AddProfile adds a new profile to the daemon.
 func (s *Server) AddProfile(ctx context.Context, msg *proto.AddProfileRequest) (*proto.AddProfileResponse, error) {
+	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2724,6 +2728,10 @@ func (s *Server) AddProfile(ctx context.Context, msg *proto.AddProfileRequest) (
 }
 
 func (s *Server) RenameProfile(ctx context.Context, msg *proto.RenameProfileRequest) (*proto.RenameProfileResponse, error) {
+	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2816,7 +2824,7 @@ func (s *Server) publishProfileListChangedOn(ss *session, profileName string) {
 		proto.SystemEvent_SYSTEM,
 		"Profile list changed",
 		"",
-		map[string]string{proto.MetadataKindKey: proto.MetadataKindProfileListChanged, proto.MetadataProfileKey: profileName},
+		s.profileListChangedMetadata(profileName),
 	)
 }
 
@@ -2841,6 +2849,10 @@ func (s *Server) publishLogLevelChanged(level string) {
 
 // ListProfiles lists all profiles in the daemon.
 func (s *Server) ListProfiles(ctx context.Context, msg *proto.ListProfilesRequest) (*proto.ListProfilesResponse, error) {
+	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2879,6 +2891,9 @@ func (s *Server) GetActiveProfile(ctx context.Context, msg *proto.GetActiveProfi
 	if err != nil {
 		log.Errorf("failed to get active profile state: %v", err)
 		return nil, fmt.Errorf("failed to get active profile state: %w", err)
+	}
+	if err := s.authorizeActiveProfile(ctx, activeProfile); err != nil {
+		return nil, err
 	}
 
 	return &proto.GetActiveProfileResponse{

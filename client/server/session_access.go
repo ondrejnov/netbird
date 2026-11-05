@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/user"
 	"strconv"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
@@ -16,7 +18,11 @@ import (
 	"github.com/netbirdio/netbird/client/proto"
 )
 
-const errSessionOfAnotherUser = "the session belongs to another user"
+const (
+	errSessionOfAnotherUser = "the session belongs to another user"
+
+	passwdPath = "/etc/passwd"
+)
 
 // sessionCaller is who an RPC answers to, as far as the sessions are concerned. The identity comes
 // from the kernel through ipcauth.CallerIdentity, and never from a field of the request: a username
@@ -25,6 +31,13 @@ type sessionCaller struct {
 	id         ipcauth.Identity
 	identified bool
 	lookupUID  func(username string) (uint32, error)
+	accounts   func() ([]hostAccount, error)
+}
+
+// hostAccount is an account in the account database of the host.
+type hostAccount struct {
+	name string
+	uid  uint32
 }
 
 func (s *Server) callerOf(ctx context.Context) sessionCaller {
@@ -33,13 +46,20 @@ func (s *Server) callerOf(ctx context.Context) sessionCaller {
 	if lookup == nil {
 		lookup = accountUID
 	}
-	return sessionCaller{id: id, identified: identified, lookupUID: lookup}
+	accounts := s.accountsFn
+	if accounts == nil {
+		accounts = localAccounts
+	}
+	return sessionCaller{id: id, identified: identified, lookupUID: lookup, accounts: accounts}
 }
 
 // mayReach reports whether the caller may control and read the session of key: its own and the
 // shared default session, and any session for a privileged caller. A caller the daemon cannot
-// identify owns nothing, and a failure to tell who owns a session means it is not the caller's (I6).
+// identify reaches nothing, and a failure to tell who owns a session means it is not the caller's (I6).
 func (c sessionCaller) mayReach(key profilemanager.SessionKey) bool {
+	if !c.identified {
+		return false
+	}
 	if key.Profile == profilemanager.DefaultProfileName {
 		return true
 	}
@@ -56,9 +76,15 @@ func (c sessionCaller) mayReachUser(username string) bool {
 	return c.owns(username)
 }
 
-// owns reports whether the sessions of username belong to the caller. A name that is no account
-// counts as the numeric identity of a user without one, which is what the CLI sends for it.
+// owns reports whether the sessions of username belong to the caller: the account is the caller's,
+// and its directory of profiles is its alone.
 func (c sessionCaller) owns(username string) bool {
+	return c.holdsAccount(username) && c.aloneInDirectory(username)
+}
+
+// holdsAccount reports whether username names the caller. A name that is no account counts as the
+// numeric identity of a user without one, which is what the CLI sends for it.
+func (c sessionCaller) holdsAccount(username string) bool {
 	if username == "" || c.id.IsWindows() {
 		return false
 	}
@@ -72,6 +98,56 @@ func (c sessionCaller) owns(username string) bool {
 	}
 	log.Warnf("failed to look up the owner of a session: %v", err)
 	return false
+}
+
+// aloneInDirectory reports whether the profiles of username can be only those of its account. The
+// directory comes from the sanitized name while ownership goes by the account, so john.doe and johndoe
+// would have different sessions on the same files, keys included. Only a privileged caller can reach
+// such a directory.
+func (c sessionCaller) aloneInDirectory(username string) bool {
+	if profilemanager.SanitizedUsername(username) != username {
+		log.Warnf("denying access to the profiles of %s for an unprivileged caller: the name of their directory differs from the name of the account", username)
+		return false
+	}
+
+	accounts, err := c.accounts()
+	if err != nil {
+		log.Warnf("failed to read the accounts of this host: %v", err)
+		return false
+	}
+	for _, account := range accounts {
+		if account.uid != c.id.UID && profilemanager.SanitizedUsername(account.name) == username {
+			log.Warnf("denying access to the profiles of %s for an unprivileged caller: the account %s shares their directory", username, account.name)
+			return false
+		}
+	}
+	return true
+}
+
+// localAccounts reads the accounts of the host from its passwd file. No such file means no accounts,
+// as in a container that runs on numeric identities. There is no way to list accounts through NSS.
+func localAccounts() ([]hostAccount, error) {
+	raw, err := os.ReadFile(passwdPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", passwdPath, err)
+	}
+
+	var accounts []hostAccount
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 3 {
+			continue
+		}
+		uid, err := strconv.ParseUint(fields[2], 10, 32)
+		if err != nil {
+			continue
+		}
+		accounts = append(accounts, hostAccount{name: fields[0], uid: uint32(uid)})
+	}
+	return accounts, nil
 }
 
 // accountUID returns the UID of the account username on this host.
@@ -99,7 +175,33 @@ func foreignSessionError(caller sessionCaller) error {
 // requireProfileReachable refuses a handle naming a profile of another user. It runs ahead of the
 // resolution, so that the answer does not say whether the profile exists.
 func requireProfileReachable(caller sessionCaller, handle, username string) error {
-	if handle == profilemanager.DefaultProfileName || caller.mayReachUser(username) {
+	if (handle == profilemanager.DefaultProfileName && caller.identified) || caller.mayReachUser(username) {
+		return nil
+	}
+	return foreignSessionError(caller)
+}
+
+// authorizeProfilesOf refuses a request about the profiles of another user: their names are metadata
+// of that user, and a change writes into their directory. Without the feature gate a request goes on
+// as it always did (I1).
+func (s *Server) authorizeProfilesOf(ctx context.Context, username string) error {
+	if !s.concurrentProfiles {
+		return nil
+	}
+	caller := s.callerOf(ctx)
+	if caller.mayReachUser(username) {
+		return nil
+	}
+	return foreignSessionError(caller)
+}
+
+// authorizeActiveProfile refuses to name the focused session to a caller that may not read it.
+func (s *Server) authorizeActiveProfile(ctx context.Context, active *profilemanager.ActiveProfileState) error {
+	if !s.concurrentProfiles {
+		return nil
+	}
+	caller := s.callerOf(ctx)
+	if caller.mayReach(sessionKeyOf(active.ID, active.Username)) {
 		return nil
 	}
 	return foreignSessionError(caller)

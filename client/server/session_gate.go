@@ -71,9 +71,10 @@ type sessionSet struct {
 	removeLinksFn     func(records []hostcoord.SlotRecord) error
 	verifyLinksFn     func(records []hostcoord.SlotRecord) error
 
-	// lookupUIDFn stands in for the account database of the host. Tests set it; production
-	// leaves it nil.
+	// lookupUIDFn and accountsFn stand in for the account database of the host. Tests set them;
+	// production leaves them nil.
 	lookupUIDFn func(username string) (uint32, error)
+	accountsFn  func() ([]hostAccount, error)
 }
 
 func newSessionSet(concurrentProfiles bool) sessionSet {
@@ -544,6 +545,17 @@ func (s *Server) downTargets(ctx context.Context, ss *session, all bool) []*sess
 		}
 	}
 	return targets
+}
+
+// profileListChangedMetadata is the content of the event about a changed profile list. With the gate
+// it goes to whoever reads the session it is published on, and the profile can be of someone else. The
+// event only asks for a refresh, so the name stays out.
+func (s *Server) profileListChangedMetadata(profileName string) map[string]string {
+	metadata := map[string]string{proto.MetadataKindKey: proto.MetadataKindProfileListChanged}
+	if !s.concurrentProfiles {
+		metadata[proto.MetadataProfileKey] = profileName
+	}
+	return metadata
 }
 
 func profilesDisabledError() error {

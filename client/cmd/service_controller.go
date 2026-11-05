@@ -79,6 +79,9 @@ func (p *program) Start(svc service.Service) error {
 	if err != nil {
 		return fmt.Errorf("parse daemon address: %w", err)
 	}
+	if err := checkConcurrentProfilesTransport(network); err != nil {
+		return err
+	}
 
 	// in any case, even if configuration does not exists we run daemon to serve CLI gRPC API.
 	p.serv = grpc.NewServer(daemonServerOptions(network)...)

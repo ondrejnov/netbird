@@ -611,3 +611,18 @@ func TestSSH_SessionOfTheFlag(t *testing.T) {
 		}
 	})
 }
+
+// A TCP socket carries no identity, and the sessions of different users are told apart by who asks.
+func TestConcurrentProfilesRefuseASocketWithoutIdentity(t *testing.T) {
+	original := concurrentProfiles
+	t.Cleanup(func() { concurrentProfiles = original })
+
+	concurrentProfiles = true
+	err := checkConcurrentProfilesTransport("tcp")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unix", "the operator should be told what to change")
+	assert.NoError(t, checkConcurrentProfilesTransport("unix"))
+
+	concurrentProfiles = false
+	assert.NoError(t, checkConcurrentProfilesTransport("tcp"), "without the gate the socket stays what it is")
+}
