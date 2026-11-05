@@ -301,6 +301,7 @@ type BundleGenerator struct {
 	profileName    string
 	otherSessions  []SessionBundle
 	omitHostWide   bool
+	omitDaemonLog  bool
 	// zipPrefix is where the files of the session being written go in the archive.
 	zipPrefix string
 
@@ -348,6 +349,9 @@ type GeneratorDependencies struct {
 	// OmitHostWide leaves out what describes the whole host and so also sessions the requester
 	// may not read: the logs of the daemon and the system information.
 	OmitHostWide bool
+	// OmitDaemonLog leaves out the log of the daemon alone. It goes back further than what runs now,
+	// so it can speak of a session of another user that is no longer on any record.
+	OmitDaemonLog bool
 }
 
 func NewBundleGenerator(deps GeneratorDependencies, cfg BundleConfig) *BundleGenerator {
@@ -385,6 +389,7 @@ func NewBundleGenerator(deps GeneratorDependencies, cfg BundleConfig) *BundleGen
 		profileName:    deps.ProfileName,
 		otherSessions:  deps.OtherSessions,
 		omitHostWide:   deps.OmitHostWide,
+		omitDaemonLog:  deps.OmitDaemonLog,
 
 		anonymize:         cfg.Anonymize || cfg.AnonymizeLevel >= anonymize.LevelStrict,
 		anonymizeLevel:    cfg.AnonymizeLevel,
@@ -502,7 +507,9 @@ func (g *BundleGenerator) createArchive() error {
 		log.Errorf("failed to add corrupted state files to debug bundle: %v", err)
 	}
 
-	if err := g.addServiceParams(); err != nil {
+	if g.omitHostWide {
+		log.Debugf("skipping the service params in debug bundle: they name the management of the service, not of this session")
+	} else if err := g.addServiceParams(); err != nil {
 		log.Errorf("failed to add service params to debug bundle: %v", err)
 	}
 
@@ -516,7 +523,7 @@ func (g *BundleGenerator) createArchive() error {
 
 	g.addOtherSessions()
 
-	if g.omitHostWide {
+	if g.omitHostWide || g.omitDaemonLog {
 		log.Debugf("skipping the logs of the daemon in debug bundle: they also describe sessions the requester may not read")
 	} else if err := g.addPlatformLog(); err != nil {
 		log.Errorf("failed to add logs to debug bundle: %v", err)
@@ -526,7 +533,9 @@ func (g *BundleGenerator) createArchive() error {
 		log.Errorf("failed to add UI log to debug bundle: %v", err)
 	}
 
-	if err := g.addUpdateLogs(); err != nil {
+	if g.omitHostWide {
+		log.Debugf("skipping the updater logs in debug bundle: they describe the whole host")
+	} else if err := g.addUpdateLogs(); err != nil {
 		log.Errorf("failed to add updater logs: %v", err)
 	}
 
