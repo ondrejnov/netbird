@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12, obě poloviny PR 13, PR 14, PR 15, PR 16 a PR 18 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter`, viz 2.5. Zbývá PR 19 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 až PR 19 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter` a bezpečnostní revize, viz 2.5. Kritérium 5.8 pro zvýšení limitu je změřené a prošlo, limit zůstává 4 podle rozhodnutí vlastníka. Omezovač souběhu startů z 5.8 není implementovaný, viz otázky k PR 19 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -467,6 +467,73 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Neověřeno:** samotný `goreleaser` v prostředí není, konfiguraci proto čte jen test (YAML), balíček se nestavěl. Test na Windows a macOS se jen kompiluje (`go vet` s tagem), neběží.
 - **Nález mimo rozsah (beze změny):** `TestDoNotUpdate` v `version` je pod `-race` červený, závod `StopWatch` a `StartFetcher` z PR 17 (viz výše). Platí s tagem i bez něj.
 
+**PR 19, `f3/scale-test`:**
+
+- **Testy** jsou v `session_scale_privileged_test.go` a `session_scale_measure_privileged_test.go`. Limit předává test přes `WithMaxSessions`. Výchozí zůstává 4 a test to hlídá.
+- **Co prošlo pod `-race` na 8 a 16 session:**
+
+| Test | Režim | Co ověřuje |
+|---|---|---|
+| `TestScaleSessions` | Userspace a kernel, nftables a iptables | Interface a port slotu, `Status`, `ResourceExhausted` nad limitem a beze změny hostitele, limit 0, I3 a I4 paketem mezi všemi dvojicemi (jen userspace), I5 adresy, I2 a I8 při stopu, startu a restartu slotu 1 vedle slotů 10 a výš, předání sdílené routy přes všechny session, I7 |
+| `TestScaleChurn` | Userspace, nftables a iptables | Start všech najednou, 4 kola, kdy jedna skupina odchází a druhá přichází, třetí běží beze změny, I3 a I4 na konci, I7 |
+| `TestScaleStress` | Userspace, nftables a iptables | 100× up a down druhé session při provozu první (200 paketů/s), I2, ztráta paketů, gorutiny, deskriptory, I7 |
+| `TestScaleCrash` | Kernel, nftables a iptables | `SIGKILL` daemonu se 16 session, obnova všech na jejich sloty, I7 kromě sysctl (Q22) |
+| `TestScaleMeasure` | Oba režimy, oba backendy | Měření níže, I4 skutečným peerem přes skutečný tunel s kontrolou odebráním izolace, 200 cyklů, úklid |
+
+- **Žádný invariant neselhal.** Bez nálezu I2 až I8 v rozsahu tabulky. Kontroly: bez `WithMaxSessions` test skončí na `the limit of 4 concurrent sessions is reached`. Když se `wt10` a výš vynechají z izolace, session se odmítne (`wt10 is not in the kernel isolation`). Bez předání routy skončí test na `one of [wt1 ...] should hold the shared prefix alone`.
+- **Názvy se dvěma číslicemi:** stop slotu 1 vedle slotů 10 až 15 vezme jen svůj interface, tabulku, chainy a sety. Porovnává se celý snapshot přesnou shodou názvu včetně bajtového zápisu v pravidlech cizích chainů.
+- **Oprava, únik v `externalChainMonitor`:** `subscribe` zavíral monitor knihovny, jehož gorutiny čekají na neblokovaném předání události. Když v okamžiku stopu běžela událost, typicky od jiné session, zůstaly viset dvě gorutiny na monitor. `closeMon` teď kanál dočte. Oprava je ve sdíleném souboru, ale na pravidla ani názvy nemá vliv (I1, `TestNoGateHostSnapshotMatchesToday` prochází).
+- **Bez úniku po 200 cyklech:** po odchodu všech session a 135 s zbývá 36 gorutin ve všech režimech, z toho 16 značí routing peera v testu, heap je 5 až 6 MiB a deskriptory se vrátí na původní počet. Před tím je gorutin dočasně až 170: NAT-PMP dotaz zastaveného enginu čeká v `go-nat-pmp` až 128 s a nejde zrušit. Zůstává 1 `SessionWatcher` na session, protože session je v mapě do odstranění profilu. Test všechny tři hodnoty hlídá.
+
+**Měření.** Daemon běží v samostatném procesu, Management, vzorkování a echo server jsou mimo něj, takže do RSS a CPU nepatří. Čísla jsou **bez `-race`**, protože ten zkresluje paměť a CPU. Je to jediný běh mimo `-race`, ve stejném harnessu, s `-race` test prochází také. Prostředí: kontejner `golang:1.26.10-alpine`, jádro 6.8, hostitel přitom v běžném provozu. Rozptyl mezi opakováním je ±1 až 2 µs u p50. Řádek 0 u RTT je po odchodu poslední session, protože peer potřebuje klíč session. CPU je procento jednoho jádra.
+
+Kernel WireGuard, nftables:
+
+| Session | RSS MiB | Heap MiB | Gorutiny | CPU v klidu % | Tunel RTT p50/p99 µs | Lokálně RTT p50/p99 µs | Forward RTT p50/p99 µs |
+|---|---|---|---|---|---|---|---|
+| 0 | 55 | 3 | 5 | | | 4,9/15,5 | 5,8/12,6 |
+| 1 | 67 | 4 | 60 | 0,20 | 77,4/145,5 | 6,4/14,9 | 6,5/11,4 |
+| 2 | 69 | 4 | 111 | 0,35 | 82,2/153,3 | 5,8/16,4 | 7,0/12,5 |
+| 4 | 74 | 5 | 215 | 0,45 | 83,4/158,1 | 7,3/12,3 | 8,3/18,3 |
+| 8 | 82 | 6 | 423 | 0,85 | 93,8/186,5 | 7,2/16,5 | 9,7/17,7 |
+| 16 | 97 | 9 | 839 | 1,60 | 102,4/191,6 | 10,6/25,5 | 12,9/28,1 |
+
+Kernel WireGuard, iptables:
+
+| Session | RSS MiB | Heap MiB | Gorutiny | CPU v klidu % | Tunel RTT p50/p99 µs | Lokálně RTT p50/p99 µs | Forward RTT p50/p99 µs |
+|---|---|---|---|---|---|---|---|
+| 0 | 55 | 3 | 5 | | | 5,9/19,8 | 5,9/13,2 |
+| 1 | 66 | 4 | 56 | 0,30 | 80,1/146,1 | 6,0/10,5 | 6,6/11,8 |
+| 2 | 67 | 4 | 103 | 0,40 | 80,2/155,6 | 5,7/14,6 | 7,0/17,2 |
+| 4 | 72 | 5 | 199 | 0,60 | 88,3/164,0 | 7,2/17,3 | 9,3/18,1 |
+| 8 | 80 | 6 | 391 | 1,05 | 87,4/165,9 | 8,1/12,5 | 11,2/23,0 |
+| 16 | 92 | 9 | 775 | 1,95 | 95,9/178,6 | 8,4/16,5 | 12,9/27,9 |
+
+Userspace WireGuard, nftables (iptables se liší jen ve stejném rozsahu jako v kernelu):
+
+| Session | RSS MiB | Heap MiB | Gorutiny | CPU v klidu % | Tunel RTT p50/p99 µs | Lokálně RTT p50/p99 µs | Forward RTT p50/p99 µs |
+|---|---|---|---|---|---|---|---|
+| 0 | 57 | 3 | 5 | | | 5,9/13,3 | 6,5/12,8 |
+| 1 | 68 | 38 | 117 | 0,30 | 103,7/189,9 | 6,3/12,8 | 6,7/18,6 |
+| 2 | 82 | 72 | 223 | 0,25 | 102,8/190,3 | 5,8/13,4 | 8,2/16,7 |
+| 4 | 90 | 141 | 437 | 0,45 | 101,2/204,6 | 6,0/13,6 | 7,9/19,9 |
+| 8 | 117 | 278 | 865 | 0,95 | 111,8/214,7 | 6,7/15,3 | 10,7/23,5 |
+| 16 | 174 | 553 | 1721 | 1,80 | 114,3/234,1 | 9,1/17,6 | 13,0/25,8 |
+
+- **Cesty RTT:** jeden UDP paket naráz, 20 000 vzorků a 64 B. Peer je kernel WireGuard v netns na veth. Tunel jde přes `wt0` na lokální echo, lokálně mimo tunel na adresu veth hostitele, forward přes hostitele do dalšího netns. Poslední dvě cesty se session netýkají, takže jejich růst je to, co platí každý paket hostitele.
+- **Náklad nftables hooků:** session přidá 2 base chainy na forward, prerouting a postrouting, 1 na input, nic na output. Izolace je jedna tabulka s jedním forward a jedním input chainem. Při 16 session je to forward 34, prerouting 32, postrouting 32, input 18 (včetně izolace a tabulky `filter` testu) a 18 pravidel na session. Lokální RTT projde 82 chainy a roste o 3 až 6 µs, tedy asi 50 ns na chain. Forward RTT jich projde 196 a roste o 6 až 8 µs, asi 35 ns na chain. Přepočteno: 0,3 až 0,5 µs RTT na session a platí to i provoz, který se NetBirdu netýká. V iptables (iptables-nft) je chainů stále stejně, roste počet pravidel (25 na session) a forward RTT roste stejně, lokální o něco méně. Začátek křivky je v rozptylu měření. Propustnost se neměřila.
+- **Paměť:** kernel režim přidá 2 MiB RSS a 0,4 MiB heapu na session. **Userspace přidá 34,5 MiB heapu na session.** Jsou to 64KiB buffery `wireguard-go` držené na každý příjmový kanál zařízení. Stránky se dotknou až při použití, proto je RSS v klidu jen 174 MiB. **Po cyklech se RSS zvedne na 1,7 až 1,8 GiB:** buffery nového zařízení se alokují z paměti dříve použité a vynulování ji dotkne, GC si k tomu drží rezervu. Po odchodu všech session se vrátí na 110 MiB. Paměť jádra (kernel WireGuard, nft) v RSS není a neměřila se.
+- **CPU:** v klidu 0,1 % jádra na session, bez skutečných peerů, routing peer jen nikdy neodpovídá. Daemon při tunelu s 10 000 RTT/s: kernel 0 %, userspace 70 % jádra, nezávisle na počtu session. Provoz ve více session zároveň se neměřil.
+- **Trvání (Management je lokální):** sekvenční start 16 session 1,7 s na nftables a 3,3 s na iptables. Pod `-race` všech 16 najednou 0,5 a 2,7 s, po pádu 2,6 a 10,9 s. Jeden cyklus stresu vedle běžící session pod `-race`: up 107 a 307 ms, down 116 a 583 ms. Běžící session přitom ve všech bězích neztratila žádný paket a nejdelší ticho bylo nejvýš 131 ms při 200 paketech/s.
+- **Port slotu se může posunout:** `51820+N` leží v ephemeral rozsahu Linuxu (32768 až 60999) a čím víc session, tím víc soketů z něj bere. Jednou za celé testování dostal slot 4 místo 51824 port z alokátoru, jak dovoluje 5.1. Test to loguje a hlídá jen, že jsou porty různé.
+- **Neověřeno na této škále:** I3 paketem v kernel režimu (kernel interface nebere vkládané pakety, I4 ale ověřuje skutečný peer), DNS mimo backend `file` (Q8), I9 a I10 (na počtu session nezávisí, testy z PR 14 a PR 12), propustnost, data mezi skutečnými peery všech sítí.
+
+**Otázky k PR 19:**
+
+- **Omezovač souběhu startů z 5.8 neexistuje.** Tabulka 5.8 ho žádá, žádné PR ze sekce 8 ho neobsahuje a spec neříká kolik souběžných startů ani jaký časový limit. Stejně jako start po změně sítě běží všechny session najednou. Měření s lokálním Managementem problém neukázalo, 16 najednou doběhne do 2,7 s. Se vzdáleným Managementem a pomalým loginem to změřeno není. Má vzniknout, a s jakými hodnotami, nebo se má řádek 5.8 škrtnout?
+- **Userspace a limit:** při zvýšení limitu znamená 34,5 MiB heapu a až 1,8 GiB RSS při častých restartech reálný náklad, který je v `wireguard-go`. Má limit platit stejně pro oba režimy?
+- **Náklad hooků platí všechen provoz hostitele.** Je 3 až 8 µs RTT při 16 session přijatelné pro stroj, který forwarduje velké objemy, nebo se má před zvýšením limitu změřit propustnost?
+
 **Bezpečnostní revize F3, `f3/security-fixes`:**
 
 - **Překryv běhů:** `Down` čeká na konec běhu 5 s, `engine.Stop` může trvat déle a další `Up` spustil druhý běh vedle prvního. Konec prvního pak odebral druhému izolaci. `launchSession` teď čeká na konec předchozího běhu, nejvýš minutu nebo do kontextu volajícího, pak `FailedPrecondition`. `lifecycle` přitom drží, takže `Down` téže session čeká s ním. Navíc `Slots.Release` hlásí, zda lease ještě platil, a `detach` s nahrazeným lease nesahá na nic. Po `Close` hlásí platnost, protože nic nového už nevznikne a izolaci je potřeba odebrat.
@@ -835,12 +902,13 @@ Limit je dnes 4, ale jediné, co smí počet omezovat, je **jedna kontrola v `Se
 | ipset | `nb-` + 8 hex + `-v6` má 14 znaků z 31 | Suffix je nutný: název je hash obsahu, stejné sety ve dvou session by jinak byly jeden objekt |
 | Port | Omezený rozsah | Alokátor s kontrolou rozsahu a obsazenosti, bez spoléhání na `51820+N` |
 | Izolace I3, I4 | Roste s počtem session | **Jedna izolační tabulka s množinami `ifaces`, `overlays` a `own` (`ifname . prefix`), ne pravidla pro každou dvojici.** Příchod a odchod session mění jen množiny. Všechny NetBird tabulky se vyloučí z `findExternalChains`. Správnost nezávisí na pořadí tabulek |
-| Hooky nftables | Každá tabulka se vyhodnocuje na paket | Změřit ve scale testu |
+| Hooky nftables | Každá tabulka se vyhodnocuje na paket. Změřeno v 2.5, PR 19: session přidá 7 base chainů a 16 session zvýší RTT paketů celého hostitele o 3 až 6 µs lokálně a o 6 až 8 µs při forwardu | Změřeno, viz 2.5 |
 | DNS listener | Na vlastní overlay IP je port 53 volný, jinak fallback | Fallback na jiný port nesmí tiše vypnout DNS, viz `supportCustomPort` |
 | Restart při změně sítě | Všechny session najednou | Omezený souběh celých startů vlastním omezovačem, `bringUpMu` chrání jen alokaci. Jedna pomalá session neblokuje ostatní donekonečna |
 
 **Kritérium pro zvýšení limitu:** scale test s 8 a 16 session v netns projde bez porušení invariantů
-a změřená paměť, CPU a latence paketů jsou zaznamenané v této specifikaci.
+a změřená paměť, CPU a latence paketů jsou zaznamenané v této specifikaci. **Splněno 2026-11-05**, viz 2.5, PR 19.
+O zvýšení limitu rozhoduje vlastník, dnes zůstává 4.
 
 ## 6. Politika konfliktů
 
