@@ -818,9 +818,6 @@ func selectMTU(localMTU uint16, peerMTU int32) uint16 {
 		finalMTU = uint16(peerMTU)
 	}
 
-	// Set global DNS MTU
-	dns.SetCurrentMTU(finalMTU)
-
 	return finalMTU
 }
 

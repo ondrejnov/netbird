@@ -26,7 +26,6 @@ import (
 	"github.com/netbirdio/netbird/client/anonymize"
 	nberrors "github.com/netbirdio/netbird/client/errors"
 	"github.com/netbirdio/netbird/client/firewall"
-	"github.com/netbirdio/netbird/client/firewall/firewalld"
 	firewallManager "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/firewall/uspfilter/forwarder"
 	"github.com/netbirdio/netbird/client/iface"
@@ -408,6 +407,7 @@ func NewEngine(
 		portForwardManager: portforward.NewManager(),
 		checks:             services.Checks,
 		certWake:           make(chan struct{}, 1),
+		certProofs:         certproof.Collector{WaitForSlot: config.Session != nil},
 		probeStunTurn:      relay.NewStunTurnProbe(relay.DefaultCacheTTL),
 		jobExecutor:        jobexec.NewExecutor(),
 		clientMetrics:      services.ClientMetrics,
@@ -776,12 +776,9 @@ func (e *Engine) createFirewall() error {
 
 	var err error
 	if e.config.Session != nil {
-		// The parent context is one for the process, and the end of this engine must not make
-		// the TrustInterface of another session silently do nothing.
 		e.firewall, err = e.config.Session.newFirewall(e)
 	} else {
-		firewalld.SetParentContext(e.ctx)
-		e.firewall, err = firewall.NewFirewall(e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU)
+		e.firewall, err = firewall.NewFirewall(e.ctx, e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU)
 	}
 	if err != nil {
 		return fmt.Errorf("create firewall manager: %w", err)

@@ -88,7 +88,7 @@ func (r *family) createContainers() error {
 		log.Errorf("failed to open interface in foreign chains: %s", err)
 	}
 
-	if err := firewalld.TrustInterface(r.wgIface.Name()); err != nil {
+	if err := firewalld.TrustInterface(r.trustCtx, r.wgIface.Name()); err != nil {
 		log.Warnf("failed to trust interface in firewalld: %v", err)
 	}
 

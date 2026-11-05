@@ -153,6 +153,8 @@ type Config struct {
 	// same daemon own, so a peer of this network cannot reach them. Nil keeps the behavior of
 	// a host with a single session.
 	Isolation common.IsolationSource
+	// TrustContext aborts the firewalld call of Create. Nil means nothing does.
+	TrustContext context.Context
 }
 
 // Manager userspace firewall manager
@@ -386,7 +388,7 @@ func Create(cfg Config) (_ *Manager, err error) {
 		return nil, fmt.Errorf("set filter: %w", err)
 	}
 
-	m.openHostFirewall(cfg.IFace.Name())
+	m.openHostFirewall(cfg.TrustContext, cfg.IFace.Name())
 
 	return m, nil
 }
@@ -427,7 +429,7 @@ func (m *Manager) setupConntrack(disabled bool) {
 // openHostFirewall opens the NetBird interface in the kernel firewall so it
 // doesn't drop traffic the userspace firewall handles. Best-effort: failures
 // here shouldn't prevent the firewall from coming up.
-func (m *Manager) openHostFirewall(ifaceName string) {
+func (m *Manager) openHostFirewall(ctx context.Context, ifaceName string) {
 	if m.ifaceAllower != nil {
 		if err := m.ifaceAllower.Apply(); err != nil {
 			log.Errorf("failed to allow netbird interface traffic: %v", err)
@@ -436,7 +438,10 @@ func (m *Manager) openHostFirewall(ifaceName string) {
 	// firewalld owns its own chains we can't insert into, so trust the interface
 	// there in addition to the allower. Netstack has no kernel interface.
 	if !m.netstack {
-		if err := firewalld.TrustInterface(ifaceName); err != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := firewalld.TrustInterface(ctx, ifaceName); err != nil {
 			log.Warnf("failed to trust interface in firewalld: %v", err)
 		}
 	}

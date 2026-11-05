@@ -177,7 +177,7 @@ func (h *SessionHost) verifyIsolation() error {
 }
 
 func (h *SessionHost) newFirewall(e *Engine) (firewallManager.Manager, error) {
-	fm, err := firewall.NewSessionFirewall(e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU, firewall.SessionConfig{
+	fm, err := firewall.NewSessionFirewall(e.ctx, e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU, firewall.SessionConfig{
 		Slot:      uint32(h.slot),
 		Isolation: h.daemon.isolation,
 		Source:    h.daemon.coordinator.Sessions().IsolationSource(h.key),

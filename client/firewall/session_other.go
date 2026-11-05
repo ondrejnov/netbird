@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"context"
 	"errors"
 
 	firewall "github.com/netbirdio/netbird/client/firewall/manager"
@@ -57,6 +58,6 @@ type SessionConfig struct {
 }
 
 // NewSessionFirewall refuses the session.
-func NewSessionFirewall(IFaceMapper, *statemanager.Manager, nftypes.FlowLogger, bool, uint16, SessionConfig) (firewall.Manager, error) {
+func NewSessionFirewall(context.Context, IFaceMapper, *statemanager.Manager, nftypes.FlowLogger, bool, uint16, SessionConfig) (firewall.Manager, error) {
 	return nil, ErrSessionNotIsolated
 }

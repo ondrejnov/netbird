@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -212,7 +213,7 @@ func (c *SessionConfig) newNftablesAllower(iface IFaceMapper, mtu uint16) (*nbnf
 	return nbnftables.NewInterfaceAllowerForSession(iface, mtu, names)
 }
 
-func (c *SessionConfig) createNative(iface IFaceMapper, mtu uint16) (firewall.Manager, error) {
+func (c *SessionConfig) createNative(iface IFaceMapper, mtu uint16) (nativeManager, error) {
 	backend, err := c.Isolation.decidedBackend()
 	if err != nil {
 		return nil, err
@@ -238,7 +239,8 @@ func (c *SessionConfig) createNative(iface IFaceMapper, mtu uint16) (firewall.Ma
 // leave the session without isolation (I6): a native backend the session is not in, no isolation
 // source for the userspace firewall, and a userspace firewall that would hand routed packets to a
 // kernel that does not isolate them, which is what it does with server routes disabled (Q10).
-func NewSessionFirewall(iface IFaceMapper, stateManager *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16, session SessionConfig) (firewall.Manager, error) {
+// Cancelling ctx aborts the firewalld call of this session and of no other.
+func NewSessionFirewall(ctx context.Context, iface IFaceMapper, stateManager *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16, session SessionConfig) (firewall.Manager, error) {
 	if session.Isolation == nil {
 		return nil, fmt.Errorf("%w: no isolation", ErrSessionNotIsolated)
 	}
@@ -251,7 +253,7 @@ func NewSessionFirewall(iface IFaceMapper, stateManager *statemanager.Manager, f
 		return nil, fmt.Errorf("%w: %s is not in the kernel isolation", ErrSessionNotIsolated, iface.Name())
 	}
 
-	fm, err := newFirewall(iface, stateManager, flowLogger, disableServerRoutes, mtu, &session)
+	fm, err := newFirewall(ctx, iface, stateManager, flowLogger, disableServerRoutes, mtu, &session)
 	if errors.Is(err, errNoFirewallManager) {
 		return nil, fmt.Errorf("%w: %w", ErrSessionNotIsolated, err)
 	}
