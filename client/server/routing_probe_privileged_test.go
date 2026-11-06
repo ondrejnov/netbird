@@ -1,4 +1,4 @@
-//go:build privileged
+//go:build privileged && ((linux && !android) || (darwin && !ios) || windows)
 
 package server
 
@@ -14,7 +14,8 @@ import (
 )
 
 // The daemon has to know its routing mode before the first session, not when that
-// session happens to start. With auto connect off, Start brings up no session at all,
+// session happens to start. Only the platforms of the build constraint have advanced
+// routing to probe, elsewhere nbnet.Init does nothing. With auto connect off, Start brings up no session at all,
 // so the probe can only have come from Start itself.
 func TestStart_ProbesRoutingWithoutASession(t *testing.T) {
 	s, ctx, _, _, cfgPath := setupServerWithProfile(t)
