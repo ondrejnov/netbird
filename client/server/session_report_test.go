@@ -326,3 +326,79 @@ func TestProbeThrottle_IsThatOfTheSession(t *testing.T) {
 	first.probeThrottle.Run(context.Background(), firstProber, firstProber, false)
 	assert.Equal(t, 1, firstRuns, "a session keeps its own throttle")
 }
+
+// The log of the daemon goes back further than what runs now. A session of another user that is
+// down, or only on record, has left its lines there all the same.
+func TestDebugBundle_ALogSpeaksOfSessionsThatEnded(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "client.log")
+	require.NoError(t, os.WriteFile(logFile, []byte("a line about the session of bob\n"), 0o600))
+
+	bundle := func(t *testing.T, f *accessFixture) map[string]string {
+		t.Helper()
+		f.s.logFile = logFile
+		f.focus(t, f.alice)
+		resp, err := f.s.DebugBundle(aliceCtx(), &proto.DebugBundleRequest{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.Remove(resp.GetPath()) })
+		return bundleEntries(t, resp.GetPath())
+	}
+
+	t.Run("a session of another user that went down", func(t *testing.T) {
+		f := newAccessFixture(t)
+		require.NoError(t, f.up(f.bob))
+		_, err := f.s.Down(f.ctx, &proto.DownRequest{Session: selectorOf(f.bob)})
+		require.NoError(t, err)
+		awaitRunEndOf(t, f.session(f.bob))
+
+		assert.NotContains(t, bundle(t, f), "client.log")
+	})
+
+	// The fixture stores a session of its own user, which would count as another user here.
+	forgetFixtureSession := func(t *testing.T, f *accessFixture) {
+		t.Helper()
+		f.focus(t, f.alice)
+		f.s.mutex.Lock()
+		delete(f.s.sessions, f.first)
+		f.s.mutex.Unlock()
+		require.NoError(t, f.s.slots.Remove(f.first))
+	}
+	rootHasTheLog := func(t *testing.T, f *accessFixture) {
+		t.Helper()
+		f.s.logFile = logFile
+		resp, err := f.s.DebugBundle(f.ctx, &proto.DebugBundleRequest{})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.Remove(resp.GetPath()) })
+		require.Contains(t, bundleEntries(t, resp.GetPath()), "client.log", "the control: the log is there for root")
+	}
+
+	// Removing the profile takes it off every record, and its lines stay in the log.
+	t.Run("a session of another user whose profile is gone", func(t *testing.T) {
+		f := newAccessFixture(t)
+		require.NoError(t, f.up(f.bob))
+		_, err := f.s.Down(f.ctx, &proto.DownRequest{Session: selectorOf(f.bob)})
+		require.NoError(t, err)
+		awaitRunEndOf(t, f.session(f.bob))
+		forgetFixtureSession(t, f)
+		_, err = f.s.RemoveProfile(f.ctx, &proto.RemoveProfileRequest{ProfileName: string(f.bob.Profile), Username: f.bob.Username})
+		require.NoError(t, err)
+
+		rootHasTheLog(t, f)
+		assert.NotContains(t, bundle(t, f), "client.log")
+	})
+
+	t.Run("no session of another user on record", func(t *testing.T) {
+		f := newAccessFixture(t)
+		forgetFixtureSession(t, f)
+
+		rootHasTheLog(t, f)
+		assert.NotContains(t, bundle(t, f), "client.log", "nothing on record can tell what the log goes back to")
+	})
+
+	t.Run("a session of another user only on record", func(t *testing.T) {
+		f := newAccessFixture(t)
+		_, err := f.s.slots.Ensure(f.bob)
+		require.NoError(t, err)
+
+		assert.NotContains(t, bundle(t, f), "client.log")
+	})
+}

@@ -367,12 +367,18 @@ func dialWithJWT(ctx context.Context, network, addr string, config *ssh.ClientCo
 	jwtCtx, cancel := context.WithTimeout(ctx, config.Timeout)
 	defer cancel()
 
+	session, gate, err := fixJWTSession(jwtCtx, daemonAddr, session)
+	if err != nil {
+		return nil, fmt.Errorf("check the features of the daemon: %w", err)
+	}
+
 	jwtToken, err := requestJWTToken(jwtCtx, daemonAddr, session, skipCache, noBrowser)
 	if err != nil {
 		return nil, fmt.Errorf("request JWT token: %w", err)
 	}
 
 	configWithJWT := nbssh.AddJWTAuth(config, jwtToken)
+	configWithJWT.HostKeyCallback = jwtHostKeyCallback(config.HostKeyCallback, gate, daemonAddr, session)
 	return dialSSH(ctx, network, addr, configWithJWT)
 }
 

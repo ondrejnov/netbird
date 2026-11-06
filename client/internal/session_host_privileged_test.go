@@ -7,11 +7,13 @@ import (
 	"net/netip"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	"github.com/netbirdio/netbird/client/firewall"
 	"github.com/netbirdio/netbird/client/iface"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	"github.com/netbirdio/netbird/client/internal/dns"
@@ -30,14 +32,17 @@ func newTestDaemonHost(t *testing.T) *DaemonHost {
 	slots, err := hostcoord.NewSlots(t.TempDir())
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, slots.Close()) })
-	return NewDaemonHost(slots)
+	host := NewDaemonHost(slots)
+	// The check runs on a goroutine of its own, outside the namespace of this thread.
+	host.SetIsolationCheckInterval(time.Hour)
+	return host
 }
 
 func attachTestSession(t *testing.T, host *DaemonHost, profile string, addr wgaddr.Address) (*EngineConfig, func(), error) {
 	t.Helper()
 	config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort}
 	engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: addr}
-	detach, err := host.Session(hostcoord.SessionKey{Profile: profilemanager.ID(profile)}, nil).attach(config, engineConfig)
+	detach, err := host.Session(hostcoord.SessionKey{Profile: profilemanager.ID(profile)}, nil).attach(t.Context(), config, engineConfig)
 	return engineConfig, detach, err
 }
 
@@ -124,7 +129,7 @@ func TestAttachWarnsAboutTheSkippedIPv6(t *testing.T) {
 	addr := v6Address(t, "100.72.0.1/16", "fd00:1234::2/64")
 	config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort}
 	engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: addr}
-	detachSecond, err := host.Session(hostcoord.SessionKey{Profile: "home"}, recorder).attach(config, engineConfig)
+	detachSecond, err := host.Session(hostcoord.SessionKey{Profile: "home"}, recorder).attach(t.Context(), config, engineConfig)
 	require.NoError(t, err)
 	t.Cleanup(detachSecond)
 
@@ -233,4 +238,60 @@ func TestNilSessionHostKeepsTodaysBehavior(t *testing.T) {
 	assert.Nil(t, host.networkMonitorOptions())
 	assert.Nil(t, host.newSysOps(nil))
 	host.retryHandovers()
+}
+
+// The end of an attempt must not take the resources of the attempt that replaced it: the session would
+// run on without isolation, its name would be free for a session with the same overlay, and Verify
+// would not notice, because the records and the kernel agree on that.
+func TestDetachOfAnOldAttemptLeavesTheNewOneIsolated(t *testing.T) {
+	host := newTestDaemonHost(t)
+	addr := wgaddr.MustParseWGAddress("100.71.0.1/16")
+
+	_, detachOld, err := attachTestSession(t, host, "work", addr)
+	require.NoError(t, err)
+	_, detachNew, err := attachTestSession(t, host, "work", addr)
+	require.NoError(t, err)
+	t.Cleanup(detachNew)
+
+	detachOld()
+
+	key := hostcoord.SessionKey{Profile: "work"}
+	_, running := host.slots.Running(key)
+	assert.True(t, running, "the new attempt should keep its reservation")
+	assert.Equal(t, []string{"wt0"}, host.coordinator.Sessions().SessionInterfaces(), "the new attempt should stay on record")
+	assert.NoError(t, host.Isolation().Verify())
+
+	_, _, err = attachTestSession(t, host, "home", wgaddr.MustParseWGAddress("100.71.0.2/16"))
+	assert.ErrorIs(t, err, ErrOverlayOverlap, "the overlay of the running attempt should still count")
+
+	// The isolation answers for itself, whichever backend the host has.
+	_, err = host.Isolation().Add("wt9", addr)
+	assert.Error(t, err, "the isolation should still hold the overlay of the new attempt")
+}
+
+// Nothing can isolate a session without a native firewall and with its own disabled. The refusal has
+// to come back, and it must not hold on to the lock all sessions need to come and go.
+func TestAttachWithoutAnyFirewallRefusesAndMovesOn(t *testing.T) {
+	// Discovery finds neither backend: no iptables binary and the nftables check off.
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv(firewall.SkipNftablesEnv, "true")
+	host := newTestDaemonHost(t)
+
+	refused := make(chan error, 1)
+	go func() {
+		config := &profilemanager.Config{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort, DisableFirewall: true}
+		engineConfig := &EngineConfig{WgIfaceName: config.WgIface, WgPort: config.WgPort, WgAddr: wgaddr.MustParseWGAddress("100.71.0.1/16")}
+		_, err := host.Session(hostcoord.SessionKey{Profile: "work"}, nil).attach(t.Context(), config, engineConfig)
+		refused <- err
+	}()
+
+	select {
+	case err := <-refused:
+		assert.ErrorIs(t, err, ErrSessionRefused)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the refusal should not wait for anything")
+	}
+
+	_, running := host.slots.Running(hostcoord.SessionKey{Profile: "work"})
+	assert.False(t, running, "a refused session must not keep its reservation")
 }

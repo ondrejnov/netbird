@@ -17,6 +17,7 @@ import (
 	nberrors "github.com/netbirdio/netbird/client/errors"
 	"github.com/netbirdio/netbird/client/iface/netstack"
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/auth"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/internal/updater"
@@ -70,9 +71,10 @@ type sessionSet struct {
 	removeLinksFn     func(records []hostcoord.SlotRecord) error
 	verifyLinksFn     func(records []hostcoord.SlotRecord) error
 
-	// lookupUIDFn stands in for the account database of the host. Tests set it; production
-	// leaves it nil.
+	// lookupUIDFn and accountsFn stand in for the account database of the host. Tests set them;
+	// production leaves them nil.
 	lookupUIDFn func(username string) (uint32, error)
+	accountsFn  func() ([]hostAccount, error)
 }
 
 func newSessionSet(concurrentProfiles bool) sessionSet {
@@ -90,6 +92,16 @@ func (s *Server) clientOptions(ss *session, key profilemanager.SessionKey) []int
 		opts = append(opts, internal.WithSessionHost(s.host.Session(key, ss.statusRecorder)))
 	}
 	return opts
+}
+
+// newAuth returns the client of a login with the Management of config. With the gate the system info
+// it sends leaves out the addresses of all sessions (I5).
+func (s *Server) newAuth(ctx context.Context, config *profilemanager.Config) (*auth.Auth, error) {
+	var opts []auth.Option
+	if s.host != nil {
+		opts = append(opts, auth.WithInfoFilter(s.host.ExcludeSessionAddresses))
+	}
+	return auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config, opts...)
 }
 
 // controlsUpdates reports whether Management may drive the updater through this session. The
@@ -533,6 +545,17 @@ func (s *Server) downTargets(ctx context.Context, ss *session, all bool) []*sess
 		}
 	}
 	return targets
+}
+
+// profileListChangedMetadata is the content of the event about a changed profile list. With the gate
+// it goes to whoever reads the session it is published on, and the profile can be of someone else. The
+// event only asks for a refresh, so the name stays out.
+func (s *Server) profileListChangedMetadata(profileName string) map[string]string {
+	metadata := map[string]string{proto.MetadataKindKey: proto.MetadataKindProfileListChanged}
+	if !s.concurrentProfiles {
+		metadata[proto.MetadataProfileKey] = profileName
+	}
+	return metadata
 }
 
 func profilesDisabledError() error {

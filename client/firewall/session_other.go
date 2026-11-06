@@ -45,6 +45,16 @@ func (*SessionIsolation) Verify() error {
 	return ErrSessionNotIsolated
 }
 
+// Restore refuses the session.
+func (*SessionIsolation) Restore() error {
+	return ErrSessionNotIsolated
+}
+
+// RemoveAll does nothing, as no session was added.
+func (*SessionIsolation) RemoveAll() error {
+	return nil
+}
+
 // RemoveResidualSessionIsolation does nothing, as no isolation can exist on this platform.
 func RemoveResidualSessionIsolation() error {
 	return nil

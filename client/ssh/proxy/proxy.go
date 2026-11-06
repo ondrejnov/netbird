@@ -90,15 +90,25 @@ func (p *SSHProxy) Close() error {
 }
 
 func (p *SSHProxy) Connect(ctx context.Context) error {
-	hint := profilemanager.GetLoginHint()
-
-	jwtToken, err := nbssh.RequestJWTToken(ctx, p.daemonClient, nil, p.stderr, true, hint, p.browserOpener)
+	jwtToken, err := p.authenticate(ctx)
 	if err != nil {
 		return fmt.Errorf(jwtAuthErrorMsg, err)
 	}
 
 	log.Debugf("JWT authentication successful, starting proxy to %s:%d", p.targetHost, p.targetPort)
 	return p.runProxySSHServer(jwtToken)
+}
+
+// authenticate gets the token of the connection and binds the proxy to the session it is of, for the
+// host keys of all servers the connection reaches later. It runs before the first handler does.
+func (p *SSHProxy) authenticate(ctx context.Context) (string, error) {
+	session, _, err := nbssh.FixSession(ctx, p.daemonClient, nil)
+	if err != nil {
+		return "", err
+	}
+	p.daemonClient = nbssh.ClientOfSession(p.daemonClient, session)
+
+	return nbssh.RequestJWTToken(ctx, p.daemonClient, nil, p.stderr, true, profilemanager.GetLoginHint(), p.browserOpener)
 }
 
 func (p *SSHProxy) runProxySSHServer(jwtToken string) error {

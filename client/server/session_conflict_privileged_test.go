@@ -319,38 +319,153 @@ func TestHostDNSHeldWarnsWithItsConflict(t *testing.T) {
 	f.down(t, work)
 }
 
-// An explicit name of a running session means a refusal, never the deletion of the link. The default
-// name would mean "automatic", so the first session has an explicit one as well.
-func TestExplicitInterfaceOfARunningSessionIsRefused(t *testing.T) {
+// Bringing a session up deletes whatever has the name of its interface. A profile that names an
+// interface other than the one of its slot could aim that at any link of the host, and whoever owns
+// a profile can write that name without any privilege. A session does not get that far, and the
+// session that runs stays as it is.
+func TestExplicitInterfaceIsRefused(t *testing.T) {
 	f := newSessionsFixture(t)
-
-	explicit := "nb-shared"
-	for _, profile := range []string{f.work, f.home} {
-		_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
-			ConfigPath:    filepath.Join(profilemanager.DefaultConfigPathDir, profile+".json"),
-			InterfaceName: &explicit,
-		})
-		require.NoError(t, err)
-	}
 
 	upProfile(t, f.ctx, f.s, f.work, f.username)
 	work := f.session(t, f.work)
 	awaitConnected(t, work, f.work)
-	link, err := netlink.LinkByName(explicit)
-	require.NoError(t, err, "the first session should run on its explicit name")
 
-	name, username := f.home, f.username
-	_, err = f.s.Up(f.ctx, &proto.UpRequest{ProfileName: &name, Username: &username})
+	const victim = "nbvictim0"
+	require.NoError(t, netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: victim}}))
+	t.Cleanup(func() {
+		if link, err := netlink.LinkByName(victim); err == nil {
+			_ = netlink.LinkDel(link)
+		}
+	})
+	before, err := netlink.LinkByName(victim)
+	require.NoError(t, err)
+
+	// The name of the slot of another session is as explicit as any other.
+	for _, explicit := range []string{victim, "wt7"} {
+		t.Run(explicit, func(t *testing.T) {
+			name := explicit
+			_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
+				ConfigPath:    filepath.Join(profilemanager.DefaultConfigPathDir, f.home+".json"),
+				InterfaceName: &name,
+			})
+			require.NoError(t, err)
+
+			profile, username := f.home, f.username
+			_, err = f.s.Up(f.ctx, &proto.UpRequest{ProfileName: &profile, Username: &username})
+			require.Error(t, err)
+			assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "the Up should say the session is refused: %v", err)
+			assert.Contains(t, gstatus.Convert(err).Message(), "interface")
+
+			home := f.session(t, f.home)
+			assert.Equal(t, "interface", f.statusEntry(t, home).GetConflict())
+
+			after, err := netlink.LinkByName(victim)
+			require.NoError(t, err, "the link must not be deleted")
+			assert.Equal(t, before.Attrs().Index, after.Attrs().Index, "the link must be the same one")
+			assert.Equal(t, internal.StatusConnected, work.state.CurrentStatus(), "the running session should not notice")
+		})
+	}
+}
+
+// The name of a slot is free for anything else on the host until a session wants it. A link that a
+// session would not have created stays, and the session does not run.
+func TestForeignLinkOnTheNameOfASlotIsRefused(t *testing.T) {
+	f := newSessionsFixture(t)
+
+	const slotName = "wt0"
+	require.NoError(t, netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: slotName}}))
+	t.Cleanup(func() {
+		if link, err := netlink.LinkByName(slotName); err == nil {
+			_ = netlink.LinkDel(link)
+		}
+	})
+	before, err := netlink.LinkByName(slotName)
+	require.NoError(t, err)
+
+	profile, username := f.work, f.username
+	_, err = f.s.Up(f.ctx, &proto.UpRequest{ProfileName: &profile, Username: &username})
 	require.Error(t, err)
 	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "the Up should say the session is refused: %v", err)
-	assert.Contains(t, gstatus.Convert(err).Message(), "interface")
+	assert.Equal(t, "interface", f.statusEntry(t, f.session(t, f.work)).GetConflict())
 
-	home := f.session(t, f.home)
-	assert.Equal(t, "interface", f.statusEntry(t, home).GetConflict())
-	same, err := netlink.LinkByName(explicit)
-	require.NoError(t, err, "the link of the running session must stay")
-	assert.Equal(t, link.Attrs().Index, same.Attrs().Index, "the link of the running session must be the same one")
-	assert.Equal(t, internal.StatusConnected, work.state.CurrentStatus(), "the running session should not notice")
+	after, err := netlink.LinkByName(slotName)
+	require.NoError(t, err, "the link must not be deleted")
+	assert.Equal(t, before.Attrs().Index, after.Attrs().Index, "the link must be the same one")
+	assert.Equal(t, "dummy", after.Type())
+}
+
+// tunModes are the ways a session can use the name of its slot. A kernel session deletes whatever has
+// the name when it comes up, so what is refused there has to be refused before that.
+var tunModes = []struct {
+	name  string
+	setup func(t *testing.T)
+}{
+	{name: "kernel", setup: requireKernelInterface},
+	{name: "userspace", setup: func(t *testing.T) { t.Setenv("NB_WG_KERNEL_DISABLED", "true") }},
+}
+
+// A TUN nobody closes is not the one of a previous attempt, whichever mode comes next. It stays.
+func TestForeignTunOnTheNameOfASlotIsRefused(t *testing.T) {
+	for _, mode := range tunModes {
+		t.Run(mode.name, func(t *testing.T) {
+			mode.setup(t)
+			f := newSessionsFixture(t)
+
+			const slotName = "wt0"
+			require.NoError(t, netlink.LinkAdd(&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: slotName},
+				Mode:      netlink.TUNTAP_MODE_TUN,
+				Flags:     netlink.TUNTAP_DEFAULTS | netlink.TUNTAP_NO_PI,
+			}))
+			t.Cleanup(func() {
+				if link, err := netlink.LinkByName(slotName); err == nil {
+					_ = netlink.LinkDel(link)
+				}
+			})
+			before, err := netlink.LinkByName(slotName)
+			require.NoError(t, err)
+
+			profile, username := f.work, f.username
+			_, err = f.s.Up(f.ctx, &proto.UpRequest{ProfileName: &profile, Username: &username})
+			require.Error(t, err)
+			assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "the Up should say the session is refused: %v", err)
+			assert.Equal(t, "interface", f.statusEntry(t, f.session(t, f.work)).GetConflict())
+
+			after, err := netlink.LinkByName(slotName)
+			require.NoError(t, err, "the TUN must not be deleted")
+			assert.Equal(t, before.Attrs().Index, after.Attrs().Index, "the TUN must be the same one")
+			assert.Equal(t, "tuntap", after.Type())
+		})
+	}
+}
+
+// The TUN of a previous attempt can be there for a moment when the next attempt starts. The session
+// waits it out instead of stopping for good.
+func TestClosingTunOnTheNameOfASlotDoesNotStopTheSession(t *testing.T) {
+	for _, mode := range tunModes {
+		t.Run(mode.name, func(t *testing.T) {
+			mode.setup(t)
+			f := newSessionsFixture(t)
+
+			tun := &netlink.Tuntap{
+				LinkAttrs:  netlink.LinkAttrs{Name: "wt0"},
+				Mode:       netlink.TUNTAP_MODE_TUN,
+				Flags:      netlink.TUNTAP_DEFAULTS | netlink.TUNTAP_NO_PI,
+				NonPersist: true,
+				Queues:     1,
+			}
+			require.NoError(t, netlink.LinkAdd(tun))
+			timer := time.AfterFunc(500*time.Millisecond, func() {
+				for _, fd := range tun.Fds {
+					assert.NoError(t, fd.Close())
+				}
+			})
+			t.Cleanup(func() { timer.Stop() })
+
+			upProfile(t, f.ctx, f.s, f.work, f.username)
+			awaitConnected(t, f.session(t, f.work), f.work)
+		})
+	}
 }
 
 // Q24 with real resources: a refused Up reaches neither the state file nor the running session.

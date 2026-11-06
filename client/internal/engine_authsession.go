@@ -93,6 +93,7 @@ func (e *Engine) ExtendAuthSession(ctx context.Context, jwtToken string) (time.T
 		log.Warnf("failed to collect system info for session extend: %v", err)
 		info = system.GetInfo(ctx)
 	}
+	e.excludeSessionAddresses(info)
 
 	resp, err := e.mgmClient.ExtendAuthSession(info, jwtToken)
 	if err != nil {

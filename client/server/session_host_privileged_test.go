@@ -673,6 +673,8 @@ func TestFailedIsolationCheckRefusesTheSession(t *testing.T) {
 		t.Run(backend.name, func(t *testing.T) {
 			backend.setup(t)
 			f := newSessionsFixture(t)
+			// The rule has to stay until the check after the engine finds it.
+			f.s.host.SetIsolationCheckInterval(time.Hour)
 
 			upProfile(t, f.ctx, f.s, f.work, f.username)
 			work := f.session(t, f.work)
