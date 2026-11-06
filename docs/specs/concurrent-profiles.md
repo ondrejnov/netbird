@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04, R1 až R6 viz 2.2. **F1 až F3 jsou sloučené v `multi-profile`** (F1 PR 1 až 8, F2 PR 9 až 11, F3 PR 12 až 19 včetně `f3/residual-links`, `f3/flow-filter`, `f3/security-fixes`, `f3/e2e-docs` a `f3/final-fixes`), poznatky v 2.3 až 2.5. Brána v1 prošla 2026-11-05. **F4:** dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md). Kritérium 5.8 je změřené, limit zůstává 4. Vlastník 2026-11-06 rozhodl tři otázky z 2.5, viz „Rozhodnutí vlastníka 2026-11-06". **Do zapnutí gate v provozu zbývá:** zbylé otázky v 2.3 a 2.5, ověření `service install` a `reconfigure` s gate pod skutečným init systémem, DNS backendů systemd-resolved a NetworkManager na skutečném hostiteli (Q8), testu přepínače UI mimo harness (PR 16) a sestavení balíčku `netbird-multiprofile` (PR 18) |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04, R1 až R6 viz 2.2. **F1 až F3 jsou sloučené v `multi-profile`** (F1 PR 1 až 8, F2 PR 9 až 11, F3 PR 12 až 19 včetně `f3/residual-links`, `f3/flow-filter`, `f3/security-fixes`, `f3/e2e-docs` a `f3/final-fixes`), poznatky v 2.3 až 2.5. Brána v1 prošla 2026-11-05. **F4:** dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md). Kritérium 5.8 je změřené, limit zůstává 4. Vlastník 2026-11-06 rozhodl tři otázky z 2.5, viz „Rozhodnutí vlastníka 2026-11-06". Testy souběžných profilů v CI pro macOS, Windows a FreeBSD opravuje `ci/portability`, viz 2.5. **Do zapnutí gate v provozu zbývá:** zbylé otázky v 2.3 a 2.5, ověření `service install` a `reconfigure` s gate pod skutečným init systémem, DNS backendů systemd-resolved a NetworkManager na skutečném hostiteli (Q8), testu přepínače UI mimo harness (PR 16) a sestavení balíčku `netbird-multiprofile` (PR 18) |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -312,6 +312,27 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **`99-netbird-N.conf` s právy 0644 je známé omezení v1.** Soubor obsahuje overlay IP a FQDN peerů dané session a
   čte ho každý lokální uživatel, což obchází filtr čtení cizí session z 5.6. Soubor s 0600 by vlastník session přes
   OpenSSH nepřečetl a přesun do `~/.ssh` vlastníka by měnil CLI i chování OpenSSH. Popsáno v dokumentaci.
+
+**Přenositelnost CI, `ci/portability`:**
+
+- **Gate testy mimo Linux:** `client/server` startoval službu s gate i na macOS, Windows a FreeBSD, kde ji
+  `startConcurrent` podle 5.5 správně odmítne. `prepareGateFixture` je mimo Linux přeskočí a
+  `TestGate_StartIsRefusedOffLinux` tam ověří odmítnutí bez `sessions.json`, slotů, session a spojení. Produkční
+  kód daemonu se nemění.
+- **`StateFileProfiles` na Windows:** Go tam čte běžný soubor na místě adresáře jako prázdný adresář, takže
+  nečitelný adresář profilů vypadal jako „žádné state soubory“ a slot 0 mohl dostat profil, jehož názvy se liší od
+  zapsaných. `readProfileDir` odmítne cokoli, co není adresář. Na Linuxu to bylo odmítnuté už dřív.
+- **certproof:** `TestCollector_WaitsForAValidHolder` četl úložiště přes `NB_CERT_STORE_DIR`, které macOS a Windows
+  nečtou (keychain a systémové úložiště). Test předá PEM úložiště přímo, předmětem je čekání na slot.
+- **Timeout `client/internal` na macOS:** dřívější test procesu nechá v `nbnet` nacachovaný egress interface
+  (`SetBoundInterface`), s advanced routing pak dialer váže každý socket na `en0` a Management na loopbacku je
+  nedosažitelný (`connect: can't assign requested address`). `Run` opakuje backoff do timeoutu balíčku.
+  `runUntilRefused` proto běží s legacy routing. Vazba loopback adresy na fyzický interface je chování upstreamu,
+  neopravuje se.
+- **FreeBSD:** `TestRun_OnlyClientsWithoutDaemonProbeRouting` předpokládá probe routingu, který mimo Linux, macOS a
+  Windows není (`AdvancedRouting` vždy false). Tam se přeskočí.
+- **Neověřeno:** testy na macOS, Windows a FreeBSD lokálně neběží. Cross `go vet` a `go test -c` s `devcert` prošly
+  pro macOS a Windows. S `privileged` a pro FreeBSD křížově nejde bez cgo (`go_sqlite`, `wgfreebsd`), stejně na `main`.
 
 **PR 12, `f3/proto`:**
 

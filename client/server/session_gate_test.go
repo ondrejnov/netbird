@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -52,6 +53,17 @@ func newGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 
 // prepareGateFixture stops short of the start, for a test that lays out the disk first.
 func prepareGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
+	t.Helper()
+	if runtime.GOOS != concurrentProfilesOS {
+		// The gate refuses to start off Linux (5.5), so nothing below it can run there.
+		// TestGate_StartIsRefusedOffLinux checks the refusal on those platforms.
+		t.Skipf("concurrent profiles run only on %s", concurrentProfilesOS)
+	}
+	return prepareGateServer(t, opts...)
+}
+
+// prepareGateServer is prepareGateFixture on any platform.
+func prepareGateServer(t *testing.T, opts ...gateOption) *gateFixture {
 	t.Helper()
 	t.Setenv("NB_DNS_STATE_FILE", "")
 	t.Setenv(netstack.EnvUseNetstackMode, "false")
@@ -199,6 +211,29 @@ func TestConcurrentProfilesPlatform(t *testing.T) {
 		assert.Contains(t, err.Error(), goos)
 		assert.Contains(t, err.Error(), "--enable-concurrent-profiles", "the operator should be told what to change")
 	}
+}
+
+// Off Linux the service with the gate does not start, and the refusal leaves the disk and the host
+// as they were: no sessions file, no slots, no session.
+func TestGate_StartIsRefusedOffLinux(t *testing.T) {
+	if runtime.GOOS == concurrentProfilesOS {
+		t.Skip("on Linux the gate starts, which every other gate test covers")
+	}
+	f := prepareGateServer(t)
+	dir := profilemanager.DefaultConfigPathDir
+
+	err := f.s.Start()
+	require.Error(t, err, "the gate must refuse %s", runtime.GOOS)
+	assert.Contains(t, err.Error(), "only on Linux", "the operator should be told why")
+	assert.Contains(t, err.Error(), "--enable-concurrent-profiles", "the operator should be told what to change")
+
+	_, statErr := os.Stat(filepath.Join(dir, "sessions.json"))
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "a refused start must store no sessions")
+	f.s.mutex.Lock()
+	defer f.s.mutex.Unlock()
+	assert.Nil(t, f.s.slots, "a refused start must open no slots")
+	assert.Empty(t, f.s.sessions, "a refused start must start no session")
+	assert.Zero(t, f.runCount(f.first), "a refused start must connect nothing")
 }
 
 func TestGetFeatures_ReportsTheGateAndTheLimit(t *testing.T) {
