@@ -9,10 +9,7 @@ iptables-save *filter :OUTPUT ACCEPT
 wt0 type=tuntap mtu=1280 addrs=[<overlay>/16]
 == nftables ==
 table 2/filter
-table 2/filter chain FORWARD rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
-table 2/filter chain FORWARD rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
 table 2/filter chain FORWARD type=filter hook=2 prio=0 policy=1
-table 2/filter chain INPUT rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
 table 2/filter chain INPUT type=filter hook=1 prio=0 policy=1
 table 2/netbird
 table 2/netbird chain netbird-acl-forward-filter rule "" *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[32 189 1 0]} *expr.Verdict{Kind:1 Chain:}
