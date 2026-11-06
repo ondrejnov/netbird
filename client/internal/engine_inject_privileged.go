@@ -19,3 +19,21 @@ func (e *Engine) InjectFromPeer(packet []byte) error {
 	_, err := device.Write([][]byte{buf}, injectOffset)
 	return err
 }
+
+// DrivesUpdates reports whether Management drives the updater through this engine. It exists for
+// the privileged tests.
+func (e *Engine) DrivesUpdates() bool {
+	return e.updateManager != nil
+}
+
+// WaitsForCertificateSlot reports whether a certificate collection of this engine waits for a
+// slot another one holds. It exists for the privileged tests.
+func (e *Engine) WaitsForCertificateSlot() bool {
+	return e.certProofs.WaitForSlot
+}
+
+// InterfaceMTU returns the MTU of the interface of this engine, which the DNS server of the engine
+// reads. It exists for the privileged tests.
+func (e *Engine) InterfaceMTU() uint16 {
+	return e.wgInterface.MTU()
+}

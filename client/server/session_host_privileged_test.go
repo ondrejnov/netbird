@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -69,6 +70,7 @@ func newSessionsFixtureInMode(t *testing.T) *sessionsFixture {
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)
+	s.localMetrics = s.newLocalMetrics(rootCtx)
 	t.Cleanup(cancelRoot)
 
 	dir := filepath.Dir(cfgPath)
@@ -214,7 +216,7 @@ func runTwoSessions(t *testing.T) {
 	assert.NotEqual(t, f.s.profileManager.GetStatePathFor(work.key), f.s.profileManager.GetStatePathFor(home.key), "each session has its own state file")
 	assert.NoError(t, f.s.host.Isolation().Verify())
 
-	statuses := f.s.sessionStatuses(work, internal.StatusConnected, false)
+	statuses := f.s.sessionStatuses(f.s.callerOf(f.ctx), work, internal.StatusConnected, false)
 	names := make(map[string]string, len(statuses))
 	for _, status := range statuses {
 		names[status.ProfileId] = status.InterfaceName
@@ -358,6 +360,17 @@ func (p *probeListener) delivered() bool {
 		return true
 	case <-time.After(time.Second):
 		return false
+	}
+}
+
+// drain forgets what arrived so far, for a check of what arrives from now on.
+func (p *probeListener) drain() {
+	for {
+		select {
+		case <-p.received:
+		default:
+			return
+		}
 	}
 }
 
@@ -538,6 +551,81 @@ func TestPacketBetweenNetworksIsDropped(t *testing.T) {
 	}
 }
 
+// A selector reaches the engine of the session it names: its networks, its selection, and its capture,
+// which leaves with its own debug bundle and no other.
+func TestSelectorReachesTheEngineOfItsSession(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	f := newSessionsFixture(t)
+
+	upProfile(t, f.ctx, f.s, f.work, f.username)
+	work := f.session(t, f.work)
+	awaitConnected(t, work, f.work)
+	upProfile(t, f.ctx, f.s, f.home, f.username)
+	home := f.session(t, f.home)
+	awaitConnected(t, home, f.home)
+	require.Same(t, work, f.s.focusedSession(), "the session of the second network is not focused")
+
+	workSelector := &proto.SessionSelector{Profile: f.work, Username: f.username}
+	homeSelector := &proto.SessionSelector{Profile: f.home, Username: f.username}
+
+	networks := func(selector *proto.SessionSelector) map[string]*proto.Network {
+		t.Helper()
+		resp, err := f.s.ListNetworks(f.ctx, &proto.ListNetworksRequest{Session: selector})
+		require.NoError(t, err)
+		byRange := make(map[string]*proto.Network, len(resp.GetRoutes()))
+		for _, network := range resp.GetRoutes() {
+			byRange[network.GetRange()] = network
+		}
+		return byRange
+	}
+	require.Eventually(t, func() bool {
+		return networks(homeSelector)[networkHome.route.String()] != nil && networks(nil)[networkWork.route.String()] != nil
+	}, 60*time.Second, 100*time.Millisecond, "both sessions should get their routes")
+
+	assert.NotContains(t, networks(homeSelector), networkWork.route.String(), "the networks of the named session and no other")
+	assert.NotContains(t, networks(workSelector), networkHome.route.String(), "the networks of the named session and no other")
+	assert.NotContains(t, networks(nil), networkHome.route.String(), "no selector means the focused session")
+
+	// A selection in one session leaves the same network ID of the other as it was.
+	_, err := f.s.DeselectNetworks(f.ctx, &proto.SelectNetworksRequest{Session: homeSelector, NetworkIDs: []string{"own"}})
+	require.NoError(t, err)
+	assert.False(t, networks(homeSelector)[networkHome.route.String()].GetSelected())
+	assert.True(t, networks(workSelector)[networkWork.route.String()].GetSelected(), "the other session keeps its selection")
+	_, err = f.s.SelectNetworks(f.ctx, &proto.SelectNetworksRequest{Session: homeSelector, NetworkIDs: []string{"own"}, Append: true})
+	require.NoError(t, err)
+	assert.True(t, networks(homeSelector)[networkHome.route.String()].GetSelected())
+
+	// A capture of each session, and traffic only in one of them.
+	_, err = f.s.StartBundleCapture(f.ctx, &proto.StartBundleCaptureRequest{Session: workSelector})
+	require.NoError(t, err)
+	_, err = f.s.StartBundleCapture(f.ctx, &proto.StartBundleCaptureRequest{Session: homeSelector})
+	require.NoError(t, err)
+	require.NotNil(t, work.currentCapture(), "the capture of the first session should run")
+	require.NotNil(t, home.currentCapture(), "the capture of the second session should run")
+
+	packet := udpPacket(t, networkWork.router, networkWork.overlay.Addr().Next(), 42000, 42001)
+	workSide := sessionSide{ss: work, iface: "wt0", network: networkWork}
+	workSide.inject(t, packet)
+
+	bundleCapture := func(selector *proto.SessionSelector) (string, bool) {
+		t.Helper()
+		resp, err := f.s.DebugBundle(f.ctx, &proto.DebugBundleRequest{Session: selector})
+		require.NoError(t, err)
+		raw, found := bundleEntries(t, resp.GetPath())["capture.pcap"]
+		return raw, found
+	}
+
+	// The second session goes first: its bundle takes its own capture, and leaves the first running.
+	homeCapture, found := bundleCapture(homeSelector)
+	require.True(t, found, "the bundle of the second session carries its capture")
+	assert.NotContains(t, homeCapture, "isolation probe", "the capture of the second session has no packet of the first")
+	assert.NotNil(t, work.currentCapture(), "a bundle of another session must leave the capture running")
+
+	workCapture, found := bundleCapture(workSelector)
+	require.True(t, found, "the bundle of the first session carries its capture")
+	assert.Contains(t, workCapture, "isolation probe", "the capture of the first session has its packet")
+}
+
 // A session whose overlay overlaps a running one does not start and does not keep trying (section
 // 6), and the running one does not notice. The refusal is not sticky.
 func TestOverlappingOverlayIsRefused(t *testing.T) {
@@ -585,6 +673,8 @@ func TestFailedIsolationCheckRefusesTheSession(t *testing.T) {
 		t.Run(backend.name, func(t *testing.T) {
 			backend.setup(t)
 			f := newSessionsFixture(t)
+			// The rule has to stay until the check after the engine finds it.
+			f.s.host.SetIsolationCheckInterval(time.Hour)
 
 			upProfile(t, f.ctx, f.s, f.work, f.username)
 			work := f.session(t, f.work)
@@ -788,12 +878,16 @@ func TestStartRemovesIsolationResidual(t *testing.T) {
 		t.Cleanup(cancel)
 		s.rootCtx = rootCtx
 		install(t)
+		requireKernelInterface(t)
+		addResidualLink(t, "wt0")
 
 		require.NoError(t, s.restoreResidualAtStart(ctx))
 
 		nft, ipt := present(t)
 		assert.True(t, nft, "the table is not known to be ours")
 		assert.True(t, ipt, "the chains are not known to be ours")
+		_, err := netlink.LinkByName("wt0")
+		assert.NoError(t, err, "the interface is not known to be ours")
 	})
 
 	t.Run("a sessions file removes both", func(t *testing.T) {
@@ -812,5 +906,45 @@ func TestStartRemovesIsolationResidual(t *testing.T) {
 		nft, ipt := present(t)
 		assert.False(t, nft, "the nftables isolation should be gone")
 		assert.False(t, ipt, "the iptables isolation should be gone")
+	})
+
+	// The isolation is what still keeps an interface that cannot go from the other networks, and
+	// the daemon does not run next to it.
+	t.Run("a link that stays keeps the isolation and refuses the start", func(t *testing.T) {
+		t.Setenv("NB_DNS_STATE_FILE", "")
+		t.Setenv(netstack.EnvUseNetstackMode, "false")
+		requireKernelInterface(t)
+		s, ctx, profile, username, _ := setupServerWithProfile(t)
+		rootCtx, cancel := context.WithCancel(ctx)
+		t.Cleanup(cancel)
+		s.rootCtx = rootCtx
+		s.sessionSet = newSessionSet(true)
+		s.removeLinksFn = func([]hostcoord.SlotRecord) error { return errors.New("cannot delete the link") }
+		writeDesiredSessions(t, map[profilemanager.SessionKey]hostcoord.DesiredState{
+			{Profile: profilemanager.ID(profile), Username: username}: hostcoord.DesiredUp,
+		})
+		install(t)
+		addResidualLink(t, "wt0")
+
+		require.Error(t, s.Start(), "the start must not go on next to a live session interface")
+
+		nft, ipt := present(t)
+		assert.True(t, nft, "the nftables isolation should stay with the link")
+		assert.True(t, ipt, "the iptables isolation should stay with the link")
+		assert.Nil(t, s.slots, "a refused start should leave no slots behind")
+		_, running := s.focusedSession().runningKey()
+		assert.False(t, running, "a refused start should run no session")
+	})
+}
+
+// addResidualLink leaves the kernel interface a crashed daemon would.
+func addResidualLink(t *testing.T, name string) {
+	t.Helper()
+	link := &netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: name}}
+	require.NoError(t, netlink.LinkAdd(link))
+	t.Cleanup(func() {
+		if existing, err := netlink.LinkByName(name); err == nil {
+			_ = netlink.LinkDel(existing)
+		}
 	})
 }

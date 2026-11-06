@@ -808,3 +808,36 @@ func TestRoutesConcurrentClaims(t *testing.T) {
 		assert.Empty(t, kernel.dev(prefix), "no route should stay without a claim")
 	}
 }
+
+func TestRoutesExitNodeOwnerAndWaiters(t *testing.T) {
+	routes := NewRoutes()
+	kernel := newFakeKernel()
+
+	_, held := routes.ExitNodeOwner()
+	assert.False(t, held, "nobody holds the exit node yet")
+	assert.False(t, routes.WaitsForExitNode(keyA), "nobody asked yet")
+
+	_, err := routes.Add(keyA, testDefault, kernel.claim(testDefault, "wt0", nil))
+	require.NoError(t, err)
+	owner, held := routes.ExitNodeOwner()
+	assert.True(t, held, "the first session holds the exit node")
+	assert.Equal(t, keyA, owner)
+	assert.False(t, routes.WaitsForExitNode(keyA), "the owner waits for nothing")
+
+	_, err = routes.Add(keyB, testDefault, kernel.claim(testDefault, "wt1", nil))
+	require.NoError(t, err)
+	assert.True(t, routes.WaitsForExitNode(keyB), "the second session waits")
+	owner, _ = routes.ExitNodeOwner()
+	assert.Equal(t, keyA, owner, "a waiter changes nothing")
+
+	require.NoError(t, routes.Remove(keyA, testDefault))
+	_, held = routes.ExitNodeOwner()
+	assert.False(t, held, "the exit node is not handed over")
+	assert.False(t, routes.WaitsForExitNode(keyB), "the request of the second session is dropped with it")
+
+	_, err = routes.Add(keyB, testDefault, kernel.claim(testDefault, "wt1", nil))
+	require.NoError(t, err)
+	owner, held = routes.ExitNodeOwner()
+	assert.True(t, held, "a new request gets the free exit node")
+	assert.Equal(t, keyB, owner)
+}

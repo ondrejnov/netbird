@@ -1,6 +1,7 @@
 package acl
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"testing"
@@ -279,7 +280,7 @@ func TestApplyFilteringRetainsRulesOnDeleteFailure(t *testing.T) {
 	ifaceMock.EXPECT().Address().Return(wgaddr.Address{IP: network.Addr(), Network: network}).AnyTimes()
 	ifaceMock.EXPECT().GetWGDevice().Return(nil).AnyTimes()
 
-	realFW, err := firewall.NewFirewall(ifaceMock, nil, flowLogger, false, iface.DefaultMTU)
+	realFW, err := firewall.NewFirewall(context.Background(), ifaceMock, nil, flowLogger, false, iface.DefaultMTU)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, realFW.Close(nil)) }()
 

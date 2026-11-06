@@ -111,6 +111,10 @@ func (u *Update) StartFetcher() {
 	if u.fetchTicker != nil {
 		return
 	}
+	if ForkBuild() {
+		log.Debugf("the fork is not published to %s, skipping the version lookup", versionURL)
+		return
+	}
 	u.fetchTicker = time.NewTicker(fetchPeriod)
 
 	if changed := u.fetchVersion(); changed {
@@ -130,6 +134,10 @@ func (u *Update) StartFetcher() {
 }
 
 func (u *Update) fetchVersion() bool {
+	if ForkBuild() {
+		return false
+	}
+
 	log.Debugf("fetching version info from %s", versionURL)
 
 	req, err := http.NewRequest("GET", versionURL, nil)

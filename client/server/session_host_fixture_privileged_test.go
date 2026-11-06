@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
 
 	"github.com/netbirdio/netbird/client/firewall"
 	"github.com/netbirdio/netbird/client/internal"
@@ -48,6 +49,14 @@ type hostNetwork struct {
 	router  netip.Addr
 	route   netip.Prefix
 	shared  netip.Prefix
+	// extraRoutes are routes a test adds, with the net IDs extraRouteID returns.
+	extraRoutes []netip.Prefix
+	// routerSSHKey makes the routing peer one a session writes into its SSH client config.
+	routerSSHKey string
+}
+
+func extraRouteID(index int) string {
+	return fmt.Sprintf("extra-%d", index)
 }
 
 var (
@@ -95,8 +104,8 @@ func writeNetworkStore(t *testing.T, network hostNetwork) string {
 	}
 
 	lines = append(lines,
-		fmt.Sprintf(`INSERT INTO peers VALUES('router-peer','%s','%s','','"%s"','','','','','','','','','','','','','','','','','router','router','2023-01-01 00:00:00+00:00',0,0,0,'a23efe53-63fb-11ec-90d6-0242ac120003','',0,0,'2023-01-01 00:00:00+00:00','2023-01-01 00:00:00+00:00',0,'','','',0);`,
-			fixtureAccount, fixtureRouterKey, network.router),
+		fmt.Sprintf(`INSERT INTO peers VALUES('router-peer','%s','%s','','"%s"','','','','','','','','','','','','','','','','','router','router','2023-01-01 00:00:00+00:00',0,0,0,'a23efe53-63fb-11ec-90d6-0242ac120003','%s',0,0,'2023-01-01 00:00:00+00:00','2023-01-01 00:00:00+00:00',0,'','','',0);`,
+			fixtureAccount, fixtureRouterKey, network.router, network.routerSSHKey),
 		fmt.Sprintf(`INSERT INTO routes VALUES('route-own','%s','"%s"',NULL,0,'own','','router-peer',NULL,1,0,9999,1,'["%s"]',NULL);`,
 			fixtureAccount, network.route, fixtureGroup),
 		fmt.Sprintf(`INSERT INTO routes VALUES('route-shared','%s','"%s"',NULL,0,'shared','','router-peer',NULL,1,0,9999,1,'["%s"]',NULL);`,
@@ -105,17 +114,23 @@ func writeNetworkStore(t *testing.T, network hostNetwork) string {
 			fixtureAccount, fixtureGroup),
 	)
 
+	for i, prefix := range network.extraRoutes {
+		lines = append(lines, fmt.Sprintf(`INSERT INTO routes VALUES('route-%s','%s','"%s"',NULL,0,'%s','','router-peer',NULL,1,0,9999,1,'["%s"]',NULL);`,
+			extraRouteID(i), fixtureAccount, prefix, extraRouteID(i), fixtureGroup))
+	}
+
 	path := filepath.Join(t.TempDir(), "store.sql")
 	require.NoError(t, os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600))
 	return path
 }
 
 // startNetwork runs a Management of its own for the network and writes a registered profile for it.
-func startNetwork(t *testing.T, ctx context.Context, dir, profile, signalAddr string, network hostNetwork) {
+// A test can stop the returned server to make the network unreachable.
+func startNetwork(t *testing.T, ctx context.Context, dir, profile, signalAddr string, network hostNetwork) *grpc.Server {
 	t.Helper()
 
 	logins := 0
-	_, mgmtAddr, err := startManagement(t, signalAddr, writeNetworkStore(t, network), &logins)
+	server, mgmtAddr, err := startManagement(t, signalAddr, writeNetworkStore(t, network), &logins)
 	require.NoError(t, err)
 
 	config, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
@@ -124,6 +139,7 @@ func startNetwork(t *testing.T, ctx context.Context, dir, profile, signalAddr st
 	})
 	require.NoError(t, err)
 	registerPeer(t, ctx, config)
+	return server
 }
 
 // keepRouterConnected marks the routing peer connected until the test ends. Without a counterpart

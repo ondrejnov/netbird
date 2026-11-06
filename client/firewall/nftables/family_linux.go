@@ -3,6 +3,7 @@
 package nftables
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 
@@ -97,8 +98,10 @@ type family struct {
 	legacyManagement bool
 	mtu              uint16
 
-	tags  acceptTags
-	scope *sessionScope
+	tags acceptTags
+	// trustCtx aborts the firewalld call of init.
+	trustCtx context.Context
+	scope    *sessionScope
 }
 
 func newFamily(workTable *nftables.Table, wgIface iFaceMapper, mtu uint16) *family {
@@ -114,6 +117,7 @@ func newFamily(workTable *nftables.Table, wgIface iFaceMapper, mtu uint16) *fami
 		ipFwdState:         ipfwdstate.NewIPForwardingState(wgIface.Name()),
 		mtu:                mtu,
 		tags:               newAcceptTags(""),
+		trustCtx:           context.Background(),
 	}
 
 	r.ipsetCounter = refcounter.New(

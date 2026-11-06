@@ -222,3 +222,60 @@ func TestEngine_RefreshSendsOnlyChangedProofs(t *testing.T) {
 	require.NoError(t, e.refreshCertificateProofs())
 	assert.Len(t, sent, 3, "after a failed delivery the next collection is sent")
 }
+
+// TestEngine_SessionsSideBySideAllProve: two sessions right after their network maps ask the same
+// store at the same moment. Neither may report a lost certificate because the other was reading it,
+// which management would take for a failed posture check.
+func TestEngine_SessionsSideBySideAllProve(t *testing.T) {
+	first, dir, ca := newCertPostureEngine(t, peer.NewRecorder(""), func(*system.Info) error { return nil })
+	writeDeviceCert(t, dir, ca)
+
+	secondKey, err := wgtypes.GeneratePrivateKey()
+	require.NoError(t, err)
+	secondPeerKey := secondKey.PublicKey()
+	second := &Engine{
+		ctx:            context.Background(),
+		syncMsgMux:     &sync.Mutex{},
+		config:         &EngineConfig{WgPrivateKey: secondKey},
+		statusRecorder: peer.NewRecorder(""),
+		mgmClient:      &mgmt.MockClient{SyncMetaFunc: func(*system.Info) error { return nil }},
+		checks: []*mgmProto.Checks{{CertificateChallenge: &mgmProto.CertificateChallenge{
+			Nonce:          certposture.NewChallenger([]byte("secret")).Nonce(secondPeerKey[:], time.Now()),
+			CaCertificates: []string{ca.PEM},
+		}}},
+	}
+
+	engines := []*Engine{first, second}
+	for _, e := range engines {
+		e.certProofs.WaitForSlot = true
+	}
+
+	for range 100 {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, e := range engines {
+			e.certState.mu.Lock()
+			e.certState.attempted = false
+			e.certState.mu.Unlock()
+
+			wg.Add(1)
+			go func(e *Engine) {
+				defer wg.Done()
+				<-start
+				assert.NoError(t, e.refreshCertificateProofs())
+			}(e)
+		}
+		close(start)
+		wg.Wait()
+
+		for _, e := range engines {
+			assert.Len(t, e.certState.cachedProofs(e.checks), 1, "each session should prove its certificate")
+		}
+	}
+
+	for _, e := range engines {
+		for _, event := range e.statusRecorder.GetEventHistory() {
+			assert.NotContains(t, event.GetMessage(), "no certificate could be proven", "a busy store is not a lost certificate")
+		}
+	}
+}

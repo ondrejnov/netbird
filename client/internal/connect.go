@@ -409,7 +409,7 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 
 		// connect (just a connection, no stream yet) and login to Management Service to get an initial global Netbird config
 		loginStarted := time.Now()
-		loginResp, err := loginToManagement(engineCtx, mgmClient, publicSSHKey, c.config)
+		loginResp, err := loginToManagement(engineCtx, mgmClient, publicSSHKey, c.config, c.sessionHost)
 		if err != nil {
 			c.clientMetrics.RecordLoginDuration(engineCtx, time.Since(loginStarted), false)
 			log.Debug(err)
@@ -488,7 +488,7 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 		}
 
 		if c.sessionHost != nil {
-			detach, err := c.sessionHost.attach(c.config, engineConfig)
+			detach, err := c.sessionHost.attach(engineCtx, c.config, engineConfig)
 			if err != nil {
 				log.Error(err)
 				return backoff.Permanent(wrapErr(err))
@@ -561,7 +561,13 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 			}
 		}
 
-		<-engineCtx.Done()
+		select {
+		case <-engineCtx.Done():
+		case err := <-c.sessionHost.isolationLost():
+			log.Error(err)
+			c.stopRefusedEngine(engine)
+			return backoff.Permanent(wrapErr(err))
+		}
 
 		c.engineMutex.Lock()
 		c.engine = nil
@@ -818,9 +824,6 @@ func selectMTU(localMTU uint16, peerMTU int32) uint16 {
 		finalMTU = uint16(peerMTU)
 	}
 
-	// Set global DNS MTU
-	dns.SetCurrentMTU(finalMTU)
-
 	return finalMTU
 }
 
@@ -844,8 +847,9 @@ func connectToSignal(ctx context.Context, wtConfig *mgmProto.NetbirdConfig, ourP
 }
 
 // loginToManagement creates Management ServiceDependencies client, establishes a connection, logs-in and gets a global Netbird config (signal, turn, stun hosts, etc)
-func loginToManagement(ctx context.Context, client mgm.Client, pubSSHKey []byte, config *profilemanager.Config) (*mgmProto.LoginResponse, error) {
+func loginToManagement(ctx context.Context, client mgm.Client, pubSSHKey []byte, config *profilemanager.Config, host *SessionHost) (*mgmProto.LoginResponse, error) {
 	sysInfo := system.GetInfo(ctx)
+	host.excludeSessionAddresses(sysInfo)
 	sysInfo.SetFlags(
 		config.RosenpassEnabled,
 		config.RosenpassPermissive,

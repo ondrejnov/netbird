@@ -50,12 +50,22 @@ type Auth struct {
 	privateKey    wgtypes.Key
 	mgmURL        *url.URL
 	mgmTLSEnabled bool
+	infoFilter    func(*system.Info)
+}
+
+// Option changes how NewAuth builds an Auth.
+type Option func(*Auth)
+
+// WithInfoFilter has filter look at the system info of every login and registration before it goes
+// to Management.
+func WithInfoFilter(filter func(*system.Info)) Option {
+	return func(a *Auth) { a.infoFilter = filter }
 }
 
 // NewAuth creates a new Auth instance that manages authentication flows
 // It establishes a connection to the management server that will be reused for all operations
 // The connection is automatically recreated with backoff if it becomes disconnected
-func NewAuth(ctx context.Context, privateKey string, mgmURL *url.URL, config *profilemanager.Config) (*Auth, error) {
+func NewAuth(ctx context.Context, privateKey string, mgmURL *url.URL, config *profilemanager.Config, opts ...Option) (*Auth, error) {
 	// Validate WireGuard private key
 	myPrivateKey, err := wgtypes.ParseKey(privateKey)
 	if err != nil {
@@ -74,13 +84,17 @@ func NewAuth(ctx context.Context, privateKey string, mgmURL *url.URL, config *pr
 
 	log.Debugf("connected to the Management service %s", mgmURL.String())
 
-	return &Auth{
+	a := &Auth{
 		client:        mgmClient,
 		config:        config,
 		privateKey:    myPrivateKey,
 		mgmURL:        mgmURL,
 		mgmTLSEnabled: mgmTLSEnabled,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a, nil
 }
 
 // Close closes the management client connection
@@ -327,6 +341,7 @@ func (a *Auth) getDeviceFlow(client *mgm.GrpcClient) (*DeviceAuthorizationFlow, 
 func (a *Auth) doMgmLogin(client *mgm.GrpcClient, ctx context.Context, pubSSHKey []byte) error {
 	sysInfo := system.GetInfo(ctx)
 	a.setSystemInfoFlags(sysInfo)
+	a.filterInfo(sysInfo)
 	_, err := client.Login(sysInfo, pubSSHKey, a.config.DNSLabels)
 	return err
 }
@@ -342,6 +357,7 @@ func (a *Auth) registerPeer(client *mgm.GrpcClient, ctx context.Context, setupKe
 	log.Debugf("sending peer registration request to Management Service")
 	info := system.GetInfo(ctx)
 	a.setSystemInfoFlags(info)
+	a.filterInfo(info)
 	loginResp, err := client.Register(validSetupKey.String(), jwtToken, info, pubSSHKey, a.config.DNSLabels)
 	if err != nil {
 		log.Errorf("failed registering peer %v", err)
@@ -351,6 +367,12 @@ func (a *Auth) registerPeer(client *mgm.GrpcClient, ctx context.Context, setupKe
 	log.Infof("peer has been successfully registered on Management Service")
 
 	return loginResp, nil
+}
+
+func (a *Auth) filterInfo(info *system.Info) {
+	if a.infoFilter != nil {
+		a.infoFilter(info)
+	}
 }
 
 // setSystemInfoFlags sets all configuration flags on the provided system info

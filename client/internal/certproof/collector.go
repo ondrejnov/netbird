@@ -33,6 +33,8 @@ type collectSlots struct {
 	next uint64
 	// running holds the start time of each collection still running, by slot id.
 	running map[uint64]time.Time
+	// freed is closed when a slot is released, for those waiting for one. Nil until needed.
+	freed chan struct{}
 }
 
 var processSlots collectSlots
@@ -51,6 +53,12 @@ type Collector struct {
 	timeout time.Duration
 	// now overrides the clock when set.
 	now func() time.Time
+
+	// WaitForSlot makes a collection wait while another one still validly holds the slot,
+	// instead of proving nothing. Sessions next to each other collect at the same moment,
+	// and an empty answer fails the certificate check on management. Wedged collections
+	// are still given up on, and the context ends the wait.
+	WaitForSlot bool
 }
 
 // Collect answers the certificate challenges in checks, returning no proofs when there
@@ -67,7 +75,7 @@ func (c *Collector) collect(ctx context.Context, checks []*proto.Checks, run fun
 		return nil
 	}
 	slots := c.slotsInUse()
-	slot, ok := slots.start(c.clock(), time.Duration(lostAfter)*c.deadline())
+	slot, ok := c.claimSlot(ctx, slots)
 	if !ok {
 		return nil
 	}
@@ -90,6 +98,33 @@ func (c *Collector) collect(ctx context.Context, checks []*proto.Checks, run fun
 	case <-ctx.Done():
 		log.Warnf("certificate posture: proof collection did not finish within %s, sending no proofs", c.deadline())
 		return nil
+	}
+}
+
+// claimSlot takes a slot, and with WaitForSlot waits while another collection validly holds
+// one. A holder stops being valid when it counts as lost, which also bounds the wait.
+func (c *Collector) claimSlot(ctx context.Context, slots *collectSlots) (uint64, bool) {
+	lost := time.Duration(lostAfter) * c.deadline()
+	if !c.WaitForSlot {
+		return slots.start(c.clock(), lost)
+	}
+
+	for {
+		slot, ok, wait, freed := slots.startOrWait(c.clock(), lost)
+		if wait == 0 {
+			return slot, ok
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-freed:
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			log.Debugf("certificate posture: stopped waiting for the running proof collection: %v", ctx.Err())
+			return 0, false
+		}
+		timer.Stop()
 	}
 }
 
@@ -125,7 +160,32 @@ func (c *Collector) deadline() time.Duration {
 func (s *collectSlots) start(now time.Time, lost time.Duration) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.startLocked(now, lost)
+}
 
+// startOrWait is start for a caller that waits for a valid holder. A wait above zero means a
+// collection younger than lost holds a slot: the caller tries again when freed is closed or
+// after wait, whichever comes first. With a wait of zero the other results are those of start.
+func (s *collectSlots) startOrWait(now time.Time, lost time.Duration) (slot uint64, ok bool, wait time.Duration, freed <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, started := range s.running {
+		if remaining := lost - now.Sub(started); remaining > wait {
+			wait = remaining
+		}
+	}
+	if wait > 0 {
+		if s.freed == nil {
+			s.freed = make(chan struct{})
+		}
+		return 0, false, wait, s.freed
+	}
+	slot, ok = s.startLocked(now, lost)
+	return slot, ok, 0, nil
+}
+
+func (s *collectSlots) startLocked(now time.Time, lost time.Duration) (uint64, bool) {
 	if len(s.running) > 0 {
 		oldest := s.oldest()
 		switch {
@@ -152,6 +212,10 @@ func (s *collectSlots) finish(slot uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.running, slot)
+	if s.freed != nil {
+		close(s.freed)
+		s.freed = nil
+	}
 }
 
 // allLost reports whether every slot is held by a collection that has run for lost.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 
@@ -81,6 +82,14 @@ type strictHostManager interface {
 }
 
 func (m *perLinkHostManager) applyDNSConfig(config HostDNSConfig, stateManager *statemanager.Manager) error {
+	if err := m.applyArbitrated(config, stateManager); err != nil {
+		return err
+	}
+	m.coordinator.ServeDomains(linkDomains(config))
+	return nil
+}
+
+func (m *perLinkHostManager) applyArbitrated(config HostDNSConfig, stateManager *statemanager.Manager) error {
 	if !requestsCatchAll(config) {
 		return m.applyWithoutRequest(config, stateManager)
 	}
@@ -139,8 +148,25 @@ func (m *perLinkHostManager) retryClaim() bool {
 func (m *perLinkHostManager) restoreHostDNS() error {
 	err := m.hostManager.restoreHostDNS()
 	m.coordinator.ReleaseCatchAll()
+	m.coordinator.ServeDomains(nil)
 	m.holds = false
 	return err
+}
+
+// linkDomains returns the domains the link answers for, in one spelling. The root domain is the
+// catch-all, which has its own claim.
+func linkDomains(config HostDNSConfig) []string {
+	var domains []string
+	for _, d := range config.Domains {
+		if d.Disabled || isRootDomain(d) {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSuffix(d.Domain, "."))
+		if !slices.Contains(domains, name) {
+			domains = append(domains, name)
+		}
+	}
+	return domains
 }
 
 func requestsCatchAll(config HostDNSConfig) bool {

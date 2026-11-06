@@ -103,6 +103,26 @@ func (e *Engine) updateSSH(sshConf *mgmProto.SSHConfig) error {
 	return errors.New("SSH server requires valid JWT configuration")
 }
 
+// sshConfigManager returns the manager of the SSH client config file of this engine.
+func (e *Engine) sshConfigManager() *sshconfig.Manager {
+	if e.config.Session == nil {
+		return sshconfig.New()
+	}
+	return sshconfig.NewForSlot(uint(e.config.Session.slot))
+}
+
+// forgetSSHConfigState drops the record of a file this session has just removed. A record left in
+// the state file reads as residual state, which keeps the session from starting next to another
+// (Q24).
+func (e *Engine) forgetSSHConfigState() {
+	if e.config.Session == nil {
+		return
+	}
+	if err := e.stateManager.DeleteState(&sshconfig.ShutdownState{}); err != nil {
+		log.Warnf("failed to clear the SSH config state: %v", err)
+	}
+}
+
 // updateSSHClientConfig updates the SSH client configuration with peer information
 func (e *Engine) updateSSHClientConfig(remotePeers []*mgmProto.RemotePeerConfig) error {
 	if netstack.IsEnabled() {
@@ -115,7 +135,7 @@ func (e *Engine) updateSSHClientConfig(remotePeers []*mgmProto.RemotePeerConfig)
 		return nil
 	}
 
-	configMgr := sshconfig.New()
+	configMgr := e.sshConfigManager()
 	if err := configMgr.SetupSSHClientConfig(peerInfo); err != nil {
 		log.Warnf("failed to update SSH client config: %v", err)
 		return nil // Don't fail engine startup on SSH config issues
@@ -224,13 +244,14 @@ func (e *Engine) cleanupSSHConfig() {
 		return
 	}
 
-	configMgr := sshconfig.New()
+	configMgr := e.sshConfigManager()
 
 	if err := configMgr.RemoveSSHClientConfig(); err != nil {
 		log.Warnf("failed to remove SSH client config: %v", err)
-	} else {
-		log.Debugf("SSH client config cleanup completed")
+		return
 	}
+	log.Debugf("SSH client config cleanup completed")
+	e.forgetSSHConfigState()
 }
 
 // restartSSHListeners rebuilds the SSH server so it listens on new sockets, on

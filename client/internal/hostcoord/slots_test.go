@@ -489,6 +489,26 @@ func TestSlots_ReleaseFreesPortAndName(t *testing.T) {
 	assert.Equal(t, uint16(40000), res.Port, "the port is free again")
 }
 
+// The holder of a replaced lease has no say about the session, and it has to be told so.
+func TestSlots_ReleaseReportsWhetherTheLeaseHeld(t *testing.T) {
+	s := newFakeSlots(t, t.TempDir())
+	key := SessionKey{Profile: "a"}
+
+	old, err := s.Reserve(key, ResourceRequest{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort})
+	require.NoError(t, err)
+	current, err := s.Reserve(key, ResourceRequest{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort})
+	require.NoError(t, err)
+
+	assert.False(t, s.Release(old.Lease), "a replaced lease holds nothing")
+	assert.True(t, s.Release(current.Lease), "the newest lease holds the resources")
+	assert.False(t, s.Release(current.Lease), "a released lease holds nothing")
+
+	last, err := s.Reserve(key, ResourceRequest{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	assert.True(t, s.Release(last.Lease), "after Close nothing can have replaced the lease")
+}
+
 func TestSlots_StaleReleaseKeepsTheNewReservation(t *testing.T) {
 	s := newFakeSlots(t, t.TempDir())
 	office := ResourceRequest{WgIface: "office", WgPort: 40000}

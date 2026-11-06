@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,6 +278,12 @@ func TestSortingOfPeers(t *testing.T) {
 	assert.Equal(t, peers[3].IP, "192.168.178.104")
 }
 
+// withUpstreamVersion strips the fork marker so the fixtures below hold for the
+// fork build as well as for the upstream one.
+func withUpstreamVersion(out string) string {
+	return strings.ReplaceAll(out, version.NetbirdVersion(), version.DevelopmentVersion)
+}
+
 func TestParsingToJSON(t *testing.T) {
 	jsonString, _ := overview.JSON()
 
@@ -413,7 +420,7 @@ func TestParsingToJSON(t *testing.T) {
 	var expectedJSON bytes.Buffer
 	require.NoError(t, json.Compact(&expectedJSON, []byte(expectedJSONString)))
 
-	assert.Equal(t, expectedJSON.String(), jsonString)
+	assert.Equal(t, expectedJSON.String(), withUpstreamVersion(jsonString))
 }
 
 func TestParsingToYAML(t *testing.T) {
@@ -517,7 +524,7 @@ sshServer:
     sessions: []
 `
 
-	assert.Equal(t, expectedYAML, yaml)
+	assert.Equal(t, expectedYAML, withUpstreamVersion(yaml))
 }
 
 func TestParsingToDetail(t *testing.T) {
@@ -615,7 +622,7 @@ Networks: 10.10.0.0/24
 Peers count: 2/2 Connected
 `
 
-	assert.Equal(t, expectedString, shortVersion)
+	assert.Equal(t, expectedString, withUpstreamVersion(shortVersion))
 }
 
 func TestTimeAgo(t *testing.T) {
