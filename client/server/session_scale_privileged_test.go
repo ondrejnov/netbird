@@ -53,6 +53,26 @@ const (
 	slotBasePort = 51820
 )
 
+// envScaleTests turns on the scale tests and the measurement, which take longer than CI gives the
+// whole package.
+const envScaleTests = "NB_TEST_SCALE"
+
+// requireScaleTests skips a scale test unless envScaleTests asks for it.
+func requireScaleTests(t *testing.T) {
+	t.Helper()
+	val := os.Getenv(envScaleTests)
+	if val == "" {
+		t.Skipf("runs only on request, set %s=true", envScaleTests)
+	}
+	enabled, err := strconv.ParseBool(val)
+	if err != nil {
+		t.Fatalf("parse %s: %v", envScaleTests, err)
+	}
+	if !enabled {
+		t.Skipf("turned off by %s=%s", envScaleTests, val)
+	}
+}
+
 // scaleNetwork returns a network of its own for one index. Its addresses stay apart from networkWork
 // and networkHome, and from the route the networks share.
 func scaleNetwork(index int) hostNetwork {
@@ -481,6 +501,7 @@ var scaleModes = []scaleMode{
 // isolation with packets between all pairs, addresses, one session stopped and restarted beside the
 // others, the shared route passed along from owner to owner, and a clean host at the end.
 func TestScaleSessions(t *testing.T) {
+	requireScaleTests(t)
 	for _, size := range []int{8, 16} {
 		for _, mode := range scaleModes {
 			for _, backend := range hostBackends {
@@ -622,6 +643,7 @@ func togetherAll(indices []int, op func(index int)) time.Duration {
 // Sessions come and go in groups at the same moment, including one group leaving while another
 // arrives, with a group that stays through all of it.
 func TestScaleChurn(t *testing.T) {
+	requireScaleTests(t)
 	for _, size := range []int{8, 16} {
 		for _, backend := range hostBackends {
 			t.Run(fmt.Sprintf("%d/%s", size, backend.name), func(t *testing.T) {
@@ -833,6 +855,7 @@ func logCycleTimes(t *testing.T, what string, times []time.Duration) {
 // session that runs keeps its engine, its status, its routes and its traffic, and what the cycles use
 // comes back.
 func TestScaleStress(t *testing.T) {
+	requireScaleTests(t)
 	for _, backend := range hostBackends {
 		t.Run(backend.name, func(t *testing.T) {
 			t.Setenv("NB_WG_KERNEL_DISABLED", "true")

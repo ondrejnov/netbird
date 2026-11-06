@@ -572,6 +572,7 @@ type measurePaths struct {
 // to a further namespace. The last two have nothing to do with the sessions, so what grows there is
 // what every packet of the host pays for their rules.
 func TestScaleMeasure(t *testing.T) {
+	requireScaleTests(t)
 	for _, mode := range scaleModes {
 		for _, backend := range hostBackends {
 			t.Run(mode.name+"/"+backend.name, func(t *testing.T) {
@@ -790,6 +791,7 @@ func runScaleMeasure(t *testing.T, label string, removeIsolation func(t *testing
 // session survive that. The next start cleans up after all of them, brings them back on their slots
 // at once, and after the last one the host is what it was, but for the original sysctls (Q22).
 func TestScaleCrash(t *testing.T) {
+	requireScaleTests(t)
 	for _, backend := range hostBackends {
 		t.Run(backend.name, func(t *testing.T) {
 			requireKernelInterface(t)

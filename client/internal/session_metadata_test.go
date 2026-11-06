@@ -13,6 +13,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
+	nbnet "github.com/netbirdio/netbird/client/net"
 	"github.com/netbirdio/netbird/client/ssh"
 	"github.com/netbirdio/netbird/client/system"
 	"github.com/netbirdio/netbird/client/testutil/mgmtmeta"
@@ -41,9 +42,14 @@ func newMetadataConfig(t *testing.T, management string) *profilemanager.Config {
 	return &profilemanager.Config{PrivateKey: key.String(), SSHKey: string(sshKey), ManagementURL: mgmtURL}
 }
 
-// runUntilRefused runs a client against the recording Management, which refuses it.
+// runUntilRefused runs a client against the recording Management, which refuses it. The run is
+// on legacy routing: with advanced routing macOS binds every socket to the egress interface an
+// earlier test of this process left behind, and from there the Management on loopback is out of
+// reach. What this checks is the login, not the routing.
 func runUntilRefused(t *testing.T, config *profilemanager.Config, opts ...ConnectClientOption) {
 	t.Helper()
+	t.Cleanup(nbnet.Init)
+	t.Setenv("NB_USE_LEGACY_ROUTING", "true")
 	ctx := CtxInitState(context.Background())
 	opts = append(opts, WithStatePath(t.TempDir()+"/state.json"))
 	client := NewConnectClient(ctx, config, peer.NewRecorder(""), opts...)

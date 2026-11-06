@@ -37,13 +37,15 @@ func holdSlot(t *testing.T, slots *collectSlots, timeout time.Duration) func() {
 }
 
 // A second session asks while the first is reading the store, as both do right after a network map.
-// The real store answers it once the slot is free, with a proof management accepts.
+// A real PEM store answers it once the slot is free, with a proof management accepts. The store is
+// named here rather than through NB_CERT_STORE_DIR: macOS and Windows read the keychain and the
+// system store instead, which hold no certificate of this test.
 func TestCollector_WaitsForAValidHolder(t *testing.T) {
 	ca := certtest.NewCA(t, "corp-root")
 	dir := storeDir(t)
 	key := certtest.ECDSAKey(t)
 	writeFile(t, dir, "device.pem", certtest.CertPEM(ca.Issue(t, key, "device"))+certtest.KeyPEM(t, key))
-	t.Setenv(StoreDirEnv, dir)
+	store := newFileStore(dir)
 
 	slots := &collectSlots{}
 	release := holdSlot(t, slots, time.Minute)
@@ -56,7 +58,11 @@ func TestCollector_WaitsForAValidHolder(t *testing.T) {
 
 	waiter := Collector{slots: slots, WaitForSlot: true}
 	result := make(chan []certposture.Proof, 1)
-	go func() { result <- waiter.Collect(context.Background(), checks, peerKey, Config{}) }()
+	go func() {
+		result <- waiter.collect(context.Background(), checks, func(ctx context.Context) []certposture.Proof {
+			return Collect(ctx, store, checks, peerKey)
+		})
+	}()
 
 	select {
 	case <-result:

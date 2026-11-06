@@ -521,11 +521,11 @@ func (s *ServiceManager) StateFileProfiles() ([]SessionKey, error) {
 	var keys []SessionKey
 	var errs []error
 
-	switch _, err := os.Stat(defaultStatePath()); {
-	case err == nil:
-		keys = append(keys, SessionKey{Profile: defaultProfileName})
-	case !errors.Is(err, fs.ErrNotExist):
+	switch found, err := defaultStateFileExists(); {
+	case err != nil:
 		errs = append(errs, fmt.Errorf("check default state file: %w", err))
+	case found:
+		keys = append(keys, SessionKey{Profile: defaultProfileName})
 	}
 
 	dirs, err := s.profileDirs()
@@ -557,12 +557,9 @@ func (s *ServiceManager) profileDirs() (map[string]string, error) {
 	}
 
 	dirs := map[string]string{"": DefaultConfigPathDir}
-	entries, err := os.ReadDir(DefaultConfigPathDir)
+	entries, err := readProfileDir(DefaultConfigPathDir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return dirs, nil
-		}
-		return dirs, fmt.Errorf("read profile directory: %w", err)
+		return dirs, err
 	}
 	for _, entry := range entries {
 		// A name that sanitizing changes is no user's directory: GetStatePathFor would not
@@ -575,12 +572,9 @@ func (s *ServiceManager) profileDirs() (map[string]string, error) {
 }
 
 func stateFileProfilesIn(dir, username string) ([]SessionKey, error) {
-	entries, err := os.ReadDir(dir)
+	entries, err := readProfileDir(dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read profile directory: %w", err)
+		return nil, err
 	}
 
 	var keys []SessionKey
@@ -594,6 +588,52 @@ func stateFileProfilesIn(dir, username string) ([]SessionKey, error) {
 		}
 	}
 	return keys, nil
+}
+
+// readProfileDir lists dir, or nothing when it does not exist. Something other than a directory
+// is an error: Windows reads a regular file as an empty directory, which would hide the profiles.
+func readProfileDir(dir string) ([]fs.DirEntry, error) {
+	info, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read profile directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("read profile directory %s: not a directory", dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read profile directory: %w", err)
+	}
+	return entries, nil
+}
+
+// defaultStateFileExists reports whether the default profile has a state file. Windows reports a
+// path through a regular file as not found, where Unix says it is no directory, so a missing
+// file counts as absent only when the directory around it is one.
+func defaultStateFileExists() (bool, error) {
+	_, err := os.Stat(defaultStatePath())
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	info, err := os.Stat(DefaultConfigPathDir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	case !info.IsDir():
+		return false, fmt.Errorf("%s: not a directory", DefaultConfigPathDir)
+	}
+	return false, nil
 }
 
 func defaultStatePath() string {

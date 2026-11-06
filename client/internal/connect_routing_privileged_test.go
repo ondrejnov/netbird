@@ -5,6 +5,7 @@ package internal
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,13 @@ func runUntilPrivateKeyCheck(t *testing.T, dir string, opts ...ConnectClientOpti
 // environment is changed behind its back to tell a repeated probe from a kept result,
 // and a client without a session key shows that the same change is visible to a probe.
 func TestRun_OnlyClientsWithoutDaemonProbeRouting(t *testing.T) {
+	switch runtime.GOOS {
+	case "linux", "darwin", "windows":
+	default:
+		// Elsewhere there is no probe: advanced routing is never supported, so there is no
+		// result for a session to keep and no change for a probe to see.
+		t.Skipf("%s does not probe the routing support", runtime.GOOS)
+	}
 	dir := connectIdentityTestDir(t)
 
 	t.Cleanup(nbnet.Init)
