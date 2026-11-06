@@ -394,6 +394,80 @@ func TestForeignLinkOnTheNameOfASlotIsRefused(t *testing.T) {
 	assert.Equal(t, "dummy", after.Type())
 }
 
+// tunModes are the ways a session can use the name of its slot. A kernel session deletes whatever has
+// the name when it comes up, so what is refused there has to be refused before that.
+var tunModes = []struct {
+	name  string
+	setup func(t *testing.T)
+}{
+	{name: "kernel", setup: requireKernelInterface},
+	{name: "userspace", setup: func(t *testing.T) { t.Setenv("NB_WG_KERNEL_DISABLED", "true") }},
+}
+
+// A TUN nobody closes is not the one of a previous attempt, whichever mode comes next. It stays.
+func TestForeignTunOnTheNameOfASlotIsRefused(t *testing.T) {
+	for _, mode := range tunModes {
+		t.Run(mode.name, func(t *testing.T) {
+			mode.setup(t)
+			f := newSessionsFixture(t)
+
+			const slotName = "wt0"
+			require.NoError(t, netlink.LinkAdd(&netlink.Tuntap{
+				LinkAttrs: netlink.LinkAttrs{Name: slotName},
+				Mode:      netlink.TUNTAP_MODE_TUN,
+				Flags:     netlink.TUNTAP_DEFAULTS | netlink.TUNTAP_NO_PI,
+			}))
+			t.Cleanup(func() {
+				if link, err := netlink.LinkByName(slotName); err == nil {
+					_ = netlink.LinkDel(link)
+				}
+			})
+			before, err := netlink.LinkByName(slotName)
+			require.NoError(t, err)
+
+			profile, username := f.work, f.username
+			_, err = f.s.Up(f.ctx, &proto.UpRequest{ProfileName: &profile, Username: &username})
+			require.Error(t, err)
+			assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "the Up should say the session is refused: %v", err)
+			assert.Equal(t, "interface", f.statusEntry(t, f.session(t, f.work)).GetConflict())
+
+			after, err := netlink.LinkByName(slotName)
+			require.NoError(t, err, "the TUN must not be deleted")
+			assert.Equal(t, before.Attrs().Index, after.Attrs().Index, "the TUN must be the same one")
+			assert.Equal(t, "tuntap", after.Type())
+		})
+	}
+}
+
+// The TUN of a previous attempt can be there for a moment when the next attempt starts. The session
+// waits it out instead of stopping for good.
+func TestClosingTunOnTheNameOfASlotDoesNotStopTheSession(t *testing.T) {
+	for _, mode := range tunModes {
+		t.Run(mode.name, func(t *testing.T) {
+			mode.setup(t)
+			f := newSessionsFixture(t)
+
+			tun := &netlink.Tuntap{
+				LinkAttrs:  netlink.LinkAttrs{Name: "wt0"},
+				Mode:       netlink.TUNTAP_MODE_TUN,
+				Flags:      netlink.TUNTAP_DEFAULTS | netlink.TUNTAP_NO_PI,
+				NonPersist: true,
+				Queues:     1,
+			}
+			require.NoError(t, netlink.LinkAdd(tun))
+			timer := time.AfterFunc(500*time.Millisecond, func() {
+				for _, fd := range tun.Fds {
+					assert.NoError(t, fd.Close())
+				}
+			})
+			t.Cleanup(func() { timer.Stop() })
+
+			upProfile(t, f.ctx, f.s, f.work, f.username)
+			awaitConnected(t, f.session(t, f.work), f.work)
+		})
+	}
+}
+
 // Q24 with real resources: a refused Up reaches neither the state file nor the running session.
 func TestResidualBesideARunningSessionLeavesItAlone(t *testing.T) {
 	f := newSessionsFixture(t)

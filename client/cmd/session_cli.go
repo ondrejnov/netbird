@@ -235,12 +235,3 @@ func runningSessionError(err error, handle string) error {
 	}
 	return fmt.Errorf("%s\nRun `%s` first", st.Message(), down)
 }
-
-// checkConcurrentProfilesTransport refuses the gate on a socket whose callers carry no identity. The
-// sessions of the users are told apart by who asks, and on such a socket nobody can tell.
-func checkConcurrentProfilesTransport(network string) error {
-	if concurrentProfiles && network == "tcp" {
-		return fmt.Errorf("concurrent profiles need a unix socket to tell the callers apart, not %s: reinstall the service with --daemon-addr unix:///var/run/netbird.sock", daemonAddr)
-	}
-	return nil
-}
