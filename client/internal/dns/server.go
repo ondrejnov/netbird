@@ -859,6 +859,7 @@ func (s *DefaultServer) registerFallback() {
 		log.Errorf("failed to create upstream resolver for original nameservers: %v", err)
 		return
 	}
+	handler.mtu = s.wgInterface.MTU()
 	handler.selectedRoutes = s.selectedRoutes
 	handler.addRace(servers)
 
@@ -966,6 +967,7 @@ func (s *DefaultServer) buildMergedDomainHandler(domainGroup nsGroupsByDomain, p
 		return nil, fmt.Errorf("create upstream resolver: %v", err)
 	}
 	handler.selectedRoutes = s.selectedRoutes
+	handler.mtu = s.wgInterface.MTU()
 
 	for _, nsGroup := range domainGroup.groups {
 		servers := s.filterNameServers(nsGroup.NameServers)

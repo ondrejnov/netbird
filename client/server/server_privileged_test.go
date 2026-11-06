@@ -150,6 +150,14 @@ func (m *mockServer) Login(ctx context.Context, req *mgmtProto.EncryptedMessage)
 
 func startManagement(t *testing.T, signalAddr, storeFile string, counter *int) (*grpc.Server, string, error) {
 	t.Helper()
+	s, addr, _, err := startManagementWithAccounts(t, signalAddr, storeFile, counter)
+	return s, addr, err
+}
+
+// startManagementWithAccounts also returns the account manager, for a test that changes what
+// Management tells its peers.
+func startManagementWithAccounts(t *testing.T, signalAddr, storeFile string, counter *int) (*grpc.Server, string, *server.DefaultAccountManager, error) {
+	t.Helper()
 	dataDir := t.TempDir()
 
 	config := &config.Config{
@@ -165,18 +173,18 @@ func startManagement(t *testing.T, signalAddr, storeFile string, counter *int) (
 
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	s := grpc.NewServer(grpc.KeepaliveEnforcementPolicy(kaep), grpc.KeepaliveParams(kasp))
 	store, cleanUp, err := store.NewTestStoreFromSQL(context.Background(), storeFile, config.Datadir)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	t.Cleanup(cleanUp)
 
 	eventStore := &activity.InMemoryEventStore{}
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 
 	ctrl := gomock.NewController(t)
@@ -191,7 +199,7 @@ func startManagement(t *testing.T, signalAddr, storeFile string, counter *int) (
 
 	cacheStore, err := nbcache.NewStore(context.Background(), 100*time.Millisecond, 300*time.Millisecond, 100)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 
 	ia, _ := validator.NewIntegratedValidator(context.Background(), peersManager, settingsManagerMock, eventStore, cacheStore)
@@ -208,6 +216,10 @@ func startManagement(t *testing.T, signalAddr, storeFile string, counter *int) (
 		GetExtraSettings(gomock.Any(), gomock.Any()).
 		Return(&types.ExtraSettings{}, nil).
 		AnyTimes()
+	settingsMockManager.EXPECT().
+		UpdateExtraSettings(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(false, nil).
+		AnyTimes()
 	groupsManager := groups.NewManagerMock()
 
 	requestBuffer := server.NewAccountRequestBuffer(context.Background(), store)
@@ -215,16 +227,16 @@ func startManagement(t *testing.T, signalAddr, storeFile string, counter *int) (
 	networkMapController := controller.NewController(context.Background(), store, metrics, peersUpdateManager, requestBuffer, server.MockIntegratedValidator{}, settingsMockManager, "netbird.selfhosted", manager.NewEphemeralManager(store, peersManager), config, nil)
 	accountManager, err := server.BuildManager(context.Background(), config, store, networkMapController, jobManager, nil, "", eventStore, nil, false, ia, metrics, settingsMockManager, permissionsManager, false, cacheStore, peerLiveness)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 
 	secretsManager, err := nbgrpc.NewTimeBasedAuthSecretsManager(peersUpdateManager, config.TURNConfig, config.Relay, settingsMockManager, groupsManager)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	mgmtServer, err := nbgrpc.NewServer(config, accountManager, settingsMockManager, jobManager, secretsManager, nil, nil, &server.MockIntegratedValidator{}, networkMapController, nil, nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	mock := &mockServer{
 		ManagementServiceServer: mgmtServer,
@@ -237,7 +249,7 @@ func startManagement(t *testing.T, signalAddr, storeFile string, counter *int) (
 		}
 	}()
 
-	return s, lis.Addr().String(), nil
+	return s, lis.Addr().String(), accountManager, nil
 }
 
 func startSignal(t *testing.T) (*grpc.Server, string, error) {

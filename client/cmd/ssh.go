@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/proto"
 	sshclient "github.com/netbirdio/netbird/client/ssh/client"
 	"github.com/netbirdio/netbird/client/ssh/detection"
 	sshproxy "github.com/netbirdio/netbird/client/ssh/proxy"
@@ -52,6 +53,7 @@ var (
 	skipCachedToken       bool
 	requestPTY            bool
 	sshNoBrowser          bool
+	sshProfile            string
 )
 
 var (
@@ -110,6 +112,7 @@ SSH Options:
   -t, --tty                            Force pseudo-terminal allocation
       --strict-host-key-checking       Enable strict host key checking (default: true)
   -o, --known-hosts string             Path to known_hosts file
+      --profile string                 Profile whose network to connect through (default: the focused one)
 
 Examples:
   netbird ssh peer-hostname
@@ -151,13 +154,18 @@ func sshFn(cmd *cobra.Command, args []string) error {
 
 	ctx := internal.CtxInitState(cmd.Context())
 
+	target, err := sshSession(ctx)
+	if err != nil {
+		return err
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	sshctx, cancel := context.WithCancel(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := runSSH(sshctx, host, cmd); err != nil {
+		if err := runSSH(sshctx, host, target.selector, cmd); err != nil {
 			errCh <- err
 		}
 		cancel()
@@ -214,6 +222,7 @@ func resetSSHGlobals() {
 	knownHostsFile = ""
 	identityFile = ""
 	sshNoBrowser = false
+	sshProfile = ""
 }
 
 // parseCustomSSHFlags extracts -L, -R flags and returns filtered args
@@ -389,6 +398,7 @@ type sshFlags struct {
 	IdentityFile          string
 	SkipCachedToken       bool
 	NoBrowser             bool
+	Profile               string
 	ConfigPath            string
 	LogLevel              string
 	LocalForwards         []string
@@ -422,6 +432,7 @@ func createSSHFlagSet() (*flag.FlagSet, *sshFlags) {
 	fs.StringVar(&flags.IdentityFile, "identity", "", "Path to SSH private key file")
 	fs.BoolVar(&flags.SkipCachedToken, "no-cache", false, "Skip cached JWT token and force fresh authentication")
 	fs.BoolVar(&flags.NoBrowser, "no-browser", defaultNoBrowser, noBrowserDesc)
+	fs.StringVar(&flags.Profile, sessionProfileFlag, "", sessionProfileDesc)
 
 	fs.StringVar(&flags.ConfigPath, "c", defaultConfigPath, "Netbird config file location")
 	fs.StringVar(&flags.ConfigPath, "config", defaultConfigPath, "Netbird config file location")
@@ -471,6 +482,7 @@ func validateSSHArgsWithoutFlagParsing(_ *cobra.Command, args []string) error {
 	identityFile = flags.IdentityFile
 	skipCachedToken = flags.SkipCachedToken
 	sshNoBrowser = flags.NoBrowser
+	sshProfile = flags.Profile
 
 	if flags.ConfigPath != getEnvOrDefault("CONFIG", configPath) {
 		configPath = flags.ConfigPath
@@ -522,7 +534,7 @@ func parseHostnameAndCommand(args []string) error {
 	return nil
 }
 
-func runSSH(ctx context.Context, addr string, cmd *cobra.Command) error {
+func runSSH(ctx context.Context, addr string, session *proto.SessionSelector, cmd *cobra.Command) error {
 	target := net.JoinHostPort(strings.Trim(addr, "[]"), strconv.Itoa(port))
 	c, err := sshclient.Dial(ctx, target, username, sshclient.DialOptions{
 		KnownHostsFile:     knownHostsFile,
@@ -531,6 +543,7 @@ func runSSH(ctx context.Context, addr string, cmd *cobra.Command) error {
 		SkipCachedToken:    skipCachedToken,
 		InsecureSkipVerify: !strictHostKeyChecking,
 		NoBrowser:          sshNoBrowser,
+		Session:            session,
 	})
 
 	if err != nil {
@@ -885,4 +898,24 @@ func sshDetectFn(cmd *cobra.Command, args []string) error {
 	cancel()
 	os.Exit(serverType.ExitCode())
 	return nil
+}
+
+// sshSession resolves the --profile of the ssh command, the zero target for the focused session.
+// The daemon is asked only when the flag is set, so that a plain ssh stays as it was.
+func sshSession(ctx context.Context) (sessionTarget, error) {
+	if sshProfile == "" {
+		return sessionTarget{}, nil
+	}
+
+	conn, err := DialClientGRPCServer(ctx, daemonAddr)
+	if err != nil {
+		return sessionTarget{}, fmt.Errorf("connect to daemon: %w", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			log.Debugf("close daemon connection: %v", err)
+		}
+	}()
+
+	return resolveSessionFlag(ctx, proto.NewDaemonServiceClient(conn), sshProfile)
 }

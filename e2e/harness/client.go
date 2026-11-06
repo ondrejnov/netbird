@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -39,6 +40,7 @@ type Client struct {
 // clientOptions is what the ClientOption values assemble.
 type clientOptions struct {
 	name string
+	env  map[string]string
 }
 
 // ClientOption adjusts how StartClient runs the agent.
@@ -53,6 +55,31 @@ type ClientOption func(*clientOptions)
 // is shared, and two containers cannot hold the same alias on one network.
 func WithClientName(name string) ClientOption {
 	return func(o *clientOptions) { o.name = name }
+}
+
+// WithClientEnv adds environment variables to the agent's container, overriding the
+// defaults on a key collision.
+func WithClientEnv(env map[string]string) ClientOption {
+	return func(o *clientOptions) {
+		if o.env == nil {
+			o.env = map[string]string{}
+		}
+		maps.Copy(o.env, env)
+	}
+}
+
+// clientEnv is the environment of an agent joining the server at managementURL.
+func clientEnv(managementURL, setupKey string, o clientOptions) map[string]string {
+	env := map[string]string{
+		"NB_MANAGEMENT_URL": managementURL,
+		"NB_SETUP_KEY":      setupKey,
+		"NB_LOG_LEVEL":      "info",
+		// Match the proxy: the combined relay is WebSocket-only, so the
+		// client must use WS transport to keep a stable relay link to it.
+		"NB_RELAY_TRANSPORT": "ws",
+	}
+	maps.Copy(env, o.env)
+	return env
 }
 
 // StartClient builds the client image and runs it on the combined server's
@@ -78,14 +105,7 @@ func StartClient(ctx context.Context, c *Combined, setupKey string, opts ...Clie
 		Hostname:       o.name,
 		Networks:       []string{c.network.Name},
 		NetworkAliases: map[string][]string{c.network.Name: {o.name}},
-		Env: map[string]string{
-			"NB_MANAGEMENT_URL": combinedExposedURL,
-			"NB_SETUP_KEY":      setupKey,
-			"NB_LOG_LEVEL":      "info",
-			// Match the proxy: the combined relay is WebSocket-only, so the
-			// client must use WS transport to keep a stable relay link to it.
-			"NB_RELAY_TRANSPORT": "ws",
-		},
+		Env:            clientEnv(c.exposedURL, setupKey, o),
 		HostConfigModifier: func(hc *container.HostConfig) {
 			hc.CapAdd = append(hc.CapAdd, "NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE")
 		},

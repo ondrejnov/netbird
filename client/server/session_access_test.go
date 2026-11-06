@@ -113,7 +113,7 @@ func TestSessionAccess_EveryRPCWithASelector(t *testing.T) {
 		{"alice", aliceCtx(), map[string]bool{"alice": true, "shared": true}},
 		{"bob", bobCtx(), map[string]bool{"bob": true, "shared": true}},
 		{"root", rootCtx(), map[string]bool{"alice": true, "bob": true, "shared": true}},
-		{"unknown", unknownCtx(), map[string]bool{"shared": true}},
+		{"unknown", unknownCtx(), map[string]bool{}},
 	}
 	targets := map[string]profilemanager.SessionKey{"alice": f.alice, "bob": f.bob, "shared": f.shared}
 
@@ -230,12 +230,20 @@ func TestSessionAccess_NoSelectorFollowsTheFocus(t *testing.T) {
 		f := newAccessFixture(t)
 		f.focus(t, f.shared)
 
-		for name, ctx := range map[string]context.Context{"bob": bobCtx(), "unknown": unknownCtx()} {
-			for rpc, call := range selectorRPCs(f.s, cancelledCopy(ctx), nil) {
-				t.Run(name+"/"+rpc, func(t *testing.T) {
-					assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "the default session is shared")
-				})
-			}
+		for rpc, call := range selectorRPCs(f.s, cancelledCopy(bobCtx()), nil) {
+			t.Run("bob/"+rpc, func(t *testing.T) {
+				assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "the default session is shared")
+			})
+		}
+		// A caller nobody can identify is not one of the users it is shared with.
+		for rpc, call := range selectorRPCs(f.s, cancelledCopy(unknownCtx()), nil) {
+			t.Run("unknown/"+rpc, func(t *testing.T) {
+				if exempt[rpc] {
+					assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "should get through")
+					return
+				}
+				requireRefusedAsForeign(t, call())
+			})
 		}
 	})
 }
@@ -290,11 +298,11 @@ func TestSessionAccess_DownAll(t *testing.T) {
 		goes(t, f, f.shared)
 	})
 
-	t.Run("an unknown caller reaches only the shared session", func(t *testing.T) {
+	t.Run("an unknown caller reaches nothing", func(t *testing.T) {
 		f := start(t)
 		_, err := f.s.Down(unknownCtx(), &proto.DownRequest{All: true})
-		require.NoError(t, err)
-		goes(t, f, f.shared)
+		require.ErrorIs(t, err, ErrServiceNotUp)
+		stays(t, f, f.shared)
 		stays(t, f, f.alice)
 		stays(t, f, f.bob)
 	})
@@ -319,7 +327,7 @@ func TestSessionAccess_StatusListsWhatTheCallerMayRead(t *testing.T) {
 	}{
 		"alice":   {aliceCtx(), []string{string(f.alice.Profile), profilemanager.DefaultProfileName}},
 		"bob":     {bobCtx(), []string{string(f.bob.Profile), profilemanager.DefaultProfileName}},
-		"unknown": {unknownCtx(), []string{profilemanager.DefaultProfileName}},
+		"unknown": {unknownCtx(), nil},
 		"root":    {rootCtx(), []string{string(f.first.Profile), string(f.alice.Profile), string(f.bob.Profile), profilemanager.DefaultProfileName}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -398,7 +406,7 @@ func TestSessionAccess_Up(t *testing.T) {
 		assert.Equal(t, 1, f.runCount(f.bob))
 	})
 
-	t.Run("an unknown caller reaches only the shared session", func(t *testing.T) {
+	t.Run("an unknown caller reaches nothing", func(t *testing.T) {
 		f := newAccessFixture(t)
 		profile, username := name(f.alice)
 		_, err := f.s.Up(unknownCtx(), &proto.UpRequest{ProfileName: profile, Username: username, Async: true})
@@ -406,8 +414,8 @@ func TestSessionAccess_Up(t *testing.T) {
 
 		defaultName := profilemanager.DefaultProfileName
 		_, err = f.s.Up(unknownCtx(), &proto.UpRequest{ProfileName: &defaultName})
-		require.NoError(t, err)
-		assert.Equal(t, 1, f.runCount(f.shared))
+		requireRefusedAsForeign(t, err)
+		assert.Zero(t, f.runCount(f.shared))
 	})
 
 	t.Run("root starts anyone's session", func(t *testing.T) {
@@ -1108,4 +1116,206 @@ func (c *capturingEventStream) saw(message string) bool {
 		}
 	}
 	return false
+}
+
+// The names of the profiles of a user are metadata of that user, and a change writes into their
+// directory as root. A username in the request says which directory is meant, not who is asking.
+func TestSessionAccess_ProfileRPCs(t *testing.T) {
+	calls := func(f *accessFixture, ctx context.Context, username string) map[string]func() error {
+		return map[string]func() error{
+			"ListProfiles": func() error {
+				_, err := f.s.ListProfiles(ctx, &proto.ListProfilesRequest{Username: username})
+				return err
+			},
+			"AddProfile": func() error {
+				_, err := f.s.AddProfile(ctx, &proto.AddProfileRequest{ProfileName: "added", Username: username})
+				return err
+			},
+			"RenameProfile": func() error {
+				_, err := f.s.RenameProfile(ctx, &proto.RenameProfileRequest{Handle: string(f.second.Profile), Username: username, NewProfileName: "renamed"})
+				return err
+			},
+		}
+	}
+
+	f := newAccessFixture(t)
+	for name, ctx := range map[string]context.Context{"bob": bobCtx(), "unknown": unknownCtx()} {
+		for rpc, call := range calls(f, ctx, "alice") {
+			t.Run(name+"/"+rpc+" of alice", func(t *testing.T) {
+				requireRefusedAsForeign(t, call())
+			})
+		}
+	}
+	listed, err := f.s.ListProfiles(aliceCtx(), &proto.ListProfilesRequest{Username: "alice"})
+	require.NoError(t, err, "alice lists her own profiles")
+	for _, profile := range listed.GetProfiles() {
+		assert.NotEqual(t, "added", profile.GetName(), "a refused AddProfile must not create the profile")
+		assert.NotEqual(t, "renamed", profile.GetName(), "a refused RenameProfile must not rename the profile")
+	}
+
+	for name, ctx := range map[string]context.Context{"alice": aliceCtx(), "root": rootCtx()} {
+		t.Run(name+" gets through", func(t *testing.T) {
+			f := newAccessFixture(t)
+			for rpc, call := range calls(f, ctx, "alice") {
+				assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "%s of alice should get through", rpc)
+			}
+		})
+	}
+}
+
+// Which profile the focus is on says what another user is connected to.
+func TestSessionAccess_GetActiveProfile(t *testing.T) {
+	f := newAccessFixture(t)
+	f.focus(t, f.alice)
+
+	for name, ctx := range map[string]context.Context{"bob": bobCtx(), "unknown": unknownCtx()} {
+		resp, err := f.s.GetActiveProfile(ctx, &proto.GetActiveProfileRequest{})
+		requireRefusedAsForeign(t, err, name)
+		assert.Nil(t, resp, "%s must not get the profile of alice", name)
+	}
+	for name, ctx := range map[string]context.Context{"alice": aliceCtx(), "root": rootCtx()} {
+		resp, err := f.s.GetActiveProfile(ctx, &proto.GetActiveProfileRequest{})
+		require.NoError(t, err, name)
+		assert.Equal(t, string(f.alice.Profile), resp.GetId(), "%s should read the focus", name)
+	}
+
+	f.focus(t, f.shared)
+	_, err := f.s.GetActiveProfile(bobCtx(), &proto.GetActiveProfileRequest{})
+	assert.NoError(t, err, "the shared session may be read by anyone")
+	_, err = f.s.GetActiveProfile(unknownCtx(), &proto.GetActiveProfileRequest{})
+	requireRefusedAsForeign(t, err, "a caller nobody can identify is not one of the users it is shared with")
+}
+
+// Without the gate nothing asks who is calling (I1).
+func TestProfileRPCs_WithoutTheGateIgnoreTheIdentity(t *testing.T) {
+	s, _, _, username, _ := setupServerWithProfile(t)
+	require.False(t, s.concurrentProfiles)
+
+	for name, caller := range map[string]context.Context{"another user": bobCtx(), "unknown": unknownCtx()} {
+		_, err := s.ListProfiles(caller, &proto.ListProfilesRequest{Username: username})
+		assert.NoError(t, err, "%s lists the profiles as before", name)
+		_, err = s.GetActiveProfile(caller, &proto.GetActiveProfileRequest{})
+		assert.NoError(t, err, "%s reads the active profile as before", name)
+		_, err = s.AddProfile(caller, &proto.AddProfileRequest{ProfileName: "added " + name, Username: username})
+		assert.NoError(t, err, "%s adds a profile as before", name)
+	}
+}
+
+// The directory of a user comes from the sanitized name and ownership goes by the account, so that
+// john.doe and johndoe would have different sessions on the same files: keys, state and all.
+func TestSessionAccess_SharedDirectoryBelongsToNobody(t *testing.T) {
+	const (
+		dottedUID uint32 = 20011
+		cleanUID  uint32 = 20012
+	)
+	dotted := ctxWithIdentity(ipcauth.Identity{UID: dottedUID, GID: dottedUID})
+	clean := ctxWithIdentity(ipcauth.Identity{UID: cleanUID, GID: cleanUID})
+
+	setup := func(t *testing.T, accounts []hostAccount, accountsErr error) *accessFixture {
+		t.Helper()
+		f := newAccessFixture(t)
+		f.s.lookupUIDFn = func(username string) (uint32, error) {
+			for _, account := range accounts {
+				if account.name == username {
+					return account.uid, nil
+				}
+			}
+			return 0, user.UnknownUserError(username)
+		}
+		f.s.accountsFn = func() ([]hostAccount, error) { return accounts, accountsErr }
+		return f
+	}
+
+	both := []hostAccount{{name: "john.doe", uid: dottedUID}, {name: "johndoe", uid: cleanUID}}
+
+	t.Run("two accounts on one directory reach neither", func(t *testing.T) {
+		f := setup(t, both, nil)
+		for name, ctx := range map[string]context.Context{"john.doe": dotted, "johndoe": clean} {
+			profile, username := string(f.second.Profile), name
+			_, err := f.s.GetConfig(cancelledCopy(ctx), &proto.GetConfigRequest{ProfileName: profile, Username: username})
+			requireRefusedAsForeign(t, err, "GetConfig of %s", name)
+			_, err = f.s.Up(cancelledCopy(ctx), &proto.UpRequest{ProfileName: &profile, Username: &username, Async: true})
+			requireRefusedAsForeign(t, err, "Up of %s", name)
+			_, err = f.s.ListProfiles(ctx, &proto.ListProfilesRequest{Username: username})
+			requireRefusedAsForeign(t, err, "ListProfiles of %s", name)
+			_, err = f.s.RemoveProfile(cancelledCopy(ctx), &proto.RemoveProfileRequest{ProfileName: profile, Username: username})
+			requireRefusedAsForeign(t, err, "RemoveProfile of %s", name)
+		}
+	})
+
+	t.Run("a name the directory cannot hold reaches nothing alone either", func(t *testing.T) {
+		f := setup(t, both[:1], nil)
+		_, err := f.s.ListProfiles(dotted, &proto.ListProfilesRequest{Username: "john.doe"})
+		requireRefusedAsForeign(t, err)
+	})
+
+	t.Run("a clean name alone has its directory", func(t *testing.T) {
+		f := setup(t, both[1:], nil)
+		_, err := f.s.ListProfiles(clean, &proto.ListProfilesRequest{Username: "johndoe"})
+		assert.NoError(t, err)
+	})
+
+	t.Run("an alias of the same account shares nothing with anyone", func(t *testing.T) {
+		f := setup(t, []hostAccount{{name: "john.doe", uid: cleanUID}, {name: "johndoe", uid: cleanUID}}, nil)
+		_, err := f.s.ListProfiles(clean, &proto.ListProfilesRequest{Username: "johndoe"})
+		assert.NoError(t, err)
+	})
+
+	t.Run("the accounts cannot be read", func(t *testing.T) {
+		f := setup(t, both[1:], errors.New("the file is gone wrong"))
+		_, err := f.s.ListProfiles(clean, &proto.ListProfilesRequest{Username: "johndoe"})
+		requireRefusedAsForeign(t, err, "not knowing who else uses the directory means it is not the caller's (I6)")
+	})
+
+	t.Run("root reaches the directory whatever it is called", func(t *testing.T) {
+		f := setup(t, both, nil)
+		_, err := f.s.ListProfiles(rootCtx(), &proto.ListProfilesRequest{Username: "john.doe"})
+		assert.NoError(t, err)
+	})
+}
+
+// A stream of a session with a selector stays there whatever happens to the focus. The profile
+// another user moves the focus to is none of its business, and neither are the other changes to
+// the list of profiles.
+func TestProfileListEvent_NamesNoProfileWithTheGate(t *testing.T) {
+	f := newAccessFixture(t)
+	f.focus(t, f.alice)
+
+	ctx, cancel := context.WithCancel(aliceCtx())
+	t.Cleanup(cancel)
+	stream := &capturingEventStream{fakeServerStream: fakeServerStream[proto.SystemEvent]{ctx: ctx}}
+	go func() { _ = f.s.SubscribeEvents(&proto.SubscribeRequest{Session: selectorOf(f.alice)}, stream) }()
+	require.Eventually(t, func() bool { return stream.count() > 0 }, 5*time.Second, 10*time.Millisecond, "the stream should start")
+
+	profile, username := string(f.bob.Profile), f.bob.Username
+	_, err := f.s.SwitchProfile(bobCtx(), &proto.SwitchProfileRequest{ProfileName: &profile, Username: &username})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return stream.saw("Profile list changed") }, 5*time.Second, 10*time.Millisecond, "the list changed, which is what the event is for")
+	assert.False(t, stream.sawProfile(profile), "the event must not name the profile of bob")
+}
+
+// netbird ssh and its proxy fix the session of a connection by naming the focus they were told about.
+// The name has to come back to the same session.
+func TestSelectorOfTheActiveProfileNamesTheFocusedSession(t *testing.T) {
+	f := newAccessFixture(t)
+	for _, tc := range []struct {
+		name string
+		key  profilemanager.SessionKey
+	}{
+		{name: "the session of the caller", key: f.alice},
+		{name: "the shared session", key: f.shared},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.focus(t, tc.key)
+
+			active, err := f.s.GetActiveProfile(aliceCtx(), &proto.GetActiveProfileRequest{})
+			require.NoError(t, err)
+			ss, err := f.s.checkSessionSelector(aliceCtx(), &proto.SessionSelector{Profile: active.GetId(), Username: active.GetUsername()})
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.key.Profile, ss.key.Profile, "the selector should name the focused session")
+			assert.Same(t, f.s.focusedSession(), ss, "the selector should reach the focused session")
+		})
+	}
 }

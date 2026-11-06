@@ -70,6 +70,7 @@ func newSessionsFixtureInMode(t *testing.T) *sessionsFixture {
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)
+	s.localMetrics = s.newLocalMetrics(rootCtx)
 	t.Cleanup(cancelRoot)
 
 	dir := filepath.Dir(cfgPath)
@@ -672,6 +673,8 @@ func TestFailedIsolationCheckRefusesTheSession(t *testing.T) {
 		t.Run(backend.name, func(t *testing.T) {
 			backend.setup(t)
 			f := newSessionsFixture(t)
+			// The rule has to stay until the check after the engine finds it.
+			f.s.host.SetIsolationCheckInterval(time.Hour)
 
 			upProfile(t, f.ctx, f.s, f.work, f.username)
 			work := f.session(t, f.work)

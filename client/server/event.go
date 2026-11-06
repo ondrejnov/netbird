@@ -21,7 +21,7 @@ func (s *Server) SubscribeEvents(req *proto.SubscribeRequest, stream proto.Daemo
 	}()
 
 	log.Debug("client subscribed to events")
-	s.startUpdateManagerForGUI()
+	s.startUpdateManagerForGUI(ss)
 
 	// Replay the current log level to this subscriber so a freshly-connected UI
 	// learns it even when the daemon was already started with --log-level debug

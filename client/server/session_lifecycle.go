@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
@@ -27,6 +28,12 @@ func (s *Server) ensureSessionWatcher(ss *session) {
 	ss.sessionWatcher = internal.NewSessionWatcher(s.rootCtx, ss.statusRecorder)
 	ss.sessionWatcher.SetOnExpireListener(func() { s.onSessionExpire(ss) })
 }
+
+// previousRunWait bounds how long a new run of a session waits for the previous one to end. A Down
+// gives up on the end of a run after 5 s, and stopping an engine can take longer.
+const previousRunWait = time.Minute
+
+const errPreviousRunStopping = "the previous run of this session is still stopping, try again"
 
 // concurrentStart is what startConcurrent found about the focused session.
 type concurrentStart struct {
@@ -91,7 +98,7 @@ func (s *Server) prepareConcurrentStart() (concurrentStart, error) {
 
 	key := sessionKeyOf(activeProf.ID, activeProf.Username)
 	ss := s.focusedSession()
-	ss.key = key
+	ss.bindKey(key)
 	s.sessions[key] = ss
 
 	s.startDaemonServices(ss)
@@ -211,6 +218,9 @@ func (s *Server) launchSession(ctx context.Context, ss *session, launch sessionL
 	if err := s.refuseUnsupportedRuntime(); err != nil {
 		return err
 	}
+	if err := awaitPreviousRun(ctx, ss); err != nil {
+		return err
+	}
 
 	s.mutex.Lock()
 	if s.sessions[ss.key] != ss {
@@ -225,6 +235,10 @@ func (s *Server) launchSession(ctx context.Context, ss *session, launch sessionL
 	ss.setHostClaim(true)
 	s.mutex.Unlock()
 	defer ss.setHostClaim(false)
+
+	if err := s.refuseResidualBesideOthers(ss, others); err != nil {
+		return err
+	}
 
 	config, err := launch.resolve()
 	if err != nil {
@@ -268,6 +282,27 @@ func (s *Server) launchSession(ctx context.Context, ss *session, launch sessionL
 	return nil
 }
 
+// awaitPreviousRun waits for a run that was told to stop to end. Until it does its engine and its
+// firewall are still on the host, and the run takes the isolation of the session along when it ends
+// (I3, I4). The caller holds the lifecycle of ss, so that no other run can start in the meantime.
+func awaitPreviousRun(ctx context.Context, ss *session) error {
+	_, giveUp := ss.runChans()
+	if giveUp == nil {
+		return nil
+	}
+
+	timeout := time.NewTimer(previousRunWait)
+	defer timeout.Stop()
+	select {
+	case <-giveUp:
+		return nil
+	case <-ctx.Done():
+	case <-timeout.C:
+	}
+	log.Warnf("not starting profile %s: its previous run is still stopping", ss.key.Profile)
+	return gstatus.Error(codes.FailedPrecondition, errPreviousRunStopping)
+}
+
 // storeDesiredUp puts the session on record before it runs. A session the daemon would not
 // bring back after a crash is refused: that is a promise the record exists to keep.
 func (s *Server) storeDesiredUp(key profilemanager.SessionKey) error {
@@ -281,10 +316,10 @@ func (s *Server) storeDesiredUp(key profilemanager.SessionKey) error {
 }
 
 // restoreLaunchResidual cleans what the profile left on the host. Its state records host names
-// another session can be using by now, so it is left in the file while one runs.
+// another session can be using by now, so with one running there is nothing to do here: a state with
+// anything in it has refused the launch, see refuseResidualBesideOthers.
 func (s *Server) restoreLaunchResidual(ctx context.Context, ss *session, others int) {
 	if others > 0 {
-		log.Debugf("leaving the residual state of profile %s, another session is running", ss.key.Profile)
 		return
 	}
 	if err := s.restoreResidualAlone(ctx, ss.key); err != nil {

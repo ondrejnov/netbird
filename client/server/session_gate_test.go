@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,6 +60,7 @@ func prepareGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)
+	s.localMetrics = s.newLocalMetrics(rootCtx)
 
 	f := &gateFixture{
 		s:        s,
@@ -726,13 +728,9 @@ func TestGate_ResidualStaysWhileAnotherSessionRuns(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, residual(), "a login next to a running session must leave the state")
 
-	require.NoError(t, f.up(f.second))
+	requireCode(t, codes.FailedPrecondition, f.up(f.second))
 	assert.True(t, residual(), "an Up next to a running session must leave the state")
 
-	_, err = f.s.CleanState(f.ctx, &proto.CleanStateRequest{All: true})
-	requireCode(t, codes.FailedPrecondition, err)
-	_, err = f.s.Down(f.ctx, &proto.DownRequest{})
-	require.NoError(t, err)
 	_, err = f.s.CleanState(f.ctx, &proto.CleanStateRequest{All: true})
 	requireCode(t, codes.FailedPrecondition, err)
 	assert.True(t, residual(), "a state cleanup next to a running session must be refused")
@@ -1042,4 +1040,43 @@ func TestGate_StartRefusesACorruptSessionsFile(t *testing.T) {
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "not json", string(content), "a corrupt file stays for the operator")
+}
+
+// A Down gives up on the end of a run after 5 s, and the run can take much longer: stopping an engine
+// has its own timeouts. The next Up must not start a second run next to it, as the end of the first
+// takes the isolation of the session along.
+func TestGate_UpDoesNotOverlapARunStillStopping(t *testing.T) {
+	f := newGateFixture(t)
+
+	stopped := make(chan struct{})
+	release := sync.OnceFunc(func() { close(stopped) })
+	t.Cleanup(release)
+	var active, overlapped atomic.Int32
+	connect := f.s.connectFn
+	f.s.connectFn = func(ctx context.Context, ss *session, key profilemanager.SessionKey, config *profilemanager.Config, runningChan chan struct{}) error {
+		if active.Add(1) > 1 {
+			overlapped.Add(1)
+		}
+		defer active.Add(-1)
+		err := connect(ctx, ss, key, config, runningChan)
+		<-stopped
+		return err
+	}
+
+	require.NoError(t, f.up(f.first))
+	_, err := f.s.Down(f.ctx, &proto.DownRequest{})
+	require.NoError(t, err, "a Down gives up waiting for the run")
+
+	name, username := string(f.first.Profile), f.first.Username
+	ctx, cancel := context.WithTimeout(f.ctx, 200*time.Millisecond)
+	defer cancel()
+	_, err = f.s.Up(ctx, &proto.UpRequest{ProfileName: &name, Username: &username})
+	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "the Up should not start next to the stopping run: %v", err)
+	assert.Zero(t, overlapped.Load(), "two runs of one session must not overlap")
+	assert.Equal(t, 1, f.runCount(f.first), "the second run should not have started")
+
+	release()
+	require.NoError(t, f.up(f.first), "once the run has ended the Up goes through")
+	assert.Zero(t, overlapped.Load(), "two runs of one session must not overlap")
+	assert.Equal(t, 2, f.runCount(f.first), "the second run should start after the first ended")
 }

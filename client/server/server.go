@@ -105,8 +105,6 @@ type Server struct {
 
 	localMetrics *localmetrics.Manager
 
-	probeThrottle *probeThrottle
-
 	cpuProfileBuf *bytes.Buffer
 	cpuProfiling  bool
 
@@ -186,7 +184,6 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 		updateSettingsDisabled: updateSettingsDisabled,
 		captureEnabled:         captureEnabled,
 		networksDisabled:       networksDisabled,
-		probeThrottle:          newProbeThrottle(probeThreshold),
 		sessionSet:             newSessionSet(concurrentProfilesEnabled),
 	}
 	for _, opt := range opts {
@@ -197,7 +194,7 @@ func New(ctx context.Context, logFile string, configFile string, profilesDisable
 	s.sleepHandler = sleephandler.New(agent)
 	s.startSleepDetector()
 
-	s.localMetrics = localmetrics.NewManager(ctx, s.focusedSession().statusRecorder, s.clientMetricsGatherer)
+	s.localMetrics = s.newLocalMetrics(ctx)
 
 	return s
 }
@@ -367,6 +364,7 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, ss *session, key prof
 	if profileConfig.DisableAutoConnect {
 		if err := s.connect(ctx, ss, key, profileConfig, runningChan); err != nil {
 			log.Debugf("run client connection exited with error: %v", err)
+			noteRefusedRun(ss, err)
 		}
 		log.Tracef("client connection exited")
 		return
@@ -406,6 +404,7 @@ func (s *Server) connectWithRetryRuns(ctx context.Context, ss *session, key prof
 				return backoff.Permanent(err)
 			}
 			if errors.Is(err, internal.ErrSessionRefused) {
+				noteRefusedRun(ss, err)
 				return backoff.Permanent(err)
 			}
 			log.Debugf("run client connection exited with error: %v. Will retry in the background", err)
@@ -436,7 +435,7 @@ func (s *Server) isLoginRequired(ctx context.Context, config *profilemanager.Con
 		return s.isLoginRequiredFn(ctx, config)
 	}
 
-	authClient, err := auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config)
+	authClient, err := s.newAuth(ctx, config)
 	if err != nil {
 		log.Errorf("failed to create auth client: %v", err)
 		return false, err
@@ -451,7 +450,7 @@ func (s *Server) isLoginRequired(ctx context.Context, config *profilemanager.Con
 // StatusLoginFailed for every other failure, so callers can tell an
 // authentication decision apart from a login that never got made.
 func (s *Server) loginAttempt(ctx context.Context, config *profilemanager.Config, setupKey, jwtToken string) (internal.StatusType, error) {
-	authClient, err := auth.NewAuth(ctx, config.PrivateKey, config.ManagementURL, config)
+	authClient, err := s.newAuth(ctx, config)
 	if err != nil {
 		log.Errorf("failed to create auth client: %v", err)
 		return internal.StatusLoginFailed, err
@@ -533,6 +532,8 @@ func (s *Server) SetConfig(callerCtx context.Context, msg *proto.SetConfigReques
 		log.Errorf("failed to update profile config: %v", err)
 		return nil, fmt.Errorf("failed to update profile config: %w", err)
 	}
+
+	s.adoptStoredConfigLocked(config.ConfigPath, updatedConf)
 
 	if activeProf, err := s.profileManager.GetActiveProfileState(); err == nil {
 		if activePath, err := activeProf.FilePath(); err == nil && activePath == config.ConfigPath {
@@ -1239,6 +1240,9 @@ func (s *Server) waitForUp(callerCtx context.Context, ss *session) (*proto.UpRes
 
 	select {
 	case <-giveUpChan:
+		if err := refusalError(ss); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("client gave up to connect")
 	case <-runningChan:
 		ss.isSessionActive.Store(true)
@@ -2577,7 +2581,7 @@ func (s *Server) runProbes(ctx context.Context, ss *session, waitForProbeResult 
 		return
 	}
 
-	s.probeThrottle.Run(ctx, engine, ss.statusRecorder, waitForProbeResult)
+	ss.probeThrottle.Run(ctx, engine, ss.statusRecorder, waitForProbeResult)
 }
 
 // GetConfig of the daemon.
@@ -2697,6 +2701,10 @@ func (s *Server) GetConfig(ctx context.Context, req *proto.GetConfigRequest) (*p
 
 // AddProfile adds a new profile to the daemon.
 func (s *Server) AddProfile(ctx context.Context, msg *proto.AddProfileRequest) (*proto.AddProfileResponse, error) {
+	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2720,6 +2728,10 @@ func (s *Server) AddProfile(ctx context.Context, msg *proto.AddProfileRequest) (
 }
 
 func (s *Server) RenameProfile(ctx context.Context, msg *proto.RenameProfileRequest) (*proto.RenameProfileResponse, error) {
+	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2812,7 +2824,7 @@ func (s *Server) publishProfileListChangedOn(ss *session, profileName string) {
 		proto.SystemEvent_SYSTEM,
 		"Profile list changed",
 		"",
-		map[string]string{proto.MetadataKindKey: proto.MetadataKindProfileListChanged, proto.MetadataProfileKey: profileName},
+		s.profileListChangedMetadata(profileName),
 	)
 }
 
@@ -2837,6 +2849,10 @@ func (s *Server) publishLogLevelChanged(level string) {
 
 // ListProfiles lists all profiles in the daemon.
 func (s *Server) ListProfiles(ctx context.Context, msg *proto.ListProfilesRequest) (*proto.ListProfilesResponse, error) {
+	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2875,6 +2891,9 @@ func (s *Server) GetActiveProfile(ctx context.Context, msg *proto.GetActiveProfi
 	if err != nil {
 		log.Errorf("failed to get active profile state: %v", err)
 		return nil, fmt.Errorf("failed to get active profile state: %w", err)
+	}
+	if err := s.authorizeActiveProfile(ctx, activeProfile); err != nil {
+		return nil, err
 	}
 
 	return &proto.GetActiveProfileResponse{
@@ -2948,10 +2967,10 @@ func (s *Server) connect(ctx context.Context, ss *session, key profilemanager.Se
 	}
 
 	log.Tracef("running client connection")
-	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(key)...)
-	if s.controlsUpdates(ss) {
-		client.SetUpdateManager(s.updateManager)
-	}
+	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(ss, key)...)
+	updateManager, releaseUpdates := s.claimUpdates(ss)
+	defer releaseUpdates()
+	client.SetUpdateManager(updateManager)
 	client.SetSyncResponsePersistence(ss.syncResponsePersistence())
 
 	ss.setClient(client)
@@ -3010,8 +3029,8 @@ func (s *Server) checkUpdateSettingsDisabled() bool {
 	return s.updateSettingsDisabled
 }
 
-func (s *Server) startUpdateManagerForGUI() {
-	if s.updateManager == nil {
+func (s *Server) startUpdateManagerForGUI(ss *session) {
+	if s.updateManager == nil || !s.controlsUpdates(ss) {
 		return
 	}
 	s.updateManager.Start(s.rootCtx)
