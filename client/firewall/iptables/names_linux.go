@@ -5,6 +5,8 @@ package iptables
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/netbirdio/netbird/client/internal/routemanager/ipfwdstate"
 )
 
 const (
@@ -20,7 +22,8 @@ const (
 type Option func(*config)
 
 type config struct {
-	slot uint
+	slot       uint
+	forwarding *ipfwdstate.HostState
 }
 
 // WithSlot makes the manager own the chains and ipsets of the given slot.
@@ -29,6 +32,14 @@ type config struct {
 func WithSlot(slot uint) Option {
 	return func(c *config) {
 		c.slot = slot
+	}
+}
+
+// WithHostForwarding makes the manager share the IP forwarding sysctls with the managers given the
+// same state. Closing the manager releases what it holds.
+func WithHostForwarding(host *ipfwdstate.HostState) Option {
+	return func(c *config) {
+		c.forwarding = host
 	}
 }
 

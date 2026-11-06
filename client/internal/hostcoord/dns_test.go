@@ -122,3 +122,75 @@ func TestDNSSession_BindsKeyAndForwards(t *testing.T) {
 	sessionB.WarnHostDNS(warning)
 	assert.Equal(t, []dns.HostDNSWarning{warning}, warnings, "the warning must reach the callback, and a missing one must be ignored")
 }
+
+func TestDNSOwners_ConflictFollowsTheClaims(t *testing.T) {
+	owners := NewDNSOwners()
+
+	require.NoError(t, owners.ClaimHostDNS(dnsSessionA))
+	assert.False(t, owners.InConflict(dnsSessionA), "the owner is in no conflict")
+	assert.False(t, owners.InConflict(dnsSessionB), "a session that asked for nothing is in no conflict")
+
+	require.ErrorIs(t, owners.ClaimHostDNS(dnsSessionB), ErrDNSHeld)
+	assert.True(t, owners.InConflict(dnsSessionB), "a refused claim is a conflict")
+	assert.False(t, owners.InConflict(dnsSessionA), "a refused claim is the problem of the one refused")
+
+	owners.ReleaseHostDNS(dnsSessionA)
+	assert.True(t, owners.InConflict(dnsSessionB), "a free resource is not handed over, and the session has not claimed it yet")
+
+	require.NoError(t, owners.ClaimHostDNS(dnsSessionB))
+	assert.False(t, owners.InConflict(dnsSessionB), "the claim went through")
+
+	require.NoError(t, owners.ClaimCatchAll(dnsSessionA))
+	require.ErrorIs(t, owners.ClaimCatchAll(dnsSessionB), ErrDNSHeld)
+	assert.True(t, owners.InConflict(dnsSessionB), "the catch-all counts as well")
+	owners.ReleaseCatchAll(dnsSessionB)
+	assert.False(t, owners.InConflict(dnsSessionB), "a session that stopped asking is in no conflict")
+
+	require.ErrorIs(t, owners.ClaimCatchAll(dnsSessionB), ErrDNSHeld)
+	owners.ForgetSession(dnsSessionB)
+	assert.False(t, owners.InConflict(dnsSessionB), "a stopped session is in no conflict")
+	owner, held := owners.HostDNSOwner()
+	assert.True(t, held, "forgetting a session must not free what it holds")
+	assert.Equal(t, dnsSessionB, owner)
+}
+
+func TestDNSOwners_SharedDomainWarnsBothSessionsOnce(t *testing.T) {
+	owners := NewDNSOwners()
+
+	warningsOf := func(log *[][]string) func(dns.HostDNSWarning) {
+		return func(w dns.HostDNSWarning) {
+			assert.Equal(t, dns.HostDNSDomainShared, w.Kind)
+			*log = append(*log, w.Domains)
+		}
+	}
+	var warnedA, warnedB [][]string
+	sessionA := owners.Session(dnsSessionA, nil, warningsOf(&warnedA))
+	sessionB := owners.Session(dnsSessionB, nil, warningsOf(&warnedB))
+
+	sessionA.ServeDomains([]string{"netbird.selfhosted", "a.test"})
+	sessionB.ServeDomains([]string{"b.test"})
+	assert.Empty(t, warnedA, "different domains are no conflict")
+	assert.Empty(t, warnedB, "different domains are no conflict")
+	assert.False(t, owners.InConflict(dnsSessionB), "different domains are no conflict")
+
+	sessionB.ServeDomains([]string{"b.test", "netbird.selfhosted"})
+	assert.Equal(t, [][]string{{"netbird.selfhosted"}}, warnedA, "the session that had the domain first is warned too")
+	assert.Equal(t, [][]string{{"netbird.selfhosted"}}, warnedB, "the session that came second is warned")
+	assert.True(t, owners.InConflict(dnsSessionA), "both sessions are in conflict")
+	assert.True(t, owners.InConflict(dnsSessionB), "both sessions are in conflict")
+
+	sessionA.ServeDomains([]string{"netbird.selfhosted", "a.test"})
+	sessionB.ServeDomains([]string{"b.test", "netbird.selfhosted"})
+	assert.Len(t, warnedA, 1, "an unchanged state must not warn again")
+	assert.Len(t, warnedB, 1, "an unchanged state must not warn again")
+
+	sessionB.ServeDomains([]string{"b.test"})
+	assert.False(t, owners.InConflict(dnsSessionA), "the domain is no longer shared")
+	assert.False(t, owners.InConflict(dnsSessionB), "the domain is no longer shared")
+
+	sessionB.ServeDomains([]string{"netbird.selfhosted"})
+	assert.Len(t, warnedB, 2, "sharing the domain again is new")
+
+	owners.ForgetSession(dnsSessionB)
+	assert.False(t, owners.InConflict(dnsSessionA), "a stopped session shares nothing")
+}

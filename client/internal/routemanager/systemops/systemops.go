@@ -97,6 +97,9 @@ type SysOps struct {
 	// otherOverlays lists the overlay prefixes of the other sessions. When nil, only the
 	// own overlay is refused.
 	otherOverlays overlayPrefixSource
+	// overlayRefusals holds the routes the session was warned about, see warnOverlayRouteRefused.
+	//nolint:unused // only used on Linux
+	overlayRefusals sync.Map
 	// originalSysctl stores the sysctl values from before this instance changed them.
 	//nolint:unused // only used on Linux
 	originalSysctl map[string]int

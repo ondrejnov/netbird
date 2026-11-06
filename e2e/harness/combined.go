@@ -31,6 +31,9 @@ const (
 	defaultCombinedImage = "netbird-combined:e2e"
 	combinedHTTPPort     = "8080/tcp"
 
+	// envWorkDir overrides the directory bind-mounted work dirs are created in.
+	envWorkDir = "NB_E2E_WORK_DIR"
+
 	// combinedAlias is the combined server's network alias AND the deployment
 	// domain. The working manual setup uses a single NETBIRD_DOMAIN for the
 	// management exposed address, the proxy domain, and the agent-network
@@ -54,6 +57,8 @@ type Combined struct {
 	network   *testcontainers.DockerNetwork
 	// BaseURL is the host-reachable management API root, e.g. http://127.0.0.1:51234.
 	BaseURL string
+	// exposedURL is the address peers reach this server at on its network.
+	exposedURL string
 	// PAT is the admin Personal Access Token minted via Bootstrap.
 	PAT string
 
@@ -65,6 +70,7 @@ type Combined struct {
 type combinedOptions struct {
 	geolocation bool
 	env         map[string]string
+	domain      string
 }
 
 // CombinedOption adjusts how StartCombined boots the server. The defaults suit a
@@ -93,6 +99,28 @@ func WithServerEnv(env map[string]string) CombinedOption {
 			o.env[k] = v
 		}
 	}
+}
+
+// WithDomain gives the server a deployment domain of its own in place of the
+// default one. Peers are told the domain as the address of management, signal and
+// relay, so an agent attached to the networks of two servers needs them to differ:
+// the same alias on both networks would resolve to either server. The proxy and the
+// nblink helpers expect the default domain.
+func WithDomain(domain string) CombinedOption {
+	return func(o *combinedOptions) { o.domain = domain }
+}
+
+// deploymentDomain is the deployment domain the options ask for.
+func (o combinedOptions) deploymentDomain() string {
+	if o.domain != "" {
+		return o.domain
+	}
+	return combinedAlias
+}
+
+// exposedURL is the address peers reach a server with this domain at.
+func exposedURL(domain string) string {
+	return "http://" + domain + ":8080"
 }
 
 // combinedEnv is the combined container's environment: setup-PAT enabled so the
@@ -139,13 +167,14 @@ func StartCombined(ctx context.Context, opts ...CombinedOption) (*Combined, erro
 
 	// Work dir under /tmp so Docker Desktop file sharing (which excludes
 	// macOS's /var/folders TMPDIR) can bind-mount it.
-	workDir, err := os.MkdirTemp("/tmp", "nb-e2e-combined-*")
+	workDir, err := os.MkdirTemp(workDirBase(), "nb-e2e-combined-*")
 	if err != nil {
 		_ = net.Remove(ctx)
 		return nil, fmt.Errorf("create work dir: %w", err)
 	}
 
-	cfg := fmt.Sprintf(combinedConfigYAML, combinedExposedURL, !o.geolocation, containerIssuer)
+	domain := o.deploymentDomain()
+	cfg := fmt.Sprintf(combinedConfigYAML, exposedURL(domain), !o.geolocation, containerIssuer)
 	if err := os.WriteFile(filepath.Join(workDir, "config.yaml"), []byte(cfg), 0o644); err != nil { //nolint:gosec // non-secret config, bind-mounted and read by the container
 		_ = net.Remove(ctx)
 		return nil, fmt.Errorf("write combined config: %w", err)
@@ -168,7 +197,7 @@ func StartCombined(ctx context.Context, opts ...CombinedOption) (*Combined, erro
 		Image:          combinedImage,
 		ExposedPorts:   []string{combinedHTTPPort},
 		Networks:       []string{net.Name},
-		NetworkAliases: map[string][]string{net.Name: {combinedAlias}},
+		NetworkAliases: map[string][]string{net.Name: {domain}},
 		Env:            combinedEnv(o),
 		Cmd:            []string{"--config", "/nb/config.yaml"},
 		HostConfigModifier: func(hc *container.HostConfig) {
@@ -203,11 +232,23 @@ func StartCombined(ctx context.Context, opts ...CombinedOption) (*Combined, erro
 	}
 
 	return &Combined{
-		container: c,
-		network:   net,
-		BaseURL:   fmt.Sprintf("http://%s:%s", host, mapped.Port()),
-		workDir:   workDir,
+		container:  c,
+		network:    net,
+		BaseURL:    fmt.Sprintf("http://%s:%s", host, mapped.Port()),
+		exposedURL: exposedURL(domain),
+		workDir:    workDir,
 	}, nil
+}
+
+// workDirBase is the directory bind-mounted work dirs are created in. A test process
+// in a container talking to the Docker of its host names the override, a directory
+// that has the same path in the container and on the host: the path of a bind mount
+// is resolved by the daemon, on the host.
+func workDirBase() string {
+	if dir := os.Getenv(envWorkDir); dir != "" {
+		return dir
+	}
+	return "/tmp"
 }
 
 // resolveImage returns the image to run for a component. By default it builds
@@ -330,6 +371,11 @@ func (c *Combined) Restart(ctx context.Context) error {
 		c.api = rest.New(c.BaseURL, c.PAT)
 	}
 	return nil
+}
+
+// ExposedURL returns the address peers reach management at on the server's network.
+func (c *Combined) ExposedURL() string {
+	return c.exposedURL
 }
 
 // NetworkName returns the Docker network the deployment runs on. Peers reach

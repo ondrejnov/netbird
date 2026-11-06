@@ -36,9 +36,9 @@ func TestLogin_ManagementUnreachableIsReturnedInsteadOfDemandingSSO(t *testing.T
 	require.ErrorIs(t, err, unreachable, "the transport failure was replaced by something else")
 	require.Nil(t, resp, "a failed login must not answer with a login response")
 	require.Equal(t, 1, attempts)
-	require.Nil(t, s.session.oauthAuthFlow.flow, "the daemon started an SSO flow for a peer whose login was never decided")
+	require.Nil(t, s.focusedSession().oauthAuthFlow.flow, "the daemon started an SSO flow for a peer whose login was never decided")
 
-	status, err := s.session.state.Status()
+	status, err := s.focusedSession().state.Status()
 	require.NoError(t, err)
 	require.Equal(t, internal.StatusLoginFailed, status,
 		"a peer that could not reach Management is not waiting on a login")
@@ -61,7 +61,7 @@ func TestLogin_AuthRefusalStartsSSOFlow(t *testing.T) {
 	_, err := s.Login(userCtx(), &proto.LoginRequest{Username: &username})
 	require.Error(t, err)
 
-	status, stateErr := s.session.state.Status()
+	status, stateErr := s.focusedSession().state.Status()
 	require.NoError(t, stateErr)
 	require.Equal(t, internal.StatusLoginFailed, status,
 		"the SSO flow setup was never reached with the broken key")
@@ -86,9 +86,9 @@ func TestLogin_SetupKeyStillRunsWhenPeerNeedsLogin(t *testing.T) {
 	require.NoError(t, err, "the probe's outcome leaked out as the login result")
 	require.NotNil(t, resp)
 	require.Equal(t, []string{setupKey}, keysTried, "the setup key never reached the login attempt")
-	require.Nil(t, s.session.oauthAuthFlow.flow, "a setup-key login started an SSO flow")
+	require.Nil(t, s.focusedSession().oauthAuthFlow.flow, "a setup-key login started an SSO flow")
 
-	status, err := s.session.state.Status()
+	status, err := s.focusedSession().state.Status()
 	require.NoError(t, err)
 	require.Equal(t, internal.StatusIdle, status)
 }

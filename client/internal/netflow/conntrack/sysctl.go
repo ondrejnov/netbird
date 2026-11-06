@@ -82,8 +82,21 @@ func (a *Accounting) Release() error {
 	return nil
 }
 
+// WithAccounting makes the instance share nf_conntrack_acct with every other instance given the
+// same Accounting.
+func WithAccounting(accounting *Accounting) Option {
+	return func(c *ConnTrack) {
+		c.accounting = accounting
+	}
+}
+
 // EnableAccounting ensures that connection tracking accounting is enabled  in the kernel.
 func (c *ConnTrack) EnableAccounting() {
+	if c.accounting != nil {
+		c.acquireSharedAccounting()
+		return
+	}
+
 	// haven't restored yet
 	if c.sysctlModified {
 		return
@@ -99,6 +112,11 @@ func (c *ConnTrack) EnableAccounting() {
 
 // RestoreAccounting restores the connection tracking accounting setting to its original value.
 func (c *ConnTrack) RestoreAccounting() {
+	if c.accounting != nil {
+		c.releaseSharedAccounting()
+		return
+	}
+
 	if !c.sysctlModified {
 		return
 	}
@@ -109,6 +127,27 @@ func (c *ConnTrack) RestoreAccounting() {
 	}
 
 	c.sysctlModified = false
+}
+
+func (c *ConnTrack) acquireSharedAccounting() {
+	if c.accountingHeld {
+		return
+	}
+	if err := c.accounting.Acquire(); err != nil {
+		log.Warnf("Failed to enable conntrack accounting: %v", err)
+		return
+	}
+	c.accountingHeld = true
+}
+
+func (c *ConnTrack) releaseSharedAccounting() {
+	if !c.accountingHeld {
+		return
+	}
+	c.accountingHeld = false
+	if err := c.accounting.Release(); err != nil {
+		log.Warnf("Failed to restore conntrack accounting: %v", err)
+	}
 }
 
 // setSysctl sets a sysctl configuration and returns whether it was modified.

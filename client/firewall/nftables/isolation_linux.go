@@ -229,6 +229,32 @@ func (i *Isolation) RemoveAll() error {
 	return nil
 }
 
+// Restore installs the table again with all sessions, in one batch that replaces whatever is
+// there. It is for a table something else on the host removed or changed, see Verify.
+func (i *Isolation) Restore() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if len(i.members) == 0 {
+		return nil
+	}
+
+	conn := &nftables.Conn{}
+	sets := newIsolationSets()
+	if err := queueIsolationInstall(conn, sets); err != nil {
+		return fmt.Errorf("restore isolation: %w", err)
+	}
+	for name, member := range i.members {
+		if err := sets.queueMemberChange(conn, name, isolationMember{}, member, false); err != nil {
+			return fmt.Errorf("restore isolation of %s: %w", name, err)
+		}
+	}
+	if err := conn.Flush(); err != nil {
+		return fmt.Errorf("restore isolation: %w", err)
+	}
+	return nil
+}
+
 // Verify compares the kernel state with what the isolation should be and reports any
 // difference, including additions: a single accept in front of a drop in these chains opens
 // the host between sessions. Sessions must not keep running when it fails.

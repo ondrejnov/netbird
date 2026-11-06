@@ -73,7 +73,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 	validKey := cfgA.PrivateKey
 	cfgA.PrivateKey = "not-a-wireguard-key"
 	require.NoError(t, profilemanager.WriteOutConfig(cfgPathA, cfgA))
-	s.session.setConfig(profilemanager.SessionKey{Profile: profilemanager.ID(profileA), Username: username}, cfgA)
+	s.focusedSession().setConfig(profilemanager.SessionKey{Profile: profilemanager.ID(profileA), Username: username}, cfgA)
 
 	profileB := "profile-b"
 	_, err = profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
@@ -96,7 +96,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 		// before SwitchProfile replaces it. This goroutine is the only one reading
 		// the key, because no attempt is running.
 		s.mutex.Lock()
-		running := s.session.currentConfig()
+		running := s.focusedSession().currentConfig()
 		s.mutex.Unlock()
 		running.PrivateKey = validKey
 
@@ -110,7 +110,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 	require.NoError(t, err)
 
 	s.mutex.Lock()
-	running, gaveUp := s.session.runChans()
+	running, gaveUp := s.focusedSession().runChans()
 	s.mutex.Unlock()
 
 	select {
@@ -186,7 +186,7 @@ func startSessionOnDefault(t *testing.T) *switchedSession {
 
 	defaultKey := profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}
 	require.NoError(t, s.profileManager.SetActiveProfileState(&profilemanager.ActiveProfileState{ID: defaultKey.Profile}))
-	s.session.setConfig(defaultKey, cfgDefault)
+	s.focusedSession().setConfig(defaultKey, cfgDefault)
 
 	t.Cleanup(func() {
 		if _, err := s.Down(ctx, &proto.DownRequest{}); err != nil {
@@ -204,7 +204,7 @@ func startSessionOnDefault(t *testing.T) *switchedSession {
 
 func (st *switchedSession) waitForEngine(t *testing.T) {
 	t.Helper()
-	running, gaveUp := st.s.session.runChans()
+	running, gaveUp := st.s.focusedSession().runChans()
 	select {
 	case <-running:
 	case <-gaveUp:
@@ -226,9 +226,9 @@ func (st *switchedSession) selectWork(t *testing.T) {
 
 func (st *switchedSession) requireRunsDefault(t *testing.T) {
 	t.Helper()
-	assert.Equal(t, st.mgmtAddrA, st.s.session.connectionConfig().ManagementURL.Host,
+	assert.Equal(t, st.mgmtAddrA, st.s.focusedSession().connectionConfig().ManagementURL.Host,
 		"the connection must keep the config of the default profile")
-	key, running := st.s.session.runningKey()
+	key, running := st.s.focusedSession().runningKey()
 	assert.True(t, running, "the session must run")
 	assert.Equal(t, profilemanager.ID(profilemanager.DefaultProfileName), key.Profile, "the run must stay on the default profile")
 
@@ -260,7 +260,7 @@ func TestMDMRestartAfterSwitchKeepsSelectionAndRefusesExtend(t *testing.T) {
 	require.NoError(t, st.s.onMDMPolicyChange(nil, nil))
 	st.waitForEngine(t)
 
-	key, _ := st.s.session.selectedConfig()
+	key, _ := st.s.focusedSession().selectedConfig()
 	assert.Equal(t, profilemanager.ID(st.work), key.Profile, "the restart must not move the selection")
 
 	ctx, cancel := context.WithTimeout(st.ctx, 10*time.Second)
@@ -292,17 +292,17 @@ func TestMDMRestartWithRunOverFollowsActiveProfile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, giveUp := s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
+	_, giveUp := s.focusedSession().beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
 	close(giveUp)
 
 	require.NoError(t, s.onMDMPolicyChange(nil, nil))
 	t.Cleanup(func() {
-		s.session.cancelAct()
-		_, restartedGiveUp := s.session.runChans()
+		s.focusedSession().cancelAct()
+		_, restartedGiveUp := s.focusedSession().runChans()
 		<-restartedGiveUp
 	})
 
-	key, running := s.session.runningKey()
+	key, running := s.focusedSession().runningKey()
 	assert.True(t, running, "the policy change must have started a new run")
 	assert.Equal(t, profilemanager.SessionKey{Profile: profilemanager.ID(activeProfile), Username: username}, key,
 		"the finished run must not decide the profile")
@@ -321,7 +321,7 @@ func TestExtendAuthSessionRefusedWhileAnotherProfileIsSelected(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "want the profile mismatch refusal, got %v", err)
-	_, _, pending := st.s.session.extendAuthSessionFlow.Get()
+	_, _, pending := st.s.focusedSession().extendAuthSessionFlow.Get()
 	assert.False(t, pending, "a refused request must not leave a flow behind")
 }
 

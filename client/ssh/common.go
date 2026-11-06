@@ -11,6 +11,9 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/netbirdio/netbird/client/proto"
 	"github.com/netbirdio/netbird/util"
@@ -46,6 +49,64 @@ func (l PeerKeyLookup) VerifySSHHostKey(peerAddress string, presentedKey []byte)
 		return ErrPeerNotFound
 	}
 	return VerifyHostKey(storedKey, presentedKey, peerAddress)
+}
+
+// FixSession decides which session of the daemon answers for one SSH connection. It also reports
+// whether the daemon has concurrent profiles, where a token and a host key are of one session each.
+// Without a named session the focus decides, and it can move between the questions of a connection,
+// so with the gate the focus is asked once and named from then on. A daemon too old to answer has no
+// gate. Not knowing the gate or the focus is an error: a token must not go out on a guess (I9).
+func FixSession(ctx context.Context, client proto.DaemonServiceClient, session *proto.SessionSelector) (*proto.SessionSelector, bool, error) {
+	features, err := client.GetFeatures(ctx, &proto.GetFeaturesRequest{})
+	if status.Code(err) == codes.Unimplemented {
+		return session, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get features: %w", err)
+	}
+	if !features.GetConcurrentProfilesEnabled() {
+		return session, false, nil
+	}
+	if session != nil {
+		return session, true, nil
+	}
+
+	active, err := client.GetActiveProfile(ctx, &proto.GetActiveProfileRequest{})
+	if err != nil {
+		return nil, false, fmt.Errorf("get the focused session: %w", err)
+	}
+	if active.GetId() == "" {
+		return nil, false, errors.New("get the focused session: the daemon named none")
+	}
+	return &proto.SessionSelector{Profile: active.GetId(), Username: active.GetUsername()}, true, nil
+}
+
+// ClientOfSession returns a client whose calls for a connection go to session, all of them.
+func ClientOfSession(client proto.DaemonServiceClient, session *proto.SessionSelector) proto.DaemonServiceClient {
+	if session == nil {
+		return client
+	}
+	return &sessionClient{DaemonServiceClient: client, session: session}
+}
+
+type sessionClient struct {
+	proto.DaemonServiceClient
+	session *proto.SessionSelector
+}
+
+func (c *sessionClient) GetPeerSSHHostKey(ctx context.Context, in *proto.GetPeerSSHHostKeyRequest, opts ...grpc.CallOption) (*proto.GetPeerSSHHostKeyResponse, error) {
+	in.Session = c.session
+	return c.DaemonServiceClient.GetPeerSSHHostKey(ctx, in, opts...)
+}
+
+func (c *sessionClient) RequestJWTAuth(ctx context.Context, in *proto.RequestJWTAuthRequest, opts ...grpc.CallOption) (*proto.RequestJWTAuthResponse, error) {
+	in.Session = c.session
+	return c.DaemonServiceClient.RequestJWTAuth(ctx, in, opts...)
+}
+
+func (c *sessionClient) WaitJWTToken(ctx context.Context, in *proto.WaitJWTTokenRequest, opts ...grpc.CallOption) (*proto.WaitJWTTokenResponse, error) {
+	in.Session = c.session
+	return c.DaemonServiceClient.WaitJWTToken(ctx, in, opts...)
 }
 
 // DaemonHostKeyVerifier implements HostKeyVerifier using the NetBird daemon

@@ -302,6 +302,7 @@ type Status struct {
 
 	eventMux     sync.RWMutex
 	eventStreams map[string]chan *proto.SystemEvent
+	eventProfile string
 	eventQueue   *EventQueue
 
 	// stateChangeStreams fan-out connection-state changes (connected /
@@ -1407,6 +1408,7 @@ func (d *Status) PublishEvent(
 	d.eventMux.Lock()
 	defer d.eventMux.Unlock()
 
+	event.ProfileId = d.eventProfile
 	d.eventQueue.Add(event)
 
 	for _, stream := range d.eventStreams {
@@ -1418,6 +1420,14 @@ func (d *Status) PublishEvent(
 	}
 
 	log.Debugf("event published: %v", event)
+}
+
+// SetEventProfile names the profile the events of this recorder belong to. A daemon running several
+// sessions has one recorder per session; without that the events name no profile.
+func (d *Status) SetEventProfile(profileID string) {
+	d.eventMux.Lock()
+	defer d.eventMux.Unlock()
+	d.eventProfile = profileID
 }
 
 // SubscribeToEvents returns a new event subscription

@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 
@@ -13,7 +14,7 @@ import (
 )
 
 // NewFirewall creates a firewall manager instance
-func NewFirewall(iface IFaceMapper, _ *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16) (firewall.Manager, error) {
+func NewFirewall(ctx context.Context, iface IFaceMapper, _ *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16) (firewall.Manager, error) {
 	if !iface.IsUserspaceBind() {
 		return nil, fmt.Errorf("not implemented for this OS: %s", runtime.GOOS)
 	}
@@ -25,5 +26,6 @@ func NewFirewall(iface IFaceMapper, _ *statemanager.Manager, flowLogger nftypes.
 		FlowLogger:          flowLogger,
 		MTU:                 mtu,
 		InterfaceAllower:    interfaceAllower(iface, mtu),
+		TrustContext:        ctx,
 	})
 }

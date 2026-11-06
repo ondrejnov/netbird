@@ -16,15 +16,20 @@ import (
 // is slow the daemon drops extras (not blocks), and the next snapshot
 // the consumer pulls already reflects everything.
 func (s *Server) SubscribeStatus(req *proto.StatusRequest, stream proto.DaemonService_SubscribeStatusServer) error {
-	subID, ch := s.session.statusRecorder.SubscribeToStateChanges()
+	ss, err := s.checkOpenSelector(stream.Context(), req.GetSession())
+	if err != nil {
+		return err
+	}
+
+	subID, ch := ss.statusRecorder.SubscribeToStateChanges()
 	defer func() {
-		s.session.statusRecorder.UnsubscribeFromStateChanges(subID)
+		ss.statusRecorder.UnsubscribeFromStateChanges(subID)
 		log.Debug("client unsubscribed from status updates")
 	}()
 
 	log.Debug("client subscribed to status updates")
 
-	if err := s.sendStatusSnapshot(req, stream); err != nil {
+	if err := s.sendStatusSnapshot(ss, req, stream); err != nil {
 		return err
 	}
 
@@ -34,7 +39,12 @@ func (s *Server) SubscribeStatus(req *proto.StatusRequest, stream proto.DaemonSe
 			if !ok {
 				return nil
 			}
-			if err := s.sendStatusSnapshot(req, stream); err != nil {
+			if s.focusMovedFrom(ss, req.GetSession()) {
+				ss.statusRecorder.UnsubscribeFromStateChanges(subID)
+				ss = s.focusedSession()
+				subID, ch = ss.statusRecorder.SubscribeToStateChanges()
+			}
+			if err := s.sendStatusSnapshot(ss, req, stream); err != nil {
 				return err
 			}
 		case <-stream.Context().Done():
@@ -43,8 +53,8 @@ func (s *Server) SubscribeStatus(req *proto.StatusRequest, stream proto.DaemonSe
 	}
 }
 
-func (s *Server) sendStatusSnapshot(req *proto.StatusRequest, stream proto.DaemonService_SubscribeStatusServer) error {
-	resp, err := s.buildStatusResponse(stream.Context(), req)
+func (s *Server) sendStatusSnapshot(ss *session, req *proto.StatusRequest, stream proto.DaemonService_SubscribeStatusServer) error {
+	resp, err := s.buildStatusResponse(stream.Context(), ss, req)
 	if err != nil {
 		log.Warnf("build status snapshot for stream: %v", err)
 		return err

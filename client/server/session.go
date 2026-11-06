@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/auth"
@@ -11,15 +12,28 @@ import (
 	"github.com/netbirdio/netbird/util/capture"
 )
 
-// session is the state of one connection the daemon runs. The daemon still runs a
-// single session, owned by Server for its whole lifetime.
+// session is the state of one connection the daemon runs. Without the feature gate the
+// daemon has one, which follows the active profile, and with it one per profile.
 //
-// The lock order is guardedConfigMu, Server.mutex, session.mu. mu is a leaf: it guards
-// single reads and writes of the fields below, is never held across a call out of this
-// type, and session has no reference back to Server. It does not make a check followed
-// by an act atomic: those sequences stay under Server.mutex, as they always were.
+// The lock order is guardedConfigMu, session.lifecycle, Server.mutex, session.mu. mu is a
+// leaf: it guards single reads and writes of the fields below, is never held across a call
+// out of this type, and session has no reference back to Server. It does not make a check
+// followed by an act atomic: a sequence that starts or stops a run holds lifecycle, so that it
+// can release Server.mutex around the slow steps without blocking the other sessions.
 type session struct {
 	mu sync.Mutex
+
+	// key is the profile of the session when the feature gate is on, and the zero value
+	// otherwise. It is set before the session can be reached and never changes.
+	key profilemanager.SessionKey
+
+	// lifecycle is held by a sequence that starts or stops a run. A channel, so that an RPC
+	// can give up on it with its context. See lockLifecycle.
+	lifecycle chan struct{}
+
+	// hostClaim marks a run on its way up or a residual cleanup: nothing shows on the run
+	// fields yet, but the session is working on the host. See holdsHost.
+	hostClaim bool
 
 	actCancel context.CancelFunc
 	// actGeneration counts the replacements of actCancel, so that a restart can tell
@@ -66,6 +80,20 @@ type session struct {
 
 	oauthAuthFlow oauthAuthFlow
 
+	// forceAccountPrompt makes the next startSSOLogin build its flow with a
+	// forced account prompt. Armed when a login came back for an account other
+	// than the hinted one: that flow's browser is gone, so the correction has to
+	// ride on the user's next connect. Deliberately not persisted: a lost flag only
+	// costs one more mismatch round.
+	forceAccountPrompt bool
+
+	// isSessionActive records that the session reached the connected state, so that a
+	// later NeedsLogin reads as an expiry. It synchronizes itself.
+	isSessionActive atomic.Bool
+
+	// sessionWatcher notifies about the expiry of this session. Written under Server.mutex.
+	sessionWatcher *internal.SessionWatcher
+
 	// extendAuthSessionFlow holds the pending PKCE flow created by
 	// RequestExtendAuthSession until WaitExtendAuthSession resolves it. It is separate
 	// from oauthAuthFlow, which is reserved for the SSH JWT path, so a concurrent SSH
@@ -78,15 +106,90 @@ type session struct {
 
 	// activeCapture is the packet capture currently installed on the engine.
 	activeCapture *capture.Session
+
+	// bundleCapture is the capture destined for the debug bundle of this session. Guarded by
+	// Server.mutex.
+	bundleCapture *bundleCapture
+
+	// persistSyncResponse makes the clients of this session keep the latest sync response.
+	persistSyncResponse bool
+
+	// probeThrottle bounds the health probes of this session, which are its own: the probe of
+	// another session says nothing about its relays.
+	probeThrottle *probeThrottle
+
+	// refusal says why the most recent run was refused, until the session gets another chance or
+	// is taken down.
+	refusal *internal.SessionRefusal
 }
 
 func newSession() *session {
 	return &session{
+		lifecycle:             make(chan struct{}, 1),
 		statusRecorder:        peer.NewRecorder(""),
 		state:                 internal.NewContextState(),
 		extendAuthSessionFlow: auth.NewPendingFlow(),
 		jwtCache:              newJWTCache(),
+		persistSyncResponse:   true,
+		probeThrottle:         newProbeThrottle(probeThreshold),
 	}
+}
+
+// lockLifecycle takes the right to start or stop a run of this session. The caller must not
+// hold Server.mutex. It gives up with ctx.
+func (ss *session) lockLifecycle(ctx context.Context) error {
+	select {
+	case ss.lifecycle <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (ss *session) unlockLifecycle() {
+	<-ss.lifecycle
+}
+
+func (ss *session) syncResponsePersistence() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.persistSyncResponse
+}
+
+func (ss *session) setSyncResponsePersistence(enabled bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.persistSyncResponse = enabled
+}
+
+func (ss *session) setHostClaim(claim bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.hostClaim = claim
+}
+
+// holdsHost reports whether the session has or may still have something on the host, which
+// outlives the intent: after a Down the run still holds it until its goroutine ends. It stays
+// true across an MDM restart, for which the goroutine ends on the way to the next one.
+func (ss *session) holdsHost() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.hostClaim || ss.goroutineAliveLocked() || ss.restartKeepsRunLocked()
+}
+
+// takeAccountPrompt returns the account prompt flag and clears it.
+func (ss *session) takeAccountPrompt() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	prompt := ss.forceAccountPrompt
+	ss.forceAccountPrompt = false
+	return prompt
+}
+
+func (ss *session) armAccountPrompt() {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.forceAccountPrompt = true
 }
 
 // runContext returns the context of one attempt of this session, cancelled along with
@@ -132,6 +235,25 @@ func (ss *session) markClientDown() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.clientRunning = false
+	ss.refusal = nil
+}
+
+// recordRefusal reports false when the daemon no longer wants the session up, and a Down has
+// already said all there is to say about it.
+func (ss *session) recordRefusal(refusal internal.SessionRefusal) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if !ss.clientRunning {
+		return false
+	}
+	ss.refusal = &refusal
+	return true
+}
+
+func (ss *session) currentRefusal() *internal.SessionRefusal {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.refusal
 }
 
 // beginRun records the intent to be connected for the profile key with config and returns
@@ -142,6 +264,7 @@ func (ss *session) beginRun(key profilemanager.SessionKey, config *profilemanage
 	ss.runKey = key
 	ss.runConfig = config
 	ss.clientRunning = true
+	ss.refusal = nil
 	ss.clientRunningChan = make(chan struct{})
 	ss.clientGiveUpChan = make(chan struct{})
 	return ss.clientRunningChan, ss.clientGiveUpChan
@@ -378,4 +501,10 @@ func sameSessionProfile(a, b profilemanager.SessionKey) bool {
 		return false
 	}
 	return a.Profile == profilemanager.DefaultProfileName || a.Username == b.Username
+}
+
+// focusedSession returns the session an RPC without a selector acts on. A caller that uses
+// it more than once takes one snapshot, so it cannot mix the state of two sessions.
+func (s *Server) focusedSession() *session {
+	return s.focused.Load()
 }

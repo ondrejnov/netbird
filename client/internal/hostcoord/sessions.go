@@ -6,6 +6,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/netbirdio/netbird/client/firewall/uspfilter/common"
 )
 
 // SessionSource reports what the sessions of one daemon own, so an engine can keep
@@ -26,6 +29,8 @@ type sessionEntry struct {
 type Sessions struct {
 	mu      sync.Mutex
 	entries map[SessionKey]sessionEntry
+	// views is what the userspace filter reads for every packet, replaced on every change.
+	views atomic.Pointer[isolationViews]
 }
 
 // NewSessions returns an empty Sessions.
@@ -50,6 +55,7 @@ func (s *Sessions) Set(key SessionKey, iface string, prefixes ...netip.Prefix) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries[key] = sessionEntry{iface: iface, prefixes: masked}
+	s.rebuildViewsLocked()
 	return nil
 }
 
@@ -58,6 +64,7 @@ func (s *Sessions) Remove(key SessionKey) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.entries, key)
+	s.rebuildViewsLocked()
 }
 
 // SessionInterfaces returns the interface names of all sessions.
@@ -93,6 +100,55 @@ func (s *Sessions) OverlayPrefixesExcept(key SessionKey) []netip.Prefix {
 		}
 	}
 	return out
+}
+
+// IsolationSource returns what the userspace filter of the session key reads to keep its peers out
+// of the other sessions.
+func (s *Sessions) IsolationSource(key SessionKey) common.IsolationSource {
+	return sessionIsolationSource{sessions: s, key: key}
+}
+
+// isolationViews holds an immutable snapshot for each session, and one with all sessions for a
+// session that has no record yet.
+type isolationViews struct {
+	all    common.IsolationSnapshot
+	except map[SessionKey]common.IsolationSnapshot
+}
+
+func (s *Sessions) rebuildViewsLocked() {
+	views := &isolationViews{except: make(map[SessionKey]common.IsolationSnapshot, len(s.entries))}
+	for _, entry := range s.entries {
+		views.all.Interfaces = append(views.all.Interfaces, entry.iface)
+		views.all.Overlays = append(views.all.Overlays, entry.prefixes...)
+	}
+	for key := range s.entries {
+		var snapshot common.IsolationSnapshot
+		for other, entry := range s.entries {
+			if other != key {
+				snapshot.Interfaces = append(snapshot.Interfaces, entry.iface)
+				snapshot.Overlays = append(snapshot.Overlays, entry.prefixes...)
+			}
+		}
+		views.except[key] = snapshot
+	}
+	s.views.Store(views)
+}
+
+type sessionIsolationSource struct {
+	sessions *Sessions
+	key      SessionKey
+}
+
+// OtherSessions returns the interfaces and overlay prefixes of the other sessions.
+func (v sessionIsolationSource) OtherSessions() (common.IsolationSnapshot, error) {
+	views := v.sessions.views.Load()
+	if views == nil {
+		return common.IsolationSnapshot{}, nil
+	}
+	if snapshot, ok := views.except[v.key]; ok {
+		return snapshot, nil
+	}
+	return views.all, nil
 }
 
 func validateInterfaceName(name string) error {

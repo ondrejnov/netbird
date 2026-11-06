@@ -620,6 +620,8 @@ func fieldToGlobalVar(field string) string {
 		"DisableNetworks":       "networksDisabled",
 		"EnableJSONSocket":      "enableJSONSocket",
 		"ServiceEnvVars":        "serviceEnvVars",
+
+		"EnableConcurrentProfiles": "concurrentProfiles",
 	}
 	if v, ok := m[field]; ok {
 		return v
@@ -639,4 +641,27 @@ func TestEnvMapToSlice(t *testing.T) {
 func TestEnvMapToSlice_Empty(t *testing.T) {
 	s := envMapToSlice(map[string]string{})
 	assert.Empty(t, s)
+}
+
+func TestConcurrentProfilesFlagReachesTheService(t *testing.T) {
+	original := concurrentProfiles
+	t.Cleanup(func() { concurrentProfiles = original })
+
+	concurrentProfiles = false
+	assert.NotContains(t, buildServiceArguments(), "--enable-concurrent-profiles", "the gate is off by default")
+	assert.False(t, currentServiceParams().EnableConcurrentProfiles)
+
+	concurrentProfiles = true
+	assert.Contains(t, buildServiceArguments(), "--enable-concurrent-profiles")
+	saved := currentServiceParams()
+	assert.True(t, saved.EnableConcurrentProfiles)
+
+	concurrentProfiles = false
+	applyServiceParams(serviceCmd, saved)
+	assert.True(t, concurrentProfiles, "a reinstall keeps the saved gate")
+
+	require.NoError(t, serviceCmd.PersistentFlags().Set("enable-concurrent-profiles", "false"))
+	t.Cleanup(func() { serviceCmd.PersistentFlags().Lookup("enable-concurrent-profiles").Changed = false })
+	applyServiceParams(serviceCmd, saved)
+	assert.False(t, concurrentProfiles, "an explicit flag wins over the saved gate")
 }

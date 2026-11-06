@@ -77,6 +77,11 @@ func (bc *bundleCapture) cleanup() {
 // StartCapture streams a pcap or text packet capture over gRPC.
 // Gated by the --enable-capture service flag.
 func (s *Server) StartCapture(req *proto.StartCaptureRequest, stream proto.DaemonService_StartCaptureServer) error {
+	ss, err := s.checkSessionSelector(stream.Context(), req.GetSession())
+	if err != nil {
+		return err
+	}
+
 	if !s.captureEnabled {
 		return status.Error(codes.PermissionDenied,
 			"packet capture is disabled; reinstall or reconfigure the service with --enable-capture")
@@ -111,7 +116,7 @@ func (s *Server) StartCapture(req *proto.StartCaptureRequest, stream proto.Daemo
 		return status.Errorf(codes.Internal, "create capture session: %v", err)
 	}
 
-	engine, err := s.claimCapture(sess)
+	engine, err := s.claimCapture(ss, sess)
 	if err != nil {
 		sess.Stop()
 		pw.Close()
@@ -119,7 +124,7 @@ func (s *Server) StartCapture(req *proto.StartCaptureRequest, stream proto.Daemo
 	}
 
 	if err := engine.SetCapture(sess); err != nil {
-		s.releaseCapture(sess)
+		s.releaseCapture(ss, sess)
 		sess.Stop()
 		pw.Close()
 		return status.Errorf(codes.Internal, "set capture: %v", err)
@@ -129,7 +134,7 @@ func (s *Server) StartCapture(req *proto.StartCaptureRequest, stream proto.Daemo
 	// The client waits for this before printing the banner, so it must arrive
 	// before any packet data.
 	if err := stream.Send(&proto.CapturePacket{}); err != nil {
-		s.clearCaptureIfOwner(sess, engine)
+		s.clearCaptureIfOwner(ss, sess, engine)
 		sess.Stop()
 		pw.Close()
 		return status.Errorf(codes.Internal, "send initial message: %v", err)
@@ -146,7 +151,7 @@ func (s *Server) StartCapture(req *proto.StartCaptureRequest, stream proto.Daemo
 
 	go func() {
 		<-ctx.Done()
-		s.clearCaptureIfOwner(sess, engine)
+		s.clearCaptureIfOwner(ss, sess, engine)
 		sess.Stop()
 		pw.Close()
 	}()
@@ -184,18 +189,23 @@ func streamToGRPC(r io.Reader, stream proto.DaemonService_StartCaptureServer) er
 //
 // A timeout auto-stops the capture as a safety net if StopBundleCapture is
 // never called (e.g. CLI crash).
-func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCaptureRequest) (*proto.StartBundleCaptureResponse, error) {
+func (s *Server) StartBundleCapture(ctx context.Context, req *proto.StartBundleCaptureRequest) (*proto.StartBundleCaptureResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	s.stopBundleCaptureLocked()
-	s.cleanupBundleCapture()
+	s.stopBundleCaptureLocked(ss)
+	s.cleanupBundleCapture(ss)
 
-	if s.session.currentCapture() != nil {
+	if ss.currentCapture() != nil {
 		return nil, status.Error(codes.FailedPrecondition, "another capture is already running")
 	}
 
-	engine, err := s.getCaptureEngineLocked()
+	engine, err := s.getCaptureEngineLocked(ss)
 	if err != nil {
 		// Not fatal: kernel mode or not connected. Log and return success
 		// so the debug bundle still generates without capture data.
@@ -227,9 +237,9 @@ func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCap
 		log.Warnf("packet capture unavailable (no filtered device), skipping: %v", err)
 		return &proto.StartBundleCaptureResponse{}, nil
 	}
-	s.session.setCapture(sess)
+	ss.setCapture(sess)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	bc := &bundleCapture{
 		sess:   sess,
 		file:   f,
@@ -237,13 +247,13 @@ func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCap
 		cancel: cancel,
 	}
 
-	s.bundleCapture = bc
+	ss.bundleCapture = bc
 
 	go func() {
-		<-ctx.Done()
+		<-timeoutCtx.Done()
 		s.mutex.Lock()
-		if s.bundleCapture == bc {
-			s.stopBundleCaptureLocked()
+		if ss.bundleCapture == bc {
+			s.stopBundleCaptureLocked(ss)
 		} else {
 			bc.stop()
 		}
@@ -256,25 +266,30 @@ func (s *Server) StartBundleCapture(_ context.Context, req *proto.StartBundleCap
 }
 
 // StopBundleCapture stops the running bundle capture. Idempotent.
-func (s *Server) StopBundleCapture(_ context.Context, _ *proto.StopBundleCaptureRequest) (*proto.StopBundleCaptureResponse, error) {
+func (s *Server) StopBundleCapture(ctx context.Context, req *proto.StopBundleCaptureRequest) (*proto.StopBundleCaptureResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	s.stopBundleCaptureLocked()
+	s.stopBundleCaptureLocked(ss)
 	return &proto.StopBundleCaptureResponse{}, nil
 }
 
-// stopBundleCaptureLocked stops the bundle capture if running. Must hold s.mutex.
-func (s *Server) stopBundleCaptureLocked() {
-	if s.bundleCapture == nil {
+// stopBundleCaptureLocked stops the bundle capture of ss if running. Must hold s.mutex.
+func (s *Server) stopBundleCaptureLocked(ss *session) {
+	bc := ss.bundleCapture
+	if bc == nil {
 		return
 	}
-	bc := s.bundleCapture
-	if bc.engine != nil && s.session.currentCapture() == bc.sess {
+	if bc.engine != nil && ss.currentCapture() == bc.sess {
 		if err := bc.engine.SetCapture(nil); err != nil {
 			log.Debugf("clear bundle capture: %v", err)
 		}
-		s.session.setCapture(nil)
+		ss.setCapture(nil)
 	}
 	bc.stop()
 
@@ -283,68 +298,69 @@ func (s *Server) stopBundleCaptureLocked() {
 		stats.Packets, stats.Bytes, stats.Dropped)
 }
 
-// bundleCapturePath returns the temp file path if a capture has been taken,
-// stops any running capture, and returns "". Called from DebugBundle.
-// Must hold s.mutex.
-func (s *Server) bundleCapturePath() string {
-	if s.bundleCapture == nil {
-		return ""
+// takeBundleCaptureLocked stops any running capture of ss and hands it to the caller, who owns its
+// file from then on: the bundle that takes it reads the file without s.mutex, so the file must not
+// go away under it. Nil when ss has no capture. Must hold s.mutex.
+func (s *Server) takeBundleCaptureLocked(ss *session) *bundleCapture {
+	bc := ss.bundleCapture
+	if bc == nil {
+		return nil
 	}
-
-	s.bundleCapture.stop()
-	return s.bundleCapture.path()
+	bc.stop()
+	ss.bundleCapture = nil
+	return bc
 }
 
-// cleanupBundleCapture removes the temp file and clears state. Must hold s.mutex.
-func (s *Server) cleanupBundleCapture() {
-	if s.bundleCapture == nil {
+// cleanupBundleCapture removes the temp file of ss and clears its state. Must hold s.mutex.
+func (s *Server) cleanupBundleCapture(ss *session) {
+	if ss.bundleCapture == nil {
 		return
 	}
-	s.bundleCapture.cleanup()
-	s.bundleCapture = nil
+	ss.bundleCapture.cleanup()
+	ss.bundleCapture = nil
 }
 
 // claimCapture reserves the engine's capture slot for sess. Returns
 // FailedPrecondition if another capture is already active.
-func (s *Server) claimCapture(sess *capture.Session) (*internal.Engine, error) {
+func (s *Server) claimCapture(ss *session, sess *capture.Session) (*internal.Engine, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if s.session.currentCapture() != nil {
+	if ss.currentCapture() != nil {
 		return nil, status.Error(codes.FailedPrecondition, "another capture is already running")
 	}
-	engine, err := s.getCaptureEngineLocked()
+	engine, err := s.getCaptureEngineLocked(ss)
 	if err != nil {
 		return nil, err
 	}
-	s.session.setCapture(sess)
+	ss.setCapture(sess)
 	return engine, nil
 }
 
 // releaseCapture clears the active-capture owner if it still matches sess.
-func (s *Server) releaseCapture(sess *capture.Session) {
+func (s *Server) releaseCapture(ss *session, sess *capture.Session) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.session.currentCapture() == sess {
-		s.session.setCapture(nil)
+	if ss.currentCapture() == sess {
+		ss.setCapture(nil)
 	}
 }
 
 // clearCaptureIfOwner clears engine's capture slot only if sess still owns it.
-func (s *Server) clearCaptureIfOwner(sess *capture.Session, engine *internal.Engine) {
+func (s *Server) clearCaptureIfOwner(ss *session, sess *capture.Session, engine *internal.Engine) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if s.session.currentCapture() != sess {
+	if ss.currentCapture() != sess {
 		return
 	}
 	if err := engine.SetCapture(nil); err != nil {
 		log.Debugf("clear capture: %v", err)
 	}
-	s.session.setCapture(nil)
+	ss.setCapture(nil)
 }
 
-func (s *Server) getCaptureEngineLocked() (*internal.Engine, error) {
-	connectClient := s.session.client()
+func (s *Server) getCaptureEngineLocked(ss *session) (*internal.Engine, error) {
+	connectClient := ss.client()
 	if connectClient == nil {
 		return nil, status.Error(codes.FailedPrecondition, "client not connected")
 	}

@@ -37,6 +37,6 @@ func TestStart_ProbesRoutingWithoutASession(t *testing.T) {
 
 	require.NoError(t, s.Start())
 
-	assert.False(t, s.session.isClientRunning(), "auto connect is off, so no session may run")
+	assert.False(t, s.focusedSession().isClientRunning(), "auto connect is off, so no session may run")
 	assert.True(t, nbnet.AdvancedRouting(), "Start must probe routing before the first session")
 }
