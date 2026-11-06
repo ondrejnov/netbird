@@ -106,6 +106,21 @@ type session struct {
 
 	// activeCapture is the packet capture currently installed on the engine.
 	activeCapture *capture.Session
+
+	// bundleCapture is the capture destined for the debug bundle of this session. Guarded by
+	// Server.mutex.
+	bundleCapture *bundleCapture
+
+	// persistSyncResponse makes the clients of this session keep the latest sync response.
+	persistSyncResponse bool
+
+	// probeThrottle bounds the health probes of this session, which are its own: the probe of
+	// another session says nothing about its relays.
+	probeThrottle *probeThrottle
+
+	// refusal says why the most recent run was refused, until the session gets another chance or
+	// is taken down.
+	refusal *internal.SessionRefusal
 }
 
 func newSession() *session {
@@ -115,6 +130,8 @@ func newSession() *session {
 		state:                 internal.NewContextState(),
 		extendAuthSessionFlow: auth.NewPendingFlow(),
 		jwtCache:              newJWTCache(),
+		persistSyncResponse:   true,
+		probeThrottle:         newProbeThrottle(probeThreshold),
 	}
 }
 
@@ -131,6 +148,18 @@ func (ss *session) lockLifecycle(ctx context.Context) error {
 
 func (ss *session) unlockLifecycle() {
 	<-ss.lifecycle
+}
+
+func (ss *session) syncResponsePersistence() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.persistSyncResponse
+}
+
+func (ss *session) setSyncResponsePersistence(enabled bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.persistSyncResponse = enabled
 }
 
 func (ss *session) setHostClaim(claim bool) {
@@ -206,6 +235,25 @@ func (ss *session) markClientDown() {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.clientRunning = false
+	ss.refusal = nil
+}
+
+// recordRefusal reports false when the daemon no longer wants the session up, and a Down has
+// already said all there is to say about it.
+func (ss *session) recordRefusal(refusal internal.SessionRefusal) bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if !ss.clientRunning {
+		return false
+	}
+	ss.refusal = &refusal
+	return true
+}
+
+func (ss *session) currentRefusal() *internal.SessionRefusal {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.refusal
 }
 
 // beginRun records the intent to be connected for the profile key with config and returns
@@ -216,6 +264,7 @@ func (ss *session) beginRun(key profilemanager.SessionKey, config *profilemanage
 	ss.runKey = key
 	ss.runConfig = config
 	ss.clientRunning = true
+	ss.refusal = nil
 	ss.clientRunningChan = make(chan struct{})
 	ss.clientGiveUpChan = make(chan struct{})
 	return ss.clientRunningChan, ss.clientGiveUpChan

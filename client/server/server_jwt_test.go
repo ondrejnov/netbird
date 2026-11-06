@@ -24,7 +24,7 @@ func TestCachedJWT_ServesTheOwner(t *testing.T) {
 	owner := unprivilegedIdentity()
 	s.focusedSession().jwtCache.store("token", owner, testTTL, s.focusedSession().jwtCache.currentGeneration())
 
-	got, found := s.cachedJWT(ctxWithIdentity(owner))
+	got, found := s.cachedJWT(ctxWithIdentity(owner), s.focusedSession())
 
 	require.True(t, found, "the identity that obtained the token must get it back")
 	assert.Equal(t, "token", got)
@@ -34,7 +34,7 @@ func TestCachedJWT_RefusesAnotherCaller(t *testing.T) {
 	s := newTestServer()
 	s.focusedSession().jwtCache.store("token", unprivilegedIdentity(), testTTL, s.focusedSession().jwtCache.currentGeneration())
 
-	got, found := s.cachedJWT(ctxWithIdentity(privilegedIdentity()))
+	got, found := s.cachedJWT(ctxWithIdentity(privilegedIdentity()), s.focusedSession())
 
 	assert.False(t, found, "a caller that did not obtain the token must get a miss")
 	assert.Empty(t, got)
@@ -47,7 +47,7 @@ func TestCachedJWT_WithoutCallerIdentity(t *testing.T) {
 	s := newTestServer()
 	s.focusedSession().jwtCache.store("token", unprivilegedIdentity(), testTTL, s.focusedSession().jwtCache.currentGeneration())
 
-	got, found := s.cachedJWT(context.Background())
+	got, found := s.cachedJWT(context.Background(), s.focusedSession())
 
 	assert.False(t, found)
 	assert.Empty(t, got)

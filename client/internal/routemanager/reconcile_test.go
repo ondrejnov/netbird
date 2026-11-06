@@ -49,6 +49,7 @@ func (m *reconcileWGMock) IsUserspaceBind() bool                      { return f
 func (m *reconcileWGMock) GetFilter() device.PacketFilter             { return nil }
 func (m *reconcileWGMock) GetDevice() *device.FilteredDevice          { return nil }
 func (m *reconcileWGMock) GetNet() *wgbackend.NetstackNet             { return nil }
+func (m *reconcileWGMock) MTU() uint16                                { return 0 }
 
 // TestReconcilePeerAllowedIPs verifies the declarative reconcile re-applies every routed prefix
 // tracked for the peer (self-heal, independent of refcount level) and stays scoped to that peer.

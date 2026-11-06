@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"context"
 	"errors"
 
 	firewall "github.com/netbirdio/netbird/client/firewall/manager"
@@ -44,6 +45,16 @@ func (*SessionIsolation) Verify() error {
 	return ErrSessionNotIsolated
 }
 
+// Restore refuses the session.
+func (*SessionIsolation) Restore() error {
+	return ErrSessionNotIsolated
+}
+
+// RemoveAll does nothing, as no session was added.
+func (*SessionIsolation) RemoveAll() error {
+	return nil
+}
+
 // RemoveResidualSessionIsolation does nothing, as no isolation can exist on this platform.
 func RemoveResidualSessionIsolation() error {
 	return nil
@@ -57,6 +68,6 @@ type SessionConfig struct {
 }
 
 // NewSessionFirewall refuses the session.
-func NewSessionFirewall(IFaceMapper, *statemanager.Manager, nftypes.FlowLogger, bool, uint16, SessionConfig) (firewall.Manager, error) {
+func NewSessionFirewall(context.Context, IFaceMapper, *statemanager.Manager, nftypes.FlowLogger, bool, uint16, SessionConfig) (firewall.Manager, error) {
 	return nil, ErrSessionNotIsolated
 }

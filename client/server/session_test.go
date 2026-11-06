@@ -291,16 +291,16 @@ func TestExtendSessionLoginHint_FollowsRunningProfile(t *testing.T) {
 	writeState("work", "work@example.com")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "active_profile.txt"), []byte("work"), 0o600))
 
-	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "with nothing running the hint stays the local active profile's")
+	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(s.focusedSession()), "with nothing running the hint stays the local active profile's")
 
 	_, giveUp := s.focusedSession().beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
-	assert.Equal(t, "default@example.com", s.extendSessionLoginHint(), "the hint must be the running profile's")
+	assert.Equal(t, "default@example.com", s.extendSessionLoginHint(s.focusedSession()), "the hint must be the running profile's")
 
 	close(giveUp)
-	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "a finished run must not decide the hint")
+	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(s.focusedSession()), "a finished run must not decide the hint")
 
 	s.focusedSession().beginRun(profilemanager.SessionKey{Profile: "gone", Username: username}, nil)
-	assert.Empty(t, s.extendSessionLoginHint(), "a running profile with no recorded account has no hint")
+	assert.Empty(t, s.extendSessionLoginHint(s.focusedSession()), "a running profile with no recorded account has no hint")
 }
 
 // The daemon's root context carries no connection state: it belongs to the session. Every
