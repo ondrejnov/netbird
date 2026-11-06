@@ -32,9 +32,13 @@ func (g *BundleGenerator) sessionsReadme() string {
 			"resolved_domains.txt, network_map.json, state.json, corrupted_states/, metrics.txt and wgshow.txt. The files at the top of " +
 			"this bundle describe one session, and status.txt says which. Logs and profiles describe the whole daemon and appear once.\n"
 	}
-	if g.omitHostWide {
-		text += "\nThe logs of the daemon and the system information were left out: the host runs sessions the requester may not read, " +
-			"and these describe them too.\n"
+	switch {
+	case g.omitHostWide:
+		text += "\nThe logs of the daemon, the system information, the service parameters and the updater logs were left out: " +
+			"the host runs sessions the requester may not read, and these describe them too.\n"
+	case g.omitDaemonLog:
+		text += "\nThe logs of the daemon were left out: they go back further than what runs now, and only a privileged " +
+			"requester may read what they say about the sessions of others.\n"
 	}
 	return text
 }

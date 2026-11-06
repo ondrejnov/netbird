@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/netbirdio/netbird/client/configs"
 	"github.com/netbirdio/netbird/client/internal/peer"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 )
@@ -136,9 +137,33 @@ func TestBundle_WithoutSessionsHasNoTraceOfThem(t *testing.T) {
 }
 
 // What describes the whole host also describes sessions the requester may not read.
+func TestBundle_OmitDaemonLogLeavesOutOnlyTheLog(t *testing.T) {
+	dir := t.TempDir()
+	generator := NewBundleGenerator(GeneratorDependencies{
+		TempDir:        dir,
+		LogPath:        stateFile(t, dir, "client.log", "a line about a session that is gone\n"),
+		StatusRecorder: recorderOf(t, "https://mgmt.work.example:443", "100.71.0.1/16"),
+		StatePath:      stateFile(t, dir, "work.state.json", `{}`),
+		OmitDaemonLog:  true,
+	}, BundleConfig{IncludeSystemInfo: true})
+
+	path, err := generator.Generate()
+	require.NoError(t, err)
+	entries := readBundle(t, path)
+
+	assert.NotContains(t, entries, "client.log", "the log can speak of sessions the requester may not read")
+	assert.Contains(t, entries, "routes.txt", "the routes describe what runs now, which the scope has decided about")
+	assert.Contains(t, entries["README.txt"], "left out", "the reader should learn why the log is missing")
+}
+
 func TestBundle_OmitHostWideLeavesOutLogsAndSystemInfo(t *testing.T) {
 	dir := t.TempDir()
 	logFile := stateFile(t, dir, "client.log", "a line about another session\n")
+
+	originalStateDir := configs.StateDir
+	configs.StateDir = dir
+	t.Cleanup(func() { configs.StateDir = originalStateDir })
+	stateFile(t, dir, serviceParamsFile, `{"management_url":"https://mgmt.other.example:443"}`)
 
 	build := func(omit bool) map[string]string {
 		generator := NewBundleGenerator(GeneratorDependencies{
@@ -157,11 +182,13 @@ func TestBundle_OmitHostWideLeavesOutLogsAndSystemInfo(t *testing.T) {
 	full := build(false)
 	require.Contains(t, full, "client.log", "the control should carry the log of the daemon")
 	require.Contains(t, full, "routes.txt", "the control should carry the system information")
+	require.Contains(t, full, serviceParamsBundle, "the control should carry the service parameters")
 
 	omitted := build(true)
 	assert.NotContains(t, omitted, "client.log", "the log of the daemon names other sessions")
 	assert.NotContains(t, omitted, "routes.txt", "the routes of the host name other sessions")
 	assert.NotContains(t, omitted, "interfaces.txt", "the interfaces of the host name other sessions")
+	assert.NotContains(t, omitted, serviceParamsBundle, "the service parameters name the Management of another network")
 	assert.Contains(t, omitted, "status.txt", "what is about the session stays")
 	assert.Contains(t, omitted["README.txt"], "left out", "the reader should learn why the logs are missing")
 }

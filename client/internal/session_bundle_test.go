@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/netbirdio/netbird/client/configs"
 	"github.com/netbirdio/netbird/client/internal/debug"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/peer"
@@ -56,6 +57,12 @@ func TestRemoteBundleStaysWithItsSession(t *testing.T) {
 		profilemanager.DefaultConfigPath = origDefault
 	})
 
+	const otherManagement = "mgmt.other.example"
+	origStateDir := configs.StateDir
+	configs.StateDir = dir
+	t.Cleanup(func() { configs.StateDir = origStateDir })
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "service.json"), []byte(`{"management_url":"https://`+otherManagement+`:443"}`), 0o600))
+
 	own := hostcoord.SessionKey{Profile: "work", Username: "alice"}
 	focused := profilemanager.ActiveProfileState{ID: "home", Username: "bob"}
 	manager := profilemanager.NewServiceManager("")
@@ -91,6 +98,7 @@ func TestRemoteBundleStaysWithItsSession(t *testing.T) {
 	for name, content := range contents {
 		assert.NotContains(t, content, focusedState, "%s must not carry the state of the focused session", name)
 		assert.NotContains(t, content, daemonLog, "%s must not carry the log of the daemon", name)
+		assert.NotContains(t, content, otherManagement, "%s must not name the Management of another network", name)
 	}
 	assert.NotContains(t, contents, "routes.txt", "the routes of the host describe all sessions")
 }
