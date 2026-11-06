@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -64,6 +63,7 @@ type fakeConfig struct {
 	FeaturesErr *fakeFailure           `json:"featuresErr,omitempty"`
 	Profiles    []fakeProfile          `json:"profiles"`
 	Focused     string                 `json:"focused"`
+	FocusedUser string                 `json:"focusedUser"`
 	Status      map[string]string      `json:"status"`
 	Sessions    []json.RawMessage      `json:"sessions"`
 	FullStatus  bool                   `json:"fullStatus"`
@@ -88,7 +88,9 @@ func failureOf(err error) fakeFailure {
 func (d *fakeDaemon) config(t *testing.T) []byte {
 	t.Helper()
 
-	cfg := fakeConfig{Focused: d.focused, Status: d.status, FullStatus: d.fullStatus, Failures: map[string]fakeFailure{}}
+	// The focus is the one of the user the CLI runs for, which under sudo is not the user of the
+	// process: the daemon answers with the user of the session, not with its own.
+	cfg := fakeConfig{Focused: d.focused, FocusedUser: currentUsername(t), Status: d.status, FullStatus: d.fullStatus, Failures: map[string]fakeFailure{}}
 	if d.features != nil {
 		raw, err := protojson.Marshal(d.features)
 		require.NoError(t, err)
@@ -255,6 +257,7 @@ func TestFakeDaemonProcess(t *testing.T) {
 	srv := &fakeServer{callLog: filepath.Join(dir, "calls.log")}
 	require.NoError(t, json.Unmarshal(raw, &srv.cfg))
 	srv.focused = srv.cfg.Focused
+	srv.focusedUser = srv.cfg.FocusedUser
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -269,10 +272,11 @@ func TestFakeDaemonProcess(t *testing.T) {
 type fakeServer struct {
 	proto.UnimplementedDaemonServiceServer
 
-	mu      sync.Mutex
-	callLog string
-	cfg     fakeConfig
-	focused string
+	mu          sync.Mutex
+	callLog     string
+	cfg         fakeConfig
+	focused     string
+	focusedUser string
 }
 
 func (d *fakeServer) record(name string, req gproto.Message) error {
@@ -360,6 +364,9 @@ func (d *fakeServer) SwitchProfile(_ context.Context, req *proto.SwitchProfileRe
 		return nil, gstatus.Error(codes.NotFound, "profile not found")
 	}
 	d.focused = p.ID
+	if req.GetUsername() != "" {
+		d.focusedUser = req.GetUsername()
+	}
 	return &proto.SwitchProfileResponse{Id: p.ID}, nil
 }
 
@@ -373,11 +380,7 @@ func (d *fakeServer) GetActiveProfile(_ context.Context, req *proto.GetActivePro
 	if p == nil {
 		return nil, gstatus.Error(codes.NotFound, "no active profile")
 	}
-	current, err := user.Current()
-	if err != nil {
-		return nil, err
-	}
-	return &proto.GetActiveProfileResponse{Id: p.ID, ProfileName: p.Name, Username: current.Username}, nil
+	return &proto.GetActiveProfileResponse{Id: p.ID, ProfileName: p.Name, Username: d.focusedUser}, nil
 }
 
 func (d *fakeServer) Status(_ context.Context, req *proto.StatusRequest) (*proto.StatusResponse, error) {

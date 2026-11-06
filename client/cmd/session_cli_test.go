@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -114,6 +115,33 @@ func switchesOf(t *testing.T, d *fakeDaemon) []string {
 // A refused up gives the focus back to the session that had it, so that a plain down still ends
 // that session and not the one that never came up.
 func TestUp_RefusedProfileWithTheGateGivesTheFocusBack(t *testing.T) {
+	t.Run("direct", func(t *testing.T) {
+		testRefusedProfileGivesTheFocusBack(t)
+	})
+	// Under sudo the CLI acts for the user who ran sudo and not for root, the user of the
+	// process. CI runs the tests with sudo, a root shell does not.
+	t.Run("sudo", func(t *testing.T) {
+		asSudoInvoker(t)
+		testRefusedProfileGivesTheFocusBack(t)
+	})
+}
+
+// asSudoInvoker makes the test run as if a user other than root ran it with sudo.
+func asSudoInvoker(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() != 0 {
+		t.Skip("sudo needs a root process")
+	}
+	if os.Getenv("SUDO_USER") != "" && os.Getenv("SUDO_USER") != "root" {
+		return
+	}
+	if _, err := user.Lookup("nobody"); err != nil {
+		t.Skipf("no user to stand for the one who ran sudo: %v", err)
+	}
+	t.Setenv("SUDO_USER", "nobody")
+}
+
+func testRefusedProfileGivesTheFocusBack(t *testing.T) {
 	for name, refusal := range map[string]error{
 		"overlay": gstatus.Error(codes.FailedPrecondition, "the overlay 100.64.0.0/16 overlaps the session of prace"),
 		"limit":   gstatus.Error(codes.ResourceExhausted, "the limit of 4 concurrent sessions is reached, bring a session down first"),
