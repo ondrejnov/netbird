@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -o /out/netbird ./client
 
 FROM alpine:3.24
-RUN apk add --no-cache bash ca-certificates ip6tables iproute2 iptables
+RUN apk add --no-cache bash ca-certificates ip6tables iproute2 iptables ipset nftables
 ENV NETBIRD_BIN="/usr/local/bin/netbird" \
     NB_LOG_FILE="console,/var/log/netbird/client.log" \
     NB_DAEMON_ADDR="unix:///var/run/netbird.sock" \

@@ -105,6 +105,7 @@ func (s *Server) generateDebugBundle(ss *session, req *proto.DebugBundleRequest,
 			ProfileName:    session.ProfileName,
 			OtherSessions:  s.otherSessionBundles(scope),
 			OmitHostWide:   scope.omitHostWide,
+			OmitDaemonLog:  scope.omitDaemonLog,
 		},
 		debug.BundleConfig{
 			Anonymize:         req.GetAnonymize(),

@@ -67,13 +67,15 @@ func (c sessionCaller) mayReach(key profilemanager.SessionKey) bool {
 }
 
 func (c sessionCaller) mayReachUser(username string) bool {
-	if !c.identified {
-		return false
-	}
-	if ipcauth.IsPrivilegedCaller(c.id) {
+	if c.privileged() {
 		return true
 	}
-	return c.owns(username)
+	return c.identified && c.owns(username)
+}
+
+// privileged reports whether the kernel vouches for a caller that may read everything.
+func (c sessionCaller) privileged() bool {
+	return c.identified && ipcauth.IsPrivilegedCaller(c.id)
 }
 
 // owns reports whether the sessions of username belong to the caller: the account is the caller's,
