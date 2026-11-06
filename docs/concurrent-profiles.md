@@ -131,6 +131,14 @@ Změnou domény se změní FQDN všech peerů té sítě.
 UI se nemění a vidí jen `focused`. Přepínač profilů v UI přepne a zavolá `Down`, který s gate míří na nový `focused`.
 **Původní session proto běží dál a v UI není vidět**, ukáže ji jen `netbird status`.
 
+### SSH config dalších session
+
+Session ve slotu N (`wt1` a dál) zapisuje `/etc/ssh/ssh_config.d/99-netbird-N.conf` s právy 0644, stejně jako slot 0
+svůj `99-netbird.conf`. Soubor obsahuje overlay IP a FQDN peerů té session a přečte ho každý lokální uživatel, i ten,
+kterému daemon stav cizí session přes `status` nevydá. Práva 0600 nejdou, protože OpenSSH čte soubory z
+`ssh_config.d` pod účtem, který `ssh` spouští, a vlastník session by soubor nepřečetl. Na stroji, kde se adresy a
+jména peerů jedné sítě nemají dostat k ostatním lokálním uživatelům, souběžné profily nezapínejte.
+
 ### Konflikty
 
 | Konflikt | Chování |

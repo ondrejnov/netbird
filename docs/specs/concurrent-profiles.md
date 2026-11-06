@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04. Brána F0 prošla 2026-11-04: změny ze zprávy [concurrent-profiles-f0.md](concurrent-profiles-f0.md) jsou zapracované, R1 až R6 jsou rozhodnutá (viz 2.2). F1: všech 8 PR je otevřených ve forku, napojení přijde až v F3. F2: PR 9 (identita parametrem), PR 10 (extrakce `session`) a PR 11 (`contextState` a residual restore) jsou hotové, viz 2.4. F3: PR 12 až PR 19 jsou hotové, stejně jako opravy nálezů ve `f3/residual-links` a `f3/flow-filter` a bezpečnostní revize, viz 2.5. Kritérium 5.8 pro zvýšení limitu je změřené a prošlo, limit zůstává 4 podle rozhodnutí vlastníka. Omezovač souběhu startů z 5.8 není implementovaný, viz otázky k PR 19. **Brána v1 prošla 2026-11-05:** e2e test se dvěma Managementy běží ve čtyřech režimech. F4: dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md), viz `f3/e2e-docs` v 2.5. Nálezy závěrečné revize jsou opravené ve `f3/final-fixes`, viz 2.5 |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04, R1 až R6 viz 2.2. **F1 až F3 jsou sloučené v `multi-profile`** (F1 PR 1 až 8, F2 PR 9 až 11, F3 PR 12 až 19 včetně `f3/residual-links`, `f3/flow-filter`, `f3/security-fixes`, `f3/e2e-docs` a `f3/final-fixes`), poznatky v 2.3 až 2.5. Brána v1 prošla 2026-11-05. **F4:** dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md). Kritérium 5.8 je změřené, limit zůstává 4. Vlastník 2026-11-06 rozhodl tři otázky z 2.5, viz „Rozhodnutí vlastníka 2026-11-06". **Do zapnutí gate v provozu zbývá:** zbylé otázky v 2.3 a 2.5, ověření `service install` a `reconfigure` s gate pod skutečným init systémem, DNS backendů systemd-resolved a NetworkManager na skutečném hostiteli (Q8), testu přepínače UI mimo harness (PR 16) a sestavení balíčku `netbird-multiprofile` (PR 18) |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -307,6 +307,11 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   původní session. Bez opravy selže na `expected: "prace"`, `actual: "treti"`. Testy s falešným daemonem pokrývají
   limit, session, která po chybě běží, a gate vypnutou i starý daemon. Mutace vynechání kontroly stavu a kontroly
   gate je shodí.
+- **Omezovač souběhu startů z 5.8 ve v1 není.** Scale test (PR 19) s lokálním Managementem doběhne se 16 session
+  najednou do 2,7 s. Omezovač se doplní, až bude změřený start se vzdáleným Managementem a pomalým loginem.
+- **`99-netbird-N.conf` s právy 0644 je známé omezení v1.** Soubor obsahuje overlay IP a FQDN peerů dané session a
+  čte ho každý lokální uživatel, což obchází filtr čtení cizí session z 5.6. Soubor s 0600 by vlastník session přes
+  OpenSSH nepřečetl a přesun do `~/.ssh` vlastníka by měnil CLI i chování OpenSSH. Popsáno v dokumentaci.
 
 **PR 12, `f3/proto`:**
 
@@ -546,7 +551,7 @@ Userspace WireGuard, nftables (iptables se liší jen ve stejném rozsahu jako v
 
 **Otázky k PR 19:**
 
-- **Omezovač souběhu startů z 5.8 neexistuje.** Tabulka 5.8 ho žádá, žádné PR ze sekce 8 ho neobsahuje a spec neříká kolik souběžných startů ani jaký časový limit. Stejně jako start po změně sítě běží všechny session najednou. Měření s lokálním Managementem problém neukázalo, 16 najednou doběhne do 2,7 s. Se vzdáleným Managementem a pomalým loginem to změřeno není. Má vzniknout, a s jakými hodnotami, nebo se má řádek 5.8 škrtnout?
+- **Omezovač souběhu startů z 5.8 neexistuje.** Tabulka 5.8 ho žádala, žádné PR ze sekce 8 ho neobsahuje a spec neříká kolik souběžných startů ani jaký časový limit. Stejně jako start po změně sítě běží všechny session najednou. Měření s lokálním Managementem problém neukázalo, 16 najednou doběhne do 2,7 s. Se vzdáleným Managementem a pomalým loginem to změřeno není. **Rozhodnuto 2026-11-06:** ve v1 není, řádek 5.8 je upravený, viz začátek 2.5.
 - **Userspace a limit:** při zvýšení limitu znamená 34,5 MiB heapu a až 1,8 GiB RSS při častých restartech reálný náklad, který je v `wireguard-go`. Má limit platit stejně pro oba režimy?
 - **Náklad hooků platí všechen provoz hostitele.** Je 3 až 8 µs RTT při 16 session přijatelné pro stroj, který forwarduje velké objemy, nebo se má před zvýšením limitu změřit propustnost?
 
@@ -573,7 +578,7 @@ Userspace WireGuard, nftables (iptables se liší jen ve stejném rozsahu jako v
 - **Explicitní `WgIface`:** odmítnutí je odchylka od 5.1 „explicitní název se respektuje". Má zůstat, nebo se má jméno ukládat do `sessions.json` (změna schváleného formátu Q17, starší daemon by soubor bral jako poškozený)?
 - **Uživatel s tečkou ve jméně** nemá s gate bez oprávnění vlastní profily, ani když kolize neexistuje. Zvoleno podle revize. Alternativa je povolit ho, dokud žádný účet adresář nesdílí, nebo adresář klíčovat přes UID (změna formátu na disku).
 - **`interface_name` bez gate:** neprivilegovaný volající dál smí přes `SetConfig` a `Up` smazat libovolný link, i na `main`. I1 brání opravě ve forku. Hlásit upstreamu přes security policy?
-- **`99-netbird-N.conf` (0644)** ukazuje overlay IP a FQDN až 200 peerů komukoli lokálnímu, což obchází filtr 5.6. Nechá se to popsat jako známé omezení, nebo se má soubor slotu N přesunout do `~/.ssh` vlastníka (změna CLI a chování OpenSSH)? Soubor s 0600 nejde, OpenSSH by ho vlastník nepřečetl.
+- **`99-netbird-N.conf` (0644)** ukazuje overlay IP a FQDN až 200 peerů komukoli lokálnímu, což obchází filtr 5.6. Nechá se to popsat jako známé omezení, nebo se má soubor slotu N přesunout do `~/.ssh` vlastníka (změna CLI a chování OpenSSH)? Soubor s 0600 nejde, OpenSSH by ho vlastník nepřečetl. **Rozhodnuto 2026-11-06:** známé omezení v1, viz začátek 2.5.
 - **Vlastní tabulky session po `flush ruleset`:** kontrola obnoví jen izolaci. ACL session zůstanou pryč do jejího restartu, jako bez gate. Má je kontrola také hlídat a session při rozdílu restartovat?
 - **Interval kontroly 5 s** je volba bez měření. Netlink událost by okno zkrátila, ale znamenala by další vlastní kód pro oba backendy.
 - **`Status` a `Down` bez selektoru** dál čtou a shazují cizí focus kýmkoli lokálním (5.6). Revize je nezpochybnila, zůstávají.
@@ -958,7 +963,7 @@ Limit je dnes 4, ale jediné, co smí počet omezovat, je **jedna kontrola v `Se
 | Izolace I3, I4 | Roste s počtem session | **Jedna izolační tabulka s množinami `ifaces`, `overlays` a `own` (`ifname . prefix`), ne pravidla pro každou dvojici.** Příchod a odchod session mění jen množiny. Všechny NetBird tabulky se vyloučí z `findExternalChains`. Správnost nezávisí na pořadí tabulek |
 | Hooky nftables | Každá tabulka se vyhodnocuje na paket. Změřeno v 2.5, PR 19: session přidá 7 base chainů a 16 session zvýší RTT paketů celého hostitele o 3 až 6 µs lokálně a o 6 až 8 µs při forwardu | Změřeno, viz 2.5 |
 | DNS listener | Na vlastní overlay IP je port 53 volný, jinak fallback | Fallback na jiný port nesmí tiše vypnout DNS, viz `supportCustomPort` |
-| Restart při změně sítě | Všechny session najednou | Omezený souběh celých startů vlastním omezovačem, `bringUpMu` chrání jen alokaci. Jedna pomalá session neblokuje ostatní donekonečna |
+| Restart při změně sítě | Všechny session najednou | Ve v1 bez omezovače souběhu startů (rozhodnutí 2026-11-06, viz 2.5): scale test se 16 session a lokálním Managementem doběhne do 2,7 s. Doplní se, až bude změřený start se vzdáleným Managementem. `bringUpMu` chrání jen alokaci |
 
 **Kritérium pro zvýšení limitu:** scale test s 8 a 16 session v netns projde bez porušení invariantů
 a změřená paměť, CPU a latence paketů jsou zaznamenané v této specifikaci. **Splněno 2026-11-05**, viz 2.5, PR 19.
