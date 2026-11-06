@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04, R1 až R6 viz 2.2. **F1 až F3 jsou sloučené v `multi-profile`** (F1 PR 1 až 8, F2 PR 9 až 11, F3 PR 12 až 19 včetně `f3/residual-links`, `f3/flow-filter`, `f3/security-fixes`, `f3/e2e-docs` a `f3/final-fixes`), poznatky v 2.3 až 2.5. Brána v1 prošla 2026-11-05. **F4:** dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md). Kritérium 5.8 je změřené, limit zůstává 4. Vlastník 2026-11-06 rozhodl tři otázky z 2.5, viz „Rozhodnutí vlastníka 2026-11-06". Testy souběžných profilů v CI pro macOS, Windows a FreeBSD opravuje `ci/portability`, viz 2.5. **Do zapnutí gate v provozu zbývá:** zbylé otázky v 2.3 a 2.5, ověření `service install` a `reconfigure` s gate pod skutečným init systémem, DNS backendů systemd-resolved a NetworkManager na skutečném hostiteli (Q8), testu přepínače UI mimo harness (PR 16) a sestavení balíčku `netbird-multiprofile` (PR 18) |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04, R1 až R6 viz 2.2. **F1 až F3 jsou sloučené v `multi-profile`** (F1 PR 1 až 8, F2 PR 9 až 11, F3 PR 12 až 19 včetně `f3/residual-links`, `f3/flow-filter`, `f3/security-fixes`, `f3/e2e-docs` a `f3/final-fixes`), poznatky v 2.3 až 2.5. Brána v1 prošla 2026-11-05. **F4:** dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md). Kritérium 5.8 je změřené, limit zůstává 4. Vlastník 2026-11-06 rozhodl tři otázky z 2.5, viz „Rozhodnutí vlastníka 2026-11-06". Testy souběžných profilů v CI pro macOS, Windows a FreeBSD opravuje `ci/portability`, viz 2.5. Linuxový CI opravuje `ci/linux-runner`: privilegované testy běží ve vlastním netns, scale testy jen s `NB_TEST_SCALE=true`, viz 2.5. **Do zapnutí gate v provozu zbývá:** zbylé otázky v 2.3 a 2.5, ověření `service install` a `reconfigure` s gate pod skutečným init systémem, DNS backendů systemd-resolved a NetworkManager na skutečném hostiteli (Q8), testu přepínače UI mimo harness (PR 16) a sestavení balíčku `netbird-multiprofile` (PR 18) |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -334,6 +334,71 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Neověřeno:** testy na macOS, Windows a FreeBSD lokálně neběží. Cross `go vet` a `go test -c` s `devcert` prošly
   pro macOS a Windows. S `privileged` a pro FreeBSD křížově nejde bez cgo (`go_sqlite`, `wgfreebsd`), stejně na `main`.
 
+**CI na Linuxu, `ci/linux-runner`:**
+
+- **Příčina:** linuxový job pouští privilegované testy jako root přímo v jmenném prostoru runneru. Ten má Docker
+  (`FORWARD` s politikou `DROP`, chainy `DOCKER*`, `docker0`), systemd-resolved se stubem a search doménou Azure,
+  systémovou D-Bus a `rp_filter=0`. Testy vznikly v kontejneru harnessu, kde nic z toho není. Snapshot bez gate
+  proto dostal cizí chainy, search doménu a `rp_filter`, testy izolace nedosáhly na peera ani bez izolace, sonda DNS
+  vybrala resolved (`get interface: route ip+net: no such network interface`) a firewalld se volal přes D-Bus místo
+  falešného `firewall-cmd`. `flush ruleset` v `TestSessionStartsAfterTheRulesetWasFlushed` vzal Dockeru tabulku `nat`,
+  proto pozdější `Test_S3HandlerGetUploadURL` v `upload-server` neuměl spustit kontejner (`No chain/target/match by
+  that name`). Fork `upload-server` nemění, test sám se neupravuje.
+- **Oprava, jen testy:** `client/testutil/isolatedhost` z `TestMain` balíčků `client/server`, `client/firewall/iptables`
+  a `client/firewall/nftables` (tag `privileged`) spustí testovací binárku znovu v novém netns a mount namespace:
+  privátní mounty, overlay přes `/etc` s vlastním `resolv.conf` (`nameserver 192.0.2.53`, `search .`) a obsahem
+  souborů namountovaných do `/etc` (hosts kontejneru), tmpfs přes `/run/dbus`, `rp_filter=2` jako na hostiteli
+  harnessu a `lo` nahoru. Argumenty jdou beze změny, `-test.coverprofile` tedy zapisuje kopie. Proces spuštěný testem
+  z téže binárky pozná připravený namespace podle vrstvy `/etc` a běží v něm i pod jiným účtem a bez prostředí
+  (`TestSessionAccessOverTheRealSocket`). Proměnná `NB_TEST_ISOLATED_HOST` mimo čerstvý netns (`lo` nahoře) se
+  odmítne, aby se mounty hostitele nikdy neměnily. nftables navíc dostane tabulky filter, nat a mangle iptables
+  (`WithIptablesTables`), které čekají upstream testy kompatibility. Bez nich čerstvý namespace shodí čtyři
+  `TestNftablesManager*Compatibility*`, které dřív procházely jen díky tabulkám z předchozích testů nebo Dockeru.
+- **DNS:** balíček `client/internal/dns` má upstream `TestMain`, proto se nebalí celý.
+  `TestInitialize_OnlyCoordinatorWrapsTheManager` si pustí vlastní prázdnou sběrnici a `resolv.conf` bez hlavičky
+  správce.
+- **`TestLogout_WaitsForTheLifecycleWithoutServerMutex`** odhlašoval peer proti `api.netbird.io`. Bez sítě čekal na
+  spojení přes 5 s (`the RPC did not finish after the lifecycle was released`), teď jde na `mgmtmeta`.
+- **Scale testy** `TestScaleSessions`, `TestScaleChurn`, `TestScaleStress`, `TestScaleMeasure` a `TestScaleCrash`
+  běží jen s `NB_TEST_SCALE=true` (`strconv.ParseBool`, nečitelná hodnota test shodí). `client/server` na nich v CI
+  překročil 10 minut. Bez nich balíček v harnessu bez `-race` s `-timeout 10m` doběhl za 460 s.
+- **Produkční kód se nemění.** Všechna selhání vycházela z prostředí testů. Na runneru firewalld neběží a daemon
+  podle D-Bus správně nic nepovoluje.
+- **`Test_ConnectPeers` (`client/iface`):** fork `client/iface` nemění (diff od merge-base s `upstream/main` je
+  prázdný). V Docker jobu prošel v dřívějších bězích forku i na upstreamu, selhal jednou: handshake bez odpovědí na
+  `127.0.0.1`. Beze změny, nejspíš flake.
+- **Ověření:** harness s emulací runneru před testy (chainy `DOCKER*` a `FORWARD DROP` v iptables i ip6tables,
+  `docker0`, `rp_filter=0`, stub `resolv.conf` se search doménou, běžící systémová D-Bus). Před opravou tak selhal
+  snapshot stejně jako v CI (`search netbird.selfhosted dirty.example`, `rp_filter=0`, chainy Dockeru) i
+  `TestEachSessionTrustsItsInterfaceInFirewalld`. Po opravě s emulací prošly pod `-race` `client/server` (573 s),
+  iptables, nftables včetně čtyř testů kompatibility a dns, bez `-race` `client/server` za 460 s. `TestScaleCrash`
+  s `NB_TEST_SCALE=true` běží i s daemonem v podprocesu.
+- **Neověřeno:** skutečný runner GitHubu (iptables 1.8.7, jádro Azure, skutečný systemd-resolved) ověří až CI.
+  `TestIsolationKeepsForwardingInsideOneNetwork` v harnessu s emulací prošel i před opravou, selhání testů izolace
+  na runneru tedy emulace nezachytila. Jejich oprava stojí na tom, že vlastní netns hostitele nevidí.
+
+**CI na PR 44, druhé kolo:**
+
+- **`TestUp_RefusedProfileWithTheGateGivesTheFocusBack`** (Linux, macOS): CI pouští testy přes `sudo`, CLI tedy jedná
+  za `runner`, falešný daemon ale v `GetActiveProfile` vracel uživatele procesu, `root`. `giveBack` pak focus
+  nepovažoval za svůj a nevrátil ho. Falešný daemon teď drží uživatele focusu jako skutečný (ze `SwitchProfile`),
+  test má variantu se `SUDO_USER`, která chybu v harnessu reprodukuje.
+- **`TestOpenSlots_UnknownStateFileRefuses`** (Windows): cesta přes obyčejný soubor je na Windows
+  `ERROR_PATH_NOT_FOUND`, tedy `ErrNotExist`, a `StateFileProfiles` to četl jako „výchozí profil nemá stav". Vada
+  produkčního kódu: chybějící `state.json` teď platí za nepřítomný, jen když je adresář kolem něj adresářem.
+- **`TestNoGateHostSnapshotMatchesToday`** (Linux): sekce nftables obsahovala bajtkód pravidel, která daemon zapisuje
+  binárkou iptables. iptables 1.8.7 runneru je přeloží na xt match (`mark`, `tcp`), novější v harnessu na nativní
+  výrazy. Pravidla tabulek iptables-nft (`filter`, `mangle`, `nat`, `raw`, `security` rodin ip a ip6) se v sekci
+  nftables vynechávají, tabulky a chainy zůstávají a pravidla hlídá sekce iptables. Golden soubory ztratily jen tyto
+  řádky.
+- **`TestStart_ProbesRoutingWithoutASession`** (FreeBSD): `nbnet.Init` a `AdvancedRouting` jsou tam no-op, není co
+  sondovat. Test běží jen na Linuxu, macOS a Windows.
+- **`Test_ConnectPeers`:** fork nemění `client/iface` ani nic, co test na Linuxu spouští (z `client/net` jen
+  `Init`, který test nevolá). Selhání má podpis známého upstream flaku (#7944): oba konce poslaly 6 initiation a 6
+  response, přijaly jen initiation. Upstream v Docker jobu běžně potřebuje 5 až 15 s, tedy jedno až tři kola
+  handshaku. Harness po stejných předchozích balíčcích forku nenašel na hostiteli nic zbylého (rozhraní, pravidla,
+  procesy) a test prošel. Beze změny.
+
 **PR 12, `f3/proto`:**
 
 - Proto podle 5.6, handlery se nemění. Nová pole existujících zpráv jsou od 1000, `SessionSelector` a `SessionStatus` jsou
@@ -511,7 +576,7 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 
 **PR 19, `f3/scale-test`:**
 
-- **Testy** jsou v `session_scale_privileged_test.go` a `session_scale_measure_privileged_test.go`. Limit předává test přes `WithMaxSessions`. Výchozí zůstává 4 a test to hlídá.
+- **Testy** jsou v `session_scale_privileged_test.go` a `session_scale_measure_privileged_test.go`. Limit předává test přes `WithMaxSessions`. Výchozí zůstává 4 a test to hlídá. Od `ci/linux-runner` běží jen s `NB_TEST_SCALE=true`.
 - **Co prošlo pod `-race` na 8 a 16 session:**
 
 | Test | Režim | Co ověřuje |

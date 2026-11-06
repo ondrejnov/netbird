@@ -337,6 +337,9 @@ func snapshotNftables(t *testing.T) []string {
 				continue
 			}
 			out = append(out, fmt.Sprintf("%s chain %s", prefix, describeChain(chain)))
+			if isIptablesNftTable(table) {
+				continue
+			}
 			rules, err := conn.GetRules(table, chain)
 			require.NoError(t, err)
 			for _, rule := range rules {
@@ -353,6 +356,21 @@ func snapshotNftables(t *testing.T) []string {
 		}
 	}
 	return out
+}
+
+// isIptablesNftTable reports a table iptables-nft keeps. The daemon writes its rules through the
+// iptables binary, and how that binary spells a rule in nftables expressions differs between its
+// versions: native expressions in newer ones, xt matches in older ones. The iptables section has
+// these rules as the daemon asked for them.
+func isIptablesNftTable(table *nftables.Table) bool {
+	if table.Family != nftables.TableFamilyIPv4 && table.Family != nftables.TableFamilyIPv6 {
+		return false
+	}
+	switch table.Name {
+	case "filter", "mangle", "nat", "raw", "security":
+		return true
+	}
+	return false
 }
 
 func describeChain(chain *nftables.Chain) string {
