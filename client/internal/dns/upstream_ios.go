@@ -81,7 +81,7 @@ func (u *upstreamResolverIOS) exchange(ctx context.Context, upstream string, r *
 		}
 	}
 
-	return ExchangeWithFallback(ctx, client, r, upstream)
+	return ExchangeWithFallback(ctx, client, r, upstream, u.tunnelMTU())
 }
 
 // GetClientPrivate returns a new DNS client bound to the local IP of the Netbird interface.

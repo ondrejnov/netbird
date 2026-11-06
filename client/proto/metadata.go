@@ -27,6 +27,13 @@ const (
 	// MetadataLevelKey carries the lowercase logrus level name for
 	// MetadataKindLogLevelChanged.
 	MetadataLevelKey = "level"
+
+	// MetadataPrefixKey carries the route a session warning is about.
+	MetadataPrefixKey = "prefix"
+	// MetadataDomainsKey carries the comma-separated domains a session warning is about.
+	MetadataDomainsKey = "domains"
+	// MetadataConflictKey carries the value of SessionStatus.conflict a session warning is about.
+	MetadataConflictKey = "conflict"
 )
 
 // SystemEvent metadata markers for daemon config-change events. The daemon

@@ -33,7 +33,7 @@ func (r *Route) getIPsFromResolver(ctx context.Context, domain domain.Domain) ([
 		msg := new(dns.Msg)
 		msg.SetQuestion(fqdn, qtype)
 
-		response, _, err := nbdns.ExchangeWithFallback(ctx, privateClient, msg, r.resolverAddr.String())
+		response, _, err := nbdns.ExchangeWithFallback(ctx, privateClient, msg, r.resolverAddr.String(), r.wgInterface.MTU())
 		if err != nil {
 			if queryErr == nil {
 				queryErr = fmt.Errorf("DNS query for %s (type %d) after %s: %w", domain.SafeString(), qtype, time.Since(startTime), err)

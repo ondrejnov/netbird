@@ -39,38 +39,17 @@ var (
 	// Info level only for the first successful add per process; repeat adds
 	// from other init paths are quieter.
 	trustLogOnce sync.Once
-
-	parentCtxMu sync.RWMutex
-	parentCtx   context.Context = context.Background()
 )
-
-// SetParentContext installs a parent context whose cancellation aborts any
-// in-flight TrustInterface call. It does not affect UntrustInterface, which
-// always uses a fresh Background-rooted timeout so cleanup can still run
-// during engine shutdown when the engine context is already cancelled.
-func SetParentContext(ctx context.Context) {
-	parentCtxMu.Lock()
-	parentCtx = ctx
-	parentCtxMu.Unlock()
-}
-
-func getParentContext() context.Context {
-	parentCtxMu.RLock()
-	defer parentCtxMu.RUnlock()
-	return parentCtx
-}
 
 // TrustInterface places iface into firewalld's trusted zone if firewalld is
 // running. It is idempotent and best-effort: errors are returned so callers
 // can log, but a non-running firewalld is not an error. Only the first
-// successful call per process logs at Info. Respects the parent context set
-// via SetParentContext so startup-time cancellation unblocks it.
-func TrustInterface(iface string) error {
-	parent := getParentContext()
-	if !isRunning(parent) {
+// successful call per process logs at Info. Cancelling ctx aborts the call.
+func TrustInterface(ctx context.Context, iface string) error {
+	if !isRunning(ctx) {
 		return nil
 	}
-	if err := addTrusted(parent, iface); err != nil {
+	if err := addTrusted(ctx, iface); err != nil {
 		return fmt.Errorf("add %s to firewalld trusted zone: %w", iface, err)
 	}
 	trustLogOnce.Do(func() {

@@ -15,11 +15,16 @@ type packetTracer interface {
 	TracePacketFromBuilder(builder *uspfilter.PacketBuilder) (*uspfilter.PacketTrace, error)
 }
 
-func (s *Server) TracePacket(_ context.Context, req *proto.TracePacketRequest) (*proto.TracePacketResponse, error) {
+func (s *Server) TracePacket(ctx context.Context, req *proto.TracePacketRequest) (*proto.TracePacketResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
+		return nil, err
+	}
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	tracer, engine, err := s.getPacketTracer()
+	tracer, engine, err := s.getPacketTracer(ss)
 	if err != nil {
 		return nil, err
 	}
@@ -61,8 +66,8 @@ func (s *Server) TracePacket(_ context.Context, req *proto.TracePacketRequest) (
 	return s.buildTraceResponse(trace), nil
 }
 
-func (s *Server) getPacketTracer() (packetTracer, *internal.Engine, error) {
-	connectClient := s.session.client()
+func (s *Server) getPacketTracer(ss *session) (packetTracer, *internal.Engine, error) {
+	connectClient := ss.client()
 	if connectClient == nil {
 		return nil, nil, fmt.Errorf("connect client not initialized")
 	}

@@ -41,6 +41,9 @@ const (
 	// RouteEventExitNodeReleased means the exit node owner left and traffic takes the
 	// physical default. The session's request is dropped and has to be made again.
 	RouteEventExitNodeReleased RouteEventKind = "exit_node_released"
+	// RouteEventOverlayRefused means the route overlaps the overlay of another session and
+	// stays out of the table.
+	RouteEventOverlayRefused RouteEventKind = "route_overlay_refused"
 )
 
 // RouteEvent is a warning for one session.
@@ -500,6 +503,34 @@ func (r *Routes) exitNodeOwner() *routeClaim {
 		}
 	}
 	return nil
+}
+
+// ExitNodeOwner returns the session holding the exit node of the host, if there is one. A route
+// that only waits for its peer has claimed nothing yet.
+func (r *Routes) ExitNodeOwner() (SessionKey, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	owner := r.exitNodeOwner()
+	if owner == nil {
+		return SessionKey{}, false
+	}
+	return owner.key, true
+}
+
+// WaitsForExitNode reports whether the session asked for an exit node another session holds.
+func (r *Routes) WaitsForExitNode(key SessionKey) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, prefix := range defaultPrefixes {
+		claims := r.prefixes[prefix]
+		if claims == nil {
+			continue
+		}
+		if slices.ContainsFunc(claims.waiters, func(waiter *routeClaim) bool { return waiter.key == key }) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Routes) forgetIfEmpty(prefix netip.Prefix) {

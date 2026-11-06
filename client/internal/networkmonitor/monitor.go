@@ -28,11 +28,35 @@ type NetworkMonitor struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 	mu     sync.Mutex
+	// netbirdInterfaces lists the interfaces of the sessions of the daemon, nil without sessions.
+	netbirdInterfaces func() []string
+}
+
+// Option configures a NetworkMonitor.
+type Option func(*NetworkMonitor)
+
+// WithNetbirdInterfaces keeps the interfaces of all sessions out of the next hops the monitor
+// watches: a change in one session must not restart another (I8).
+func WithNetbirdInterfaces(interfaces func() []string) Option {
+	return func(nw *NetworkMonitor) {
+		nw.netbirdInterfaces = interfaces
+	}
 }
 
 // New creates a new network monitor.
-func New() *NetworkMonitor {
-	return &NetworkMonitor{}
+func New(opts ...Option) *NetworkMonitor {
+	nw := &NetworkMonitor{}
+	for _, opt := range opts {
+		opt(nw)
+	}
+	return nw
+}
+
+func (nw *NetworkMonitor) defaultNextHop(ip netip.Addr) (systemops.Nexthop, error) {
+	if nw.netbirdInterfaces == nil {
+		return systemops.GetNextHop(ip)
+	}
+	return systemops.GetDefaultNextHopExcluding(ip, nw.netbirdInterfaces())
 }
 
 // Listen begins monitoring network changes. When a change is detected, this function will return without error.
@@ -54,8 +78,8 @@ func (nw *NetworkMonitor) Listen(ctx context.Context) (err error) {
 
 	operation := func() error {
 		var errv4, errv6 error
-		nexthop4, errv4 = systemops.GetNextHop(netip.IPv4Unspecified())
-		nexthop6, errv6 = systemops.GetNextHop(netip.IPv6Unspecified())
+		nexthop4, errv4 = nw.defaultNextHop(netip.IPv4Unspecified())
+		nexthop6, errv6 = nw.defaultNextHop(netip.IPv6Unspecified())
 
 		if errv4 != nil && errv6 != nil {
 			return errors.New("failed to get default next hops")

@@ -11,7 +11,15 @@ type NetworkMonitor struct {
 }
 
 // New creates a new network monitor.
-func New() *NetworkMonitor {
+// Option configures a NetworkMonitor, which this platform does not run.
+type Option func(*NetworkMonitor)
+
+// WithNetbirdInterfaces does nothing on this platform.
+func WithNetbirdInterfaces(func() []string) Option {
+	return func(*NetworkMonitor) {}
+}
+
+func New(_ ...Option) *NetworkMonitor {
 	return &NetworkMonitor{}
 }
 

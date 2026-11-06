@@ -1,6 +1,7 @@
 package acl
 
 import (
+	"context"
 	"net/netip"
 	"sync"
 	"testing"
@@ -131,7 +132,7 @@ func newCountingACL(t *testing.T) (*DefaultManager, *countingFirewall, func()) {
 	ifaceMock.EXPECT().Address().Return(wgaddr.Address{IP: network.Addr(), Network: network}).AnyTimes()
 	ifaceMock.EXPECT().GetWGDevice().Return(nil).AnyTimes()
 
-	realFW, err := firewall.NewFirewall(ifaceMock, nil, flowLogger, false, iface.DefaultMTU)
+	realFW, err := firewall.NewFirewall(context.Background(), ifaceMock, nil, flowLogger, false, iface.DefaultMTU)
 	require.NoError(t, err)
 
 	fw := &countingFirewall{Manager: realFW}

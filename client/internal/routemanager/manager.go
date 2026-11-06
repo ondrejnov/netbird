@@ -81,6 +81,9 @@ type ManagerConfig struct {
 	PeerStore           *peerstore.Store
 	DisableClientRoutes bool
 	DisableServerRoutes bool
+	// NewSysOps builds the system operations of one session of several. Nil means the manager
+	// owns the routing of the host alone.
+	NewSysOps func(*notifier.Notifier) *systemops.SysOps
 }
 
 // DefaultManager is the default instance of a route manager
@@ -118,7 +121,7 @@ type DefaultManager struct {
 func NewManager(config ManagerConfig) *DefaultManager {
 	mCTX, cancel := context.WithCancel(config.Context)
 	notifier := notifier.NewNotifier()
-	sysOps := systemops.New(config.WGInterface, notifier)
+	sysOps := newSysOps(config, notifier)
 
 	if runtime.GOOS == "windows" && config.WGInterface != nil {
 		nbnet.SetVPNInterfaceName(config.WGInterface.Name())
@@ -224,6 +227,13 @@ func (m *DefaultManager) ReconcilePeerAllowedIPs(peerKey string) error {
 			return nil
 		},
 	)
+}
+
+func newSysOps(config ManagerConfig, notifier *notifier.Notifier) *systemops.SysOps {
+	if config.NewSysOps != nil {
+		return config.NewSysOps(notifier)
+	}
+	return systemops.New(config.WGInterface, notifier)
 }
 
 // Init sets up the routing

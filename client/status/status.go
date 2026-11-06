@@ -62,6 +62,9 @@ type ConvertOptions struct {
 	// session expires. Zero when the peer is not SSO-tracked or login
 	// expiration is disabled. Sourced from StatusResponse.SessionExpiresAt.
 	SessionExpiresAt time.Time
+	// Sessions are the sessions of a daemon with concurrent profiles, as StatusResponse lists
+	// them. Empty for a daemon without it.
+	Sessions []*proto.SessionStatus
 }
 
 type PeerStateDetailOutput struct {
@@ -166,6 +169,9 @@ type OutputOverview struct {
 	// expiration is disabled. Pointer (rather than zero-value time.Time) so
 	// JSON / YAML omit the field entirely with `,omitempty`.
 	SessionExpiresAt *time.Time `json:"sessionExpiresAt,omitempty" yaml:"sessionExpiresAt,omitempty"`
+	// Sessions lists every session of a daemon with concurrent profiles. The fields above
+	// describe the one the status was asked for. Absent for a daemon without it.
+	Sessions []SessionOutput `json:"sessions,omitempty" yaml:"sessions,omitempty"`
 }
 
 // ConvertToStatusOutputOverview converts protobuf status to the output overview.
@@ -215,6 +221,7 @@ func ConvertToStatusOutputOverview(pbFullStatus *proto.FullStatus, opts ConvertO
 		t := opts.SessionExpiresAt
 		overview.SessionExpiresAt = &t
 	}
+	overview.Sessions = mapSessions(opts.Sessions)
 
 	if opts.Anonymize {
 		anonymizer := anonymize.NewAnonymizer(anonymize.DefaultAddresses())
@@ -1028,6 +1035,10 @@ func anonymizeOverview(a *anonymize.Anonymizer, overview *OutputOverview) {
 	}
 
 	overview.FQDN = a.AnonymizeDomain(overview.FQDN)
+
+	for i := range overview.Sessions {
+		overview.Sessions[i].OverlayIP = a.AnonymizeIPString(overview.Sessions[i].OverlayIP)
+	}
 
 	for i, event := range overview.Events {
 		overview.Events[i].Message = a.AnonymizeString(event.Message)

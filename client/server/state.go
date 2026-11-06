@@ -15,8 +15,13 @@ import (
 )
 
 // ListStates returns a list of all saved states
-func (s *Server) ListStates(_ context.Context, _ *proto.ListStatesRequest) (*proto.ListStatesResponse, error) {
-	mgr := statemanager.New(s.profileManager.GetStatePath())
+func (s *Server) ListStates(ctx context.Context, req *proto.ListStatesRequest) (*proto.ListStatesResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
+		return nil, err
+	}
+
+	mgr := statemanager.New(s.statePathOf(ss))
 
 	stateNames, err := mgr.GetSavedStateNames()
 	if err != nil {
@@ -37,11 +42,23 @@ func (s *Server) ListStates(_ context.Context, _ *proto.ListStatesRequest) (*pro
 
 // CleanState handles cleaning of states (performing cleanup operations)
 func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (*proto.CleanStateResponse, error) {
-	if s.session.clientConnectingOrConnected() {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
+		return nil, err
+	}
+
+	release, err := s.claimHostAlone(ctx, ss)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	// Under the claim: a run that started while waiting for it holds the state by now.
+	if ss.clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
 
-	statePath := s.profileManager.GetStatePath()
+	statePath := s.statePathOf(ss)
 
 	if req.All {
 		// Reuse existing cleanup logic for all states
@@ -80,14 +97,18 @@ func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (
 
 // DeleteState handles deletion of states without cleanup
 func (s *Server) DeleteState(ctx context.Context, req *proto.DeleteStateRequest) (*proto.DeleteStateResponse, error) {
-	if s.session.clientConnectingOrConnected() {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
+		return nil, err
+	}
+
+	if ss.clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
 
-	mgr := statemanager.New(s.profileManager.GetStatePath())
+	mgr := statemanager.New(s.statePathOf(ss))
 
 	var count int
-	var err error
 
 	if req.All {
 		count, err = mgr.DeleteAllStates()

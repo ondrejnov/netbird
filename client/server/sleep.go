@@ -17,20 +17,37 @@ const envDisableSleepDetector = "NB_DISABLE_SLEEP_DETECTOR"
 // serverAgent adapts Server to the handler.Agent and handler.StatusChecker interfaces
 type serverAgent struct {
 	s *Server
+
+	// slept lists the sessions the last sleep took down, for the wake up to bring back. The
+	// sleep handler serializes the calls of this agent.
+	slept []*session
 }
 
 func (a *serverAgent) Up(ctx context.Context) error {
+	if a.s.concurrentProfiles {
+		slept := a.slept
+		a.slept = nil
+		return a.s.wakeSessions(ctx, slept)
+	}
 	_, err := a.s.Up(ctx, &proto.UpRequest{})
 	return err
 }
 
 func (a *serverAgent) Down(ctx context.Context) error {
+	if a.s.concurrentProfiles {
+		slept, err := a.s.sleepSessions(ctx)
+		a.slept = slept
+		return err
+	}
 	_, err := a.s.Down(ctx, &proto.DownRequest{})
 	return err
 }
 
 func (a *serverAgent) Status() (internal.StatusType, error) {
-	return a.s.session.state.Status()
+	if a.s.concurrentProfiles {
+		return a.s.sleepStatus(), nil
+	}
+	return a.s.focusedSession().state.Status()
 }
 
 // startSleepDetector starts the OS sleep/wake detector and forwards events to

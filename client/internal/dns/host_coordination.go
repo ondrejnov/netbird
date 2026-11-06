@@ -10,12 +10,17 @@ const (
 	// HostDNSHeld means another session owns the host DNS on a backend that holds one
 	// configuration for the whole host. This session works by IP only.
 	HostDNSHeld HostDNSWarningKind = "host_dns_held"
+	// HostDNSDomainShared means another session serves the same domain on its link. A name
+	// in the domain is answered by whichever link answers first, see section 5.3 of the spec.
+	HostDNSDomainShared HostDNSWarningKind = "dns_domain_shared"
 )
 
 // HostDNSWarning is a warning for one session.
 type HostDNSWarning struct {
 	Kind HostDNSWarningKind
 	Err  error
+	// Domains lists the domains of HostDNSDomainShared.
+	Domains []string
 }
 
 // HostDNSCoordinator connects a DNS server to the sessions sharing the host. A failed
@@ -34,6 +39,9 @@ type HostDNSCoordinator interface {
 	ClaimHostDNS() error
 	// ReleaseHostDNS releases the host DNS if this session owns it.
 	ReleaseHostDNS()
+	// ServeDomains records the domains this session serves on its link, replacing the earlier
+	// ones. A domain shared with another session is reported through its warning.
+	ServeDomains(domains []string)
 	// WarnHostDNS reports a warning for this session.
 	WarnHostDNS(HostDNSWarning)
 }

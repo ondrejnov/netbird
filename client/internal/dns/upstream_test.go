@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/netbirdio/netbird/client/iface"
 	"github.com/netbirdio/netbird/client/iface/device"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
 	"github.com/netbirdio/netbird/client/iface/wgbackend"
@@ -129,6 +130,7 @@ func (m *mockNetstackProvider) IsUserspaceBind() bool             { return false
 func (m *mockNetstackProvider) GetFilter() device.PacketFilter    { return nil }
 func (m *mockNetstackProvider) GetDevice() *device.FilteredDevice { return nil }
 func (m *mockNetstackProvider) GetNet() *wgbackend.NetstackNet    { return nil }
+func (m *mockNetstackProvider) MTU() uint16                       { return 0 }
 func (m *mockNetstackProvider) GetInterfaceGUIDString() (string, error) {
 	return "", nil
 }
@@ -681,7 +683,7 @@ func TestExchangeWithFallback_TCPContext(t *testing.T) {
 	client := &dns.Client{Timeout: 2 * time.Second}
 	r := new(dns.Msg).SetQuestion("example.com.", dns.TypeA)
 
-	rm, _, err := ExchangeWithFallback(ctx, client, r, upstream)
+	rm, _, err := ExchangeWithFallback(ctx, client, r, upstream, iface.DefaultMTU)
 	require.NoError(t, err)
 	require.NotNil(t, rm)
 	require.NotEmpty(t, rm.Answer)
@@ -750,7 +752,7 @@ func TestExchangeWithFallback_UDPFallbackToTCP(t *testing.T) {
 	client := &dns.Client{Timeout: 2 * time.Second}
 	r := new(dns.Msg).SetQuestion("example.com.", dns.TypeA)
 
-	rm, _, err := ExchangeWithFallback(ctx, client, r, addr)
+	rm, _, err := ExchangeWithFallback(ctx, client, r, addr, iface.DefaultMTU)
 	require.NoError(t, err, "should fall back to TCP after truncated UDP response")
 	require.NotNil(t, rm)
 	require.NotEmpty(t, rm.Answer, "TCP response should contain the full answer")
@@ -797,7 +799,7 @@ func TestExchangeWithFallback_TCPContextSkipsUDP(t *testing.T) {
 	client := &dns.Client{Timeout: 2 * time.Second}
 	r := new(dns.Msg).SetQuestion("example.com.", dns.TypeA)
 
-	rm, _, err := ExchangeWithFallback(ctx, client, r, upstream)
+	rm, _, err := ExchangeWithFallback(ctx, client, r, upstream, iface.DefaultMTU)
 	require.NoError(t, err)
 	require.NotNil(t, rm)
 	require.NotEmpty(t, rm.Answer)
@@ -806,7 +808,7 @@ func TestExchangeWithFallback_TCPContextSkipsUDP(t *testing.T) {
 	// Without TCP context, trying to reach a TCP-only server via UDP should fail
 	ctx2 := context.Background()
 	client2 := &dns.Client{Timeout: 500 * time.Millisecond}
-	_, _, err = ExchangeWithFallback(ctx2, client2, r, upstream)
+	_, _, err = ExchangeWithFallback(ctx2, client2, r, upstream, iface.DefaultMTU)
 	assert.Error(t, err, "should fail when no UDP server and no TCP context")
 }
 
@@ -843,11 +845,11 @@ func TestExchangeWithFallback_EDNS0Capped(t *testing.T) {
 	r := new(dns.Msg).SetQuestion("example.com.", dns.TypeA)
 	r.SetEdns0(4096, false)
 
-	rm, _, err := ExchangeWithFallback(ctx, client, r, addr)
+	rm, _, err := ExchangeWithFallback(ctx, client, r, addr, iface.DefaultMTU)
 	require.NoError(t, err)
 	require.NotNil(t, rm)
 
-	expectedMax := uint16(currentMTU - ipUDPHeaderSize)
+	expectedMax := uint16(iface.DefaultMTU - ipUDPHeaderSize)
 	assert.Equal(t, expectedMax, uint16(receivedUDPSize.Load()),
 		"upstream should see capped EDNS0, not the client's 4096")
 }
@@ -903,7 +905,7 @@ func TestExchangeWithFallback_TCPTruncatesToClientSize(t *testing.T) {
 	r := new(dns.Msg).SetQuestion("example.com.", dns.TypeTXT)
 	r.SetEdns0(4096, false)
 
-	rm, _, err := ExchangeWithFallback(ctx, client, r, addr)
+	rm, _, err := ExchangeWithFallback(ctx, client, r, addr, iface.DefaultMTU)
 	require.NoError(t, err)
 	require.NotNil(t, rm)
 	assert.Len(t, rm.Answer, 20, "large EDNS0 client should get all records")
@@ -913,7 +915,7 @@ func TestExchangeWithFallback_TCPTruncatesToClientSize(t *testing.T) {
 	r2 := new(dns.Msg).SetQuestion("example.com.", dns.TypeTXT)
 	r2.SetEdns0(512, false)
 
-	rm2, _, err := ExchangeWithFallback(ctx, &dns.Client{Timeout: 2 * time.Second}, r2, addr)
+	rm2, _, err := ExchangeWithFallback(ctx, &dns.Client{Timeout: 2 * time.Second}, r2, addr, iface.DefaultMTU)
 	require.NoError(t, err)
 	require.NotNil(t, rm2)
 	assert.Less(t, len(rm2.Answer), 20, "small EDNS0 client should get fewer records")

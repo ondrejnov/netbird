@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/netbirdio/netbird/client/internal/routemanager/ipfwdstate"
 )
 
 // IsolationTableName is the table holding the rules that separate sessions from each
@@ -108,6 +110,20 @@ func isDecimal(s string) bool {
 type sessionScope struct {
 	names SessionNames
 	base  string
+	// forwarding shares the IP forwarding sysctls with the other sessions, nil when the manager
+	// keeps its own count.
+	forwarding *ipfwdstate.HostState
+}
+
+// SessionOption configures a manager built with CreateForSession.
+type SessionOption func(*sessionScope)
+
+// WithHostForwarding makes the manager share the IP forwarding sysctls with the managers given the
+// same state. Closing the manager releases what it holds.
+func WithHostForwarding(host *ipfwdstate.HostState) SessionOption {
+	return func(s *sessionScope) {
+		s.forwarding = host
+	}
 }
 
 func newSessionScope(names SessionNames) (*sessionScope, error) {
@@ -164,4 +180,20 @@ func (r *family) bindSession(scope *sessionScope) {
 	}
 	r.scope = scope
 	r.tags = newAcceptTags(scope.names.TagSuffix)
+}
+
+// shareForwarding moves the family, which the IPv6 one follows, to the state of the daemon.
+func (m *Manager) shareForwarding() {
+	if m.scope != nil && m.scope.forwarding != nil {
+		m.family4.ipFwdState = ipfwdstate.NewIPForwardingState(m.wgIface.Name(), ipfwdstate.WithHostState(m.scope.forwarding))
+	}
+}
+
+// closeSharedForwarding gives up what the session holds of the shared forwarding, which outlives
+// the manager. A manager with its own count keeps it, as it can be initialized again.
+func (m *Manager) closeSharedForwarding() error {
+	if m.scope == nil || m.scope.forwarding == nil {
+		return nil
+	}
+	return m.family4.ipFwdState.Close()
 }
