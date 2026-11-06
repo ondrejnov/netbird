@@ -489,6 +489,26 @@ func TestSlots_ReleaseFreesPortAndName(t *testing.T) {
 	assert.Equal(t, uint16(40000), res.Port, "the port is free again")
 }
 
+// The holder of a replaced lease has no say about the session, and it has to be told so.
+func TestSlots_ReleaseReportsWhetherTheLeaseHeld(t *testing.T) {
+	s := newFakeSlots(t, t.TempDir())
+	key := SessionKey{Profile: "a"}
+
+	old, err := s.Reserve(key, ResourceRequest{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort})
+	require.NoError(t, err)
+	current, err := s.Reserve(key, ResourceRequest{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort})
+	require.NoError(t, err)
+
+	assert.False(t, s.Release(old.Lease), "a replaced lease holds nothing")
+	assert.True(t, s.Release(current.Lease), "the newest lease holds the resources")
+	assert.False(t, s.Release(current.Lease), "a released lease holds nothing")
+
+	last, err := s.Reserve(key, ResourceRequest{WgIface: iface.WgInterfaceDefault, WgPort: iface.DefaultWgPort})
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+	assert.True(t, s.Release(last.Lease), "after Close nothing can have replaced the lease")
+}
+
 func TestSlots_StaleReleaseKeepsTheNewReservation(t *testing.T) {
 	s := newFakeSlots(t, t.TempDir())
 	office := ResourceRequest{WgIface: "office", WgPort: 40000}
@@ -782,4 +802,48 @@ func TestStoredRecords_RefusesCorruptFile(t *testing.T) {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"profile":"a"`, "a corrupt file should stay in place")
+}
+
+// A session has to be on record before its desired state can be stored, and that must not
+// take its resources: the resources of a session that does not run stay free.
+func TestSlots_EnsureStoresASlotWithoutReserving(t *testing.T) {
+	base := t.TempDir()
+	first := SessionKey{Profile: "first", Username: "u"}
+	second := SessionKey{Profile: "second", Username: "u"}
+
+	s, err := NewSlots(base)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+
+	slot, err := s.Ensure(first)
+	require.NoError(t, err)
+	assert.Equal(t, Slot(0), slot, "the first session gets the lowest slot")
+
+	slot, err = s.Ensure(second)
+	require.NoError(t, err)
+	assert.Equal(t, Slot(1), slot, "the next session gets the next slot")
+
+	slot, err = s.Ensure(first)
+	require.NoError(t, err)
+	assert.Equal(t, Slot(0), slot, "a known session keeps its slot")
+
+	require.NoError(t, s.SetDesired(second, DesiredUp))
+
+	stored, err := StoredRecords(base)
+	require.NoError(t, err)
+	assert.Equal(t, []SlotRecord{
+		{Key: first, Slot: 0, Desired: DesiredDown},
+		{Key: second, Slot: 1, Desired: DesiredUp},
+	}, stored, "the records must reach the disk")
+
+	assert.NoError(t, s.Remove(first), "a session that was only ensured holds no resources")
+}
+
+func TestSlots_EnsureAfterCloseIsRefused(t *testing.T) {
+	s, err := NewSlots(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	_, err = s.Ensure(SessionKey{Profile: "p"})
+	assert.ErrorIs(t, err, ErrSlotsClosed)
 }

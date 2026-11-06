@@ -64,12 +64,18 @@ func TestSessionLifecycle_ConcurrentAccess(t *testing.T) {
 		ss.cancelAct()
 		ss.clientConnectingOrConnected()
 		ss.runningKey()
+		ss.restarting()
+		ss.restartStillWanted(runRestart{})
+		ss.connectionConfig()
+		ss.otherProfileRunKey()
 		ss.configBelongsTo(profilemanager.SessionKey{})
 		ss.configBelongsToRun()
 	}, func() {
 		ss.setActCancel(func() {})
 		ss.setClient(client)
-		_, giveUp := ss.beginRun(profilemanager.SessionKey{})
+		_, giveUp := ss.beginRun(profilemanager.SessionKey{}, nil)
+		ss.beginRestart()
+		ss.endRestart()
 		close(giveUp)
 		ss.markClientDown()
 		ss.setClient(nil)
@@ -87,9 +93,9 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	s.rootCtx = context.Background()
 	mgmtURL, err := url.Parse("https://management.example:443")
 	require.NoError(t, err)
-	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: mgmtURL})
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: mgmtURL})
 
-	s.session.beginRun(profilemanager.SessionKey{})
+	s.focusedSession().beginRun(profilemanager.SessionKey{}, nil)
 
 	waitForReady := true
 	done := make(chan error, 1)
@@ -101,7 +107,7 @@ func TestStatusWaitForReady_FollowsRestartedRun(t *testing.T) {
 	// Long enough for Status to park on the first run's channels.
 	time.Sleep(100 * time.Millisecond)
 
-	restarted, _ := s.session.beginRun(profilemanager.SessionKey{})
+	restarted, _ := s.focusedSession().beginRun(profilemanager.SessionKey{}, nil)
 	close(restarted)
 
 	select {
@@ -121,7 +127,7 @@ func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
 	require.NoError(t, err)
 	first := &profilemanager.Config{ManagementURL: mgmtURL}
 	second := &profilemanager.Config{ManagementURL: mgmtURL}
-	s.session.setConfig(profilemanager.SessionKey{}, first)
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, first)
 
 	hammerWithReaders(func() {
 		_, err := s.Status(context.Background(), &proto.StatusRequest{})
@@ -129,12 +135,12 @@ func TestConfigSwap_DoesNotRaceWithItsReaders(t *testing.T) {
 		s.checkUpdateSettingsDisabled()
 	}, func() {
 		s.mutex.Lock()
-		s.session.setConfig(profilemanager.SessionKey{}, second)
-		s.session.setConfig(profilemanager.SessionKey{}, first)
+		s.focusedSession().setConfig(profilemanager.SessionKey{}, second)
+		s.focusedSession().setConfig(profilemanager.SessionKey{}, first)
 		s.mutex.Unlock()
 	})
 
-	assert.Same(t, first, s.session.currentConfig(), "the last write should be the one a reader sees")
+	assert.Same(t, first, s.focusedSession().currentConfig(), "the last write should be the one a reader sees")
 }
 
 // WaitSSOLogin and WaitJWTToken read the flow record while Login and RequestJWTAuth
@@ -231,7 +237,7 @@ func TestRunningKey_FollowsTheRun(t *testing.T) {
 	_, running := ss.runningKey()
 	assert.False(t, running, "no run was ever started")
 
-	_, giveUp := ss.beginRun(first)
+	_, giveUp := ss.beginRun(first, nil)
 	key, running := ss.runningKey()
 	assert.True(t, running, "the goroutine of the run is alive")
 	assert.Equal(t, first, key, "the key must be the one the run started with")
@@ -240,7 +246,7 @@ func TestRunningKey_FollowsTheRun(t *testing.T) {
 	_, running = ss.runningKey()
 	assert.False(t, running, "the goroutine gave up, nothing runs")
 
-	ss.beginRun(second)
+	ss.beginRun(second, nil)
 	key, running = ss.runningKey()
 	assert.True(t, running, "the restarted goroutine is alive")
 	assert.Equal(t, second, key, "the key must follow the restart")
@@ -285,25 +291,25 @@ func TestExtendSessionLoginHint_FollowsRunningProfile(t *testing.T) {
 	writeState("work", "work@example.com")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "active_profile.txt"), []byte("work"), 0o600))
 
-	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "with nothing running the hint stays the local active profile's")
+	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(s.focusedSession()), "with nothing running the hint stays the local active profile's")
 
-	_, giveUp := s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
-	assert.Equal(t, "default@example.com", s.extendSessionLoginHint(), "the hint must be the running profile's")
+	_, giveUp := s.focusedSession().beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
+	assert.Equal(t, "default@example.com", s.extendSessionLoginHint(s.focusedSession()), "the hint must be the running profile's")
 
 	close(giveUp)
-	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(), "a finished run must not decide the hint")
+	assert.Equal(t, "work@example.com", s.extendSessionLoginHint(s.focusedSession()), "a finished run must not decide the hint")
 
-	s.session.beginRun(profilemanager.SessionKey{Profile: "gone", Username: username})
-	assert.Empty(t, s.extendSessionLoginHint(), "a running profile with no recorded account has no hint")
+	s.focusedSession().beginRun(profilemanager.SessionKey{Profile: "gone", Username: username}, nil)
+	assert.Empty(t, s.extendSessionLoginHint(s.focusedSession()), "a running profile with no recorded account has no hint")
 }
 
 // The daemon's root context carries no connection state: it belongs to the session. Every
 // handler that reports or changes the status has to find it there.
 func TestServerHandlers_WorkWithoutStateInRootContext(t *testing.T) {
-	s := New(context.Background(), "console", "", false, false, false, false)
+	s := New(context.Background(), "console", "", false, false, false, false, false)
 	managementURL, err := url.Parse("https://management.example.com")
 	require.NoError(t, err)
-	s.session.setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: managementURL})
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, &profilemanager.Config{ManagementURL: managementURL})
 
 	require.NotPanics(t, func() {
 		resp, err := s.Status(context.Background(), &proto.StatusRequest{})
@@ -311,7 +317,7 @@ func TestServerHandlers_WorkWithoutStateInRootContext(t *testing.T) {
 		assert.Equal(t, string(internal.StatusIdle), resp.GetStatus(), "a new session should report idle")
 	}, "the status must not depend on the root context")
 
-	agent := &serverAgent{s}
+	agent := &serverAgent{s: s}
 	require.NotPanics(t, func() {
 		status, err := agent.Status()
 		require.NoError(t, err)

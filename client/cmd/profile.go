@@ -62,9 +62,10 @@ var profileRemoveCmd = &cobra.Command{
 var profileSelectCmd = &cobra.Command{
 	Use:   "select <profile>",
 	Short: "Select a profile",
-	Long:  `Make the specified profile active. Accepts a name, ID, or unique ID prefix.`,
-	Args:  cobra.ExactArgs(1),
-	RunE:  selectProfileFunc,
+	Long: `Make the specified profile active. Accepts a name, ID, or unique ID prefix.
+With concurrent profiles enabled on the daemon, selecting only moves the focus and leaves every connection as it is.`,
+	Args: cobra.ExactArgs(1),
+	RunE: selectProfileFunc,
 }
 
 func init() {
@@ -110,12 +111,13 @@ func listProfilesFunc(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	if profileListShowID {
-		fmt.Fprintln(tw, "ID\tNAME\tACTIVE")
-	} else {
-		fmt.Fprintln(tw, "NAME\tACTIVE")
+	connection, withStatus, err := profileConnectionStatus(cmd.Context(), daemonClient)
+	if err != nil {
+		return err
 	}
+
+	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	printProfileHeader(tw, withStatus)
 	for _, profile := range resp.Profiles {
 		marker := ""
 		if profile.IsActive {
@@ -123,13 +125,64 @@ func listProfilesFunc(cmd *cobra.Command, _ []string) error {
 		}
 		name := profilemanager.StripCtrlChars(profile.Name)
 		id := profilemanager.ID(profile.Id)
+		row := []string{name, marker}
 		if profileListShowID {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", id.ShortID(), name, marker)
-		} else {
-			fmt.Fprintf(tw, "%s\t%s\n", name, marker)
+			row = []string{id.ShortID(), name, marker}
 		}
+		if withStatus {
+			row = append(row, connection.of(profile))
+		}
+		fmt.Fprintln(tw, strings.Join(row, "\t"))
 	}
 	return tw.Flush()
+}
+
+func printProfileHeader(tw *tabwriter.Writer, withStatus bool) {
+	header := []string{"NAME", "ACTIVE"}
+	if profileListShowID {
+		header = []string{"ID", "NAME", "ACTIVE"}
+	}
+	if withStatus {
+		header = append(header, "STATUS")
+	}
+	fmt.Fprintln(tw, strings.Join(header, "\t"))
+}
+
+// connectionStatuses is the connection status of the profiles of a daemon with concurrent
+// profiles, from its sessions. A profile without a session is not connected.
+type connectionStatuses map[string]string
+
+// profileConnectionStatus reads the connection status of the profiles. It reports false for a
+// daemon without concurrent profiles, whose list stays what it was.
+func profileConnectionStatus(ctx context.Context, client proto.DaemonServiceClient) (connectionStatuses, bool, error) {
+	state, err := daemonConcurrentProfiles(ctx, client)
+	if err != nil {
+		return nil, false, err
+	}
+	if state != gateEnabled {
+		return nil, false, nil
+	}
+
+	resp, err := client.Status(ctx, &proto.StatusRequest{})
+	if err != nil {
+		return nil, false, fmt.Errorf("get service status: %w", err)
+	}
+	statuses := make(connectionStatuses, len(resp.GetSessions()))
+	for _, s := range resp.GetSessions() {
+		statuses[s.GetProfileId()] = s.GetStatus()
+	}
+	return statuses, true, nil
+}
+
+// of is the status shown for profile. The daemon's own answer wins over what the sessions say.
+func (c connectionStatuses) of(profile *proto.Profile) string {
+	if status := profile.GetConnectionStatus(); status != "" {
+		return status
+	}
+	if status, ok := c[profile.GetId()]; ok {
+		return status
+	}
+	return "Idle"
 }
 
 func addProfileFunc(cmd *cobra.Command, args []string) error {
@@ -245,7 +298,7 @@ func removeProfileFunc(cmd *cobra.Command, args []string) error {
 		Username:    currUser.Username,
 	})
 	if err != nil {
-		return wrapAmbiguityError(err, handle)
+		return explainRunningSession(cmd.Context(), daemonClient, err, wrapAmbiguityError(err, handle), handle)
 	}
 
 	cmd.Printf("Profile removed: %s\n", resp.Id)
@@ -287,19 +340,49 @@ func selectProfileFunc(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	status, err := daemonClient.Status(ctx, &proto.StatusRequest{})
+	// With concurrent profiles the selection only moves the focus. The connections stay.
+	state, err := daemonConcurrentProfiles(ctx, daemonClient)
 	if err != nil {
-		return fmt.Errorf("get service status: %w", err)
+		return err
 	}
-
-	if status.Status == string(internal.StatusConnected) {
-		if _, err := daemonClient.Down(ctx, &proto.DownRequest{}); err != nil {
-			return fmt.Errorf("call service down method: %w", err)
+	if state != gateEnabled {
+		if err := downConnectedProfile(ctx, daemonClient); err != nil {
+			return err
 		}
 	}
 
 	id := profilemanager.ID(switchResp.Id)
 	cmd.Printf("Profile switched to: %s\n", id.ShortID())
+	return nil
+}
+
+// explainRunningSession tells what to do about a profile that cannot be removed or logged out
+// while it runs, when the daemon runs concurrent profiles. Otherwise the error is the one of
+// today.
+func explainRunningSession(ctx context.Context, client proto.DaemonServiceClient, daemonErr, fallback error, handle string) error {
+	if gstatus.Code(daemonErr) != codes.FailedPrecondition {
+		return fallback
+	}
+	state, err := daemonConcurrentProfiles(ctx, client)
+	if err != nil || state != gateEnabled {
+		return fallback
+	}
+	return runningSessionError(daemonErr, handle)
+}
+
+// downConnectedProfile ends the connection of the daemon if there is one, which a daemon with
+// a single connection must do for the profile selected to be the one it is connected with.
+func downConnectedProfile(ctx context.Context, client proto.DaemonServiceClient) error {
+	status, err := client.Status(ctx, &proto.StatusRequest{})
+	if err != nil {
+		return fmt.Errorf("get service status: %w", err)
+	}
+
+	if status.Status == string(internal.StatusConnected) {
+		if _, err := client.Down(ctx, &proto.DownRequest{}); err != nil {
+			return fmt.Errorf("call service down method: %w", err)
+		}
+	}
 	return nil
 }
 

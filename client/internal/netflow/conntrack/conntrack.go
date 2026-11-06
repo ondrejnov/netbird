@@ -45,6 +45,13 @@ type ConnTrack struct {
 	started        bool
 	done           chan struct{}
 	sysctlModified bool
+
+	// accounting shares the counters with other instances, nil when this one owns them.
+	accounting     *Accounting
+	accountingHeld bool
+
+	// otherOverlays makes this the tracker of one session of several, nil otherwise.
+	otherOverlays func() []netip.Prefix
 }
 
 // DialFunc is a constructor for netlink conntrack connections.
@@ -354,6 +361,10 @@ func (c *ConnTrack) handleEvent(event nfct.Event) {
 
 // relevantFlow checks if the flow is related to the specified interface
 func (c *ConnTrack) relevantFlow(mark uint32, srcIP, dstIP netip.Addr) bool {
+	if c.otherOverlays != nil {
+		return c.sessionFlow(srcIP, dstIP)
+	}
+
 	if nbnet.IsDataPlaneMark(mark) {
 		return true
 	}

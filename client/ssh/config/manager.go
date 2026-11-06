@@ -25,6 +25,10 @@ const (
 	MaxPeersForSSHConfig = 200
 
 	fileWriteTimeout = 2 * time.Second
+
+	// slotSSHConfigFilePattern names the file of a session in a slot above 0. It sorts after
+	// nbssh.NetBirdSSHConfigFile and matches the same *.conf include of ssh_config.
+	slotSSHConfigFilePattern = "99-netbird-%d.conf"
 )
 
 func isSSHConfigDisabled() bool {
@@ -105,6 +109,17 @@ func New() *Manager {
 		sshConfigDir:  sshConfigDir,
 		sshConfigFile: nbssh.NetBirdSSHConfigFile,
 	}
+}
+
+// NewForSlot creates the SSH config manager of the session in slot. Slot 0 has the file of a
+// daemon without sessions, and each other slot a file of its own, so that a session stopping
+// removes only what it wrote.
+func NewForSlot(slot uint) *Manager {
+	m := New()
+	if slot > 0 {
+		m.sshConfigFile = fmt.Sprintf(slotSSHConfigFilePattern, slot)
+	}
+	return m
 }
 
 // getSystemSSHConfigDir returns platform-specific SSH configuration directory

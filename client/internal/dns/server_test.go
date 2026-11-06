@@ -83,6 +83,10 @@ func (w *mocWGIface) GetStats(_ string) (configurer.WGStats, error) {
 	return configurer.WGStats{}, nil
 }
 
+func (w *mocWGIface) MTU() uint16 {
+	return 0
+}
+
 func (w *mocWGIface) GetNet() *wgbackend.NetstackNet {
 	return nil
 }

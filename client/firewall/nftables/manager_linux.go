@@ -52,6 +52,8 @@ type Manager struct {
 
 	tableName string
 	scope     *sessionScope
+	// trustCtx aborts the firewalld call of Init, see SetTrustContext.
+	trustCtx context.Context
 
 	family4 *family
 	// IPv6 counterpart, nil when no v6 overlay.
@@ -68,12 +70,21 @@ func Create(wgIface iFaceMapper, mtu uint16) (*Manager, error) {
 // CreateForSession creates an nftables firewall manager for one of several sessions on
 // the host. It owns only the given names and never opens the table of another session or
 // the isolation table.
-func CreateForSession(wgIface iFaceMapper, mtu uint16, names SessionNames) (*Manager, error) {
+func CreateForSession(wgIface iFaceMapper, mtu uint16, names SessionNames, opts ...SessionOption) (*Manager, error) {
 	scope, err := newSessionScope(names)
 	if err != nil {
 		return nil, err
 	}
+	for _, opt := range opts {
+		opt(scope)
+	}
 	return newManager(wgIface, mtu, names.Table, scope), nil
+}
+
+// SetTrustContext sets what aborts the firewalld call of Init. A firewalld that does not
+// answer must not hold up the stop of the engine this manager belongs to.
+func (m *Manager) SetTrustContext(ctx context.Context) {
+	m.trustCtx = ctx
 }
 
 func newManager(wgIface iFaceMapper, mtu uint16, tableName string, scope *sessionScope) *Manager {
@@ -82,12 +93,14 @@ func newManager(wgIface iFaceMapper, mtu uint16, tableName string, scope *sessio
 		wgIface:   wgIface,
 		tableName: tableName,
 		scope:     scope,
+		trustCtx:  context.Background(),
 	}
 
 	workTable := &nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv4}
 
 	m.family4 = newFamily(workTable, wgIface, mtu)
 	m.family4.bindSession(scope)
+	m.shareForwarding()
 
 	if wgIface.Address().HasIPv6() {
 		m.createIPv6Components(tableName, wgIface, mtu)
@@ -166,6 +179,11 @@ func (m *Manager) reconcileExternalChains() error {
 }
 
 func (m *Manager) initFirewall() (err error) {
+	m.family4.trustCtx = m.trustCtx
+	if m.hasIPv6() {
+		m.family6.trustCtx = m.trustCtx
+	}
+
 	workTable, err := m.createWorkTable()
 	if err != nil {
 		return fmt.Errorf("create work table: %w", err)
@@ -399,6 +417,10 @@ func (m *Manager) Close(stateManager *statemanager.Manager) error {
 		if err := m.family6.Reset(); err != nil {
 			merr = multierror.Append(merr, fmt.Errorf("reset v6 family: %w", err))
 		}
+	}
+
+	if err := m.closeSharedForwarding(); err != nil {
+		merr = multierror.Append(merr, fmt.Errorf("close shared forwarding: %w", err))
 	}
 
 	if err := m.cleanupNetbirdTables(); err != nil {

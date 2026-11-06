@@ -84,6 +84,7 @@ var (
 	profilesDisabled       bool
 	updateSettingsDisabled bool
 	captureEnabled         bool
+	concurrentProfiles     bool
 	networksDisabled       bool
 	localMetricsEnabled    bool
 	localMetricsAddr       string

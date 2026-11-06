@@ -73,7 +73,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 	validKey := cfgA.PrivateKey
 	cfgA.PrivateKey = "not-a-wireguard-key"
 	require.NoError(t, profilemanager.WriteOutConfig(cfgPathA, cfgA))
-	s.session.setConfig(profilemanager.SessionKey{Profile: profilemanager.ID(profileA), Username: username}, cfgA)
+	s.focusedSession().setConfig(profilemanager.SessionKey{Profile: profilemanager.ID(profileA), Username: username}, cfgA)
 
 	profileB := "profile-b"
 	_, err = profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
@@ -96,7 +96,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 		// before SwitchProfile replaces it. This goroutine is the only one reading
 		// the key, because no attempt is running.
 		s.mutex.Lock()
-		running := s.session.currentConfig()
+		running := s.focusedSession().currentConfig()
 		s.mutex.Unlock()
 		running.PrivateKey = validKey
 
@@ -110,7 +110,7 @@ func TestRetryAfterProfileSwitchKeepsStateFileOfRunningProfile(t *testing.T) {
 	require.NoError(t, err)
 
 	s.mutex.Lock()
-	running, gaveUp := s.session.runChans()
+	running, gaveUp := s.focusedSession().runChans()
 	s.mutex.Unlock()
 
 	select {
@@ -186,7 +186,7 @@ func startSessionOnDefault(t *testing.T) *switchedSession {
 
 	defaultKey := profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}
 	require.NoError(t, s.profileManager.SetActiveProfileState(&profilemanager.ActiveProfileState{ID: defaultKey.Profile}))
-	s.session.setConfig(defaultKey, cfgDefault)
+	s.focusedSession().setConfig(defaultKey, cfgDefault)
 
 	t.Cleanup(func() {
 		if _, err := s.Down(ctx, &proto.DownRequest{}); err != nil {
@@ -204,7 +204,7 @@ func startSessionOnDefault(t *testing.T) *switchedSession {
 
 func (st *switchedSession) waitForEngine(t *testing.T) {
 	t.Helper()
-	running, gaveUp := st.s.session.runChans()
+	running, gaveUp := st.s.focusedSession().runChans()
 	select {
 	case <-running:
 	case <-gaveUp:
@@ -226,9 +226,9 @@ func (st *switchedSession) selectWork(t *testing.T) {
 
 func (st *switchedSession) requireRunsDefault(t *testing.T) {
 	t.Helper()
-	assert.Equal(t, st.mgmtAddrA, st.s.session.currentConfig().ManagementURL.Host,
-		"the session must keep the config of the default profile")
-	key, running := st.s.session.runningKey()
+	assert.Equal(t, st.mgmtAddrA, st.s.focusedSession().connectionConfig().ManagementURL.Host,
+		"the connection must keep the config of the default profile")
+	key, running := st.s.focusedSession().runningKey()
 	assert.True(t, running, "the session must run")
 	assert.Equal(t, profilemanager.ID(profilemanager.DefaultProfileName), key.Profile, "the run must stay on the default profile")
 
@@ -251,20 +251,23 @@ func TestMDMRestartAfterSwitchKeepsRunningProfile(t *testing.T) {
 	st.requireRunsDefault(t)
 }
 
-// The restart realigns the session config with the client, so a session extend works again.
-func TestMDMRestartAfterSwitchAllowsExtendAgain(t *testing.T) {
+// The restart keeps the selection, so the config and the client stay two profiles and a session
+// extend stays refused until the selection goes back or a Down follows.
+func TestMDMRestartAfterSwitchKeepsSelectionAndRefusesExtend(t *testing.T) {
 	st := startSessionOnDefault(t)
 	st.selectWork(t)
 
 	require.NoError(t, st.s.onMDMPolicyChange(nil, nil))
 	st.waitForEngine(t)
 
+	key, _ := st.s.focusedSession().selectedConfig()
+	assert.Equal(t, profilemanager.ID(st.work), key.Profile, "the restart must not move the selection")
+
 	ctx, cancel := context.WithTimeout(st.ctx, 10*time.Second)
 	t.Cleanup(cancel)
-	// The test Management has no IdP, so a passed gate ends at the flow creation.
 	_, err := st.s.RequestExtendAuthSession(ctx, &proto.RequestExtendAuthSessionRequest{})
 	require.Error(t, err)
-	assert.NotEqual(t, codes.FailedPrecondition, gstatus.Code(err), "config and client are one profile again: %v", err)
+	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "config and client are two profiles: %v", err)
 }
 
 // Without a switch a policy change restarts the same profile, as it always did.
@@ -289,17 +292,17 @@ func TestMDMRestartWithRunOverFollowsActiveProfile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, giveUp := s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	_, giveUp := s.focusedSession().beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
 	close(giveUp)
 
 	require.NoError(t, s.onMDMPolicyChange(nil, nil))
 	t.Cleanup(func() {
-		s.session.cancelAct()
-		_, restartedGiveUp := s.session.runChans()
+		s.focusedSession().cancelAct()
+		_, restartedGiveUp := s.focusedSession().runChans()
 		<-restartedGiveUp
 	})
 
-	key, running := s.session.runningKey()
+	key, running := s.focusedSession().runningKey()
 	assert.True(t, running, "the policy change must have started a new run")
 	assert.Equal(t, profilemanager.SessionKey{Profile: profilemanager.ID(activeProfile), Username: username}, key,
 		"the finished run must not decide the profile")
@@ -318,8 +321,34 @@ func TestExtendAuthSessionRefusedWhileAnotherProfileIsSelected(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "want the profile mismatch refusal, got %v", err)
-	_, _, pending := st.s.session.extendAuthSessionFlow.Get()
+	_, _, pending := st.s.focusedSession().extendAuthSessionFlow.Get()
 	assert.False(t, pending, "a refused request must not leave a flow behind")
+}
+
+// The SSH token flow is refused the same way, on a real run.
+func TestJWTAuthRefusedWhileAnotherProfileIsSelected(t *testing.T) {
+	st := startSessionOnDefault(t)
+	st.selectWork(t)
+
+	ctx, cancel := context.WithTimeout(st.ctx, 10*time.Second)
+	t.Cleanup(cancel)
+	_, err := st.s.RequestJWTAuth(ctx, &proto.RequestJWTAuthRequest{})
+
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "want the profile mismatch refusal, got %v", err)
+	assert.Zero(t, *st.loginsB, "the Management server of the selected profile must not be contacted")
+}
+
+// The status of a real run keeps showing its own Management after a switch.
+func TestStatusShowsManagementOfTheRunAfterSwitch(t *testing.T) {
+	st := startSessionOnDefault(t)
+	st.selectWork(t)
+
+	resp, err := st.s.Status(st.ctx, &proto.StatusRequest{GetFullPeerStatus: true})
+	require.NoError(t, err)
+	assert.Contains(t, resp.GetFullStatus().GetManagementState().GetURL(), st.mgmtAddrA,
+		"status should show the Management of the running profile")
+	assert.True(t, resp.GetFullStatus().GetManagementState().GetConnected(), "the run should stay connected")
 }
 
 // Switching back makes the config and the client one profile again.

@@ -63,6 +63,10 @@ func buildServiceArguments() []string {
 		args = append(args, "--enable-capture")
 	}
 
+	if concurrentProfiles {
+		args = append(args, "--enable-concurrent-profiles")
+	}
+
 	if networksDisabled {
 		args = append(args, "--disable-networks")
 	}

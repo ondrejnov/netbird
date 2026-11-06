@@ -298,6 +298,12 @@ type BundleGenerator struct {
 	clientMetrics  MetricsExporter
 	daemonVersion  string
 	cliVersion     string
+	profileName    string
+	otherSessions  []SessionBundle
+	omitHostWide   bool
+	omitDaemonLog  bool
+	// zipPrefix is where the files of the session being written go in the archive.
+	zipPrefix string
 
 	anonymize         bool
 	anonymizeLevel    anonymize.Level
@@ -336,6 +342,16 @@ type GeneratorDependencies struct {
 	ClientMetrics MetricsExporter
 	DaemonVersion string
 	CliVersion    string
+	// ProfileName is the profile the bundle is about. Empty means the active profile.
+	ProfileName string
+	// OtherSessions go under sessions/, each apart from the rest of the bundle.
+	OtherSessions []SessionBundle
+	// OmitHostWide leaves out what describes the whole host and so also sessions the requester
+	// may not read: the logs of the daemon and the system information.
+	OmitHostWide bool
+	// OmitDaemonLog leaves out the log of the daemon alone. It goes back further than what runs now,
+	// so it can speak of a session of another user that is no longer on any record.
+	OmitDaemonLog bool
 }
 
 func NewBundleGenerator(deps GeneratorDependencies, cfg BundleConfig) *BundleGenerator {
@@ -370,10 +386,14 @@ func NewBundleGenerator(deps GeneratorDependencies, cfg BundleConfig) *BundleGen
 		clientMetrics:  deps.ClientMetrics,
 		daemonVersion:  deps.DaemonVersion,
 		cliVersion:     deps.CliVersion,
+		profileName:    deps.ProfileName,
+		otherSessions:  deps.OtherSessions,
+		omitHostWide:   deps.OmitHostWide,
+		omitDaemonLog:  deps.OmitDaemonLog,
 
 		anonymize:         cfg.Anonymize || cfg.AnonymizeLevel >= anonymize.LevelStrict,
 		anonymizeLevel:    cfg.AnonymizeLevel,
-		includeSystemInfo: cfg.IncludeSystemInfo,
+		includeSystemInfo: cfg.IncludeSystemInfo && !deps.OmitHostWide,
 		logFileCount:      logFileCount,
 	}
 }
@@ -487,7 +507,9 @@ func (g *BundleGenerator) createArchive() error {
 		log.Errorf("failed to add corrupted state files to debug bundle: %v", err)
 	}
 
-	if err := g.addServiceParams(); err != nil {
+	if g.omitHostWide {
+		log.Debugf("skipping the service params in debug bundle: they name the management of the service, not of this session")
+	} else if err := g.addServiceParams(); err != nil {
 		log.Errorf("failed to add service params to debug bundle: %v", err)
 	}
 
@@ -499,7 +521,11 @@ func (g *BundleGenerator) createArchive() error {
 		log.Errorf("failed to add wg show output: %v", err)
 	}
 
-	if err := g.addPlatformLog(); err != nil {
+	g.addOtherSessions()
+
+	if g.omitHostWide || g.omitDaemonLog {
+		log.Debugf("skipping the logs of the daemon in debug bundle: they also describe sessions the requester may not read")
+	} else if err := g.addPlatformLog(); err != nil {
 		log.Errorf("failed to add logs to debug bundle: %v", err)
 	}
 
@@ -507,7 +533,9 @@ func (g *BundleGenerator) createArchive() error {
 		log.Errorf("failed to add UI log to debug bundle: %v", err)
 	}
 
-	if err := g.addUpdateLogs(); err != nil {
+	if g.omitHostWide {
+		log.Debugf("skipping the updater logs in debug bundle: they describe the whole host")
+	} else if err := g.addUpdateLogs(); err != nil {
 		log.Errorf("failed to add updater logs: %v", err)
 	}
 
@@ -547,7 +575,7 @@ func (g *BundleGenerator) addReadme() error {
 	}
 	header := fmt.Sprintf("Netbird debug bundle\nAnonymization level applied to this bundle: %s\n", level)
 
-	readmeReader := strings.NewReader(header + readmeContent)
+	readmeReader := strings.NewReader(header + readmeContent + g.sessionsReadme())
 	if err := g.addFileToZip(readmeReader, "README.txt"); err != nil {
 		return fmt.Errorf("add README file to zip: %w", err)
 	}
@@ -556,10 +584,12 @@ func (g *BundleGenerator) addReadme() error {
 
 func (g *BundleGenerator) addStatus() error {
 	if g.statusRecorder != nil {
-		pm := profilemanager.NewProfileManager()
-		var profName string
-		if activeProf, err := pm.GetActiveProfile(); err == nil {
-			profName = activeProf.Name
+		profName := g.profileName
+		if profName == "" {
+			pm := profilemanager.NewProfileManager()
+			if activeProf, err := pm.GetActiveProfile(); err == nil {
+				profName = activeProf.Name
+			}
 		}
 
 		if g.refreshStatus != nil {
@@ -1027,8 +1057,11 @@ func (g *BundleGenerator) addUpdateLogs() error {
 }
 
 func (g *BundleGenerator) addCorruptedStateFiles() error {
-	sm := profilemanager.NewServiceManager("")
-	pattern := sm.GetStatePath()
+	pattern := g.statePath
+	if pattern == "" {
+		sm := profilemanager.NewServiceManager("")
+		pattern = sm.GetStatePath()
+	}
 	if pattern == "" {
 		return nil
 	}
@@ -1287,7 +1320,7 @@ func (g *BundleGenerator) addRotatedLogFiles(open LogOpener, logDir, prefix stri
 
 func (g *BundleGenerator) addFileToZip(reader io.Reader, filename string) error {
 	header := &zip.FileHeader{
-		Name:     filename,
+		Name:     g.zipPrefix + filename,
 		Method:   zip.Deflate,
 		Modified: time.Now(),
 

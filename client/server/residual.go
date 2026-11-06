@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/go-multierror"
 
 	nberrors "github.com/netbirdio/netbird/client/errors"
+	"github.com/netbirdio/netbird/client/firewall"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 )
@@ -40,7 +41,41 @@ func (s *Server) restoreResidualAtStart(ctx context.Context) error {
 		merr = multierror.Append(merr, err)
 	}
 
+	// Without a sessions file no isolation ever ran here, and the host stays untouched.
+	if len(records) > 0 {
+		if err := s.removeResidualIsolation(records); err != nil {
+			merr = multierror.Append(merr, err)
+		}
+	}
+
 	return nberrors.FormatErrorOrNil(merr)
+}
+
+// removeResidualIsolation deletes the session interfaces and then the isolation. An interface that
+// stays keeps the isolation, the one thing left between its peers and the other networks. The state
+// files go first, since some of their cleanup needs the interface to find what to undo.
+func (s *Server) removeResidualIsolation(records []hostcoord.SlotRecord) error {
+	if err := s.removeSessionLinks(records); err != nil {
+		return fmt.Errorf("remove session links, keeping the isolation: %w", err)
+	}
+	if err := firewall.RemoveResidualSessionIsolation(); err != nil {
+		return fmt.Errorf("remove session isolation: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) removeSessionLinks(records []hostcoord.SlotRecord) error {
+	if s.removeLinksFn != nil {
+		return s.removeLinksFn(records)
+	}
+	return hostcoord.RemoveSessionLinks(records)
+}
+
+func (s *Server) verifySessionLinks(records []hostcoord.SlotRecord) error {
+	if s.verifyLinksFn != nil {
+		return s.verifyLinksFn(records)
+	}
+	return hostcoord.VerifyNoSessionLinks(records)
 }
 
 // residualStatePaths lists each state file once, because NB_DNS_STATE_FILE gives all
@@ -71,16 +106,22 @@ func (s *Server) residualStatePaths(records []hostcoord.SlotRecord, onDisk []pro
 // belong to a running session, and so may the marked routes, which carry no owner: they are only
 // flushed when no other session runs.
 func (s *Server) restoreOwnResidual(ctx context.Context, key profilemanager.SessionKey) error {
+	if s.otherSessionRunning(key) {
+		return cleanStateFile(ctx, s.profileManager.GetStatePathFor(key))
+	}
+	return s.restoreResidualAlone(ctx, key)
+}
+
+// restoreResidualAlone undoes the residual state of key and the marked routes, for a caller
+// that knows no other session runs.
+func (s *Server) restoreResidualAlone(ctx context.Context, key profilemanager.SessionKey) error {
 	var merr *multierror.Error
 
 	if err := cleanStateFile(ctx, s.profileManager.GetStatePathFor(key)); err != nil {
 		merr = multierror.Append(merr, err)
 	}
-
-	if !s.otherSessionRunning(key) {
-		if err := s.flushMarkedRoutes(); err != nil {
-			merr = multierror.Append(merr, err)
-		}
+	if err := s.flushMarkedRoutes(); err != nil {
+		merr = multierror.Append(merr, err)
 	}
 
 	return nberrors.FormatErrorOrNil(merr)
@@ -89,9 +130,9 @@ func (s *Server) restoreOwnResidual(ctx context.Context, key profilemanager.Sess
 // restoreLoginResidual is restoreOwnResidual for a Login, which gave up the server mutex after
 // cancelling the run identified by cancelled. A run of key started since then owns the state
 // file and the routes, so there is nothing to clean. The caller holds the server mutex.
-func (s *Server) restoreLoginResidual(ctx context.Context, key profilemanager.SessionKey, cancelled <-chan struct{}) error {
-	running, ok := s.session.runningKey()
-	if _, giveUp := s.session.runChans(); ok && giveUp != cancelled && sameSessionProfile(running, key) {
+func (s *Server) restoreLoginResidual(ctx context.Context, ss *session, key profilemanager.SessionKey, cancelled <-chan struct{}) error {
+	running, ok := ss.runningKey()
+	if _, giveUp := ss.runChans(); ok && giveUp != cancelled && sameSessionProfile(running, key) {
 		return nil
 	}
 	return s.restoreOwnResidual(ctx, key)
@@ -99,7 +140,7 @@ func (s *Server) restoreLoginResidual(ctx context.Context, key profilemanager.Se
 
 // otherSessionRunning reports whether a session of another profile than key is running.
 func (s *Server) otherSessionRunning(key profilemanager.SessionKey) bool {
-	running, ok := s.session.runningKey()
+	running, ok := s.focusedSession().runningKey()
 	return ok && !sameSessionProfile(running, key)
 }
 

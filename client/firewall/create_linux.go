@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -40,7 +41,13 @@ var errNoFirewallManager = errors.New("no firewall manager found")
 // FWType is the type for the firewall type
 type FWType int
 
-func NewFirewall(iface IFaceMapper, stateManager *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16) (firewall.Manager, error) {
+// NewFirewall creates the firewall manager of a client that owns the host alone. Cancelling ctx
+// aborts the firewalld call the manager makes while it comes up.
+func NewFirewall(ctx context.Context, iface IFaceMapper, stateManager *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16) (firewall.Manager, error) {
+	return newFirewall(ctx, iface, stateManager, flowLogger, disableServerRoutes, mtu, nil)
+}
+
+func newFirewall(ctx context.Context, iface IFaceMapper, stateManager *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16, session *SessionConfig) (firewall.Manager, error) {
 	// Userspace firewall without a native counterpart: routing is handled
 	// entirely in userspace. The interface is opened in the kernel's foreign
 	// filter chains via a table-less allower, except in netstack mode where no
@@ -56,14 +63,16 @@ func NewFirewall(iface IFaceMapper, stateManager *statemanager.Manager, flowLogg
 			DisableServerRoutes: disableServerRoutes,
 			FlowLogger:          flowLogger,
 			MTU:                 mtu,
-			InterfaceAllower:    interfaceAllower(iface, mtu),
+			InterfaceAllower:    interfaceAllower(iface, mtu, session),
+			Isolation:           session.isolationSource(),
+			TrustContext:        ctx,
 		}
 
 		return uspfilter.Create(cfg)
 	}
 
 	// Use native firewall for either kernel or userspace, the interface appears identical to netfilter
-	fm, err := createNativeFirewall(iface, stateManager, mtu)
+	fm, err := createNativeFirewall(ctx, iface, stateManager, mtu, session)
 	switch {
 	case err == nil && !iface.IsUserspaceBind():
 		// Nothing to do, fall through
@@ -85,7 +94,9 @@ func NewFirewall(iface IFaceMapper, stateManager *statemanager.Manager, flowLogg
 			DisableServerRoutes: disableServerRoutes,
 			FlowLogger:          flowLogger,
 			MTU:                 mtu,
-			InterfaceAllower:    interfaceAllower(iface, mtu),
+			InterfaceAllower:    interfaceAllower(iface, mtu, session),
+			Isolation:           session.isolationSource(),
+			TrustContext:        ctx,
 		})
 	}
 
@@ -97,12 +108,12 @@ func NewFirewall(iface IFaceMapper, stateManager *statemanager.Manager, flowLogg
 // tables), else iptables (the legacy fallback, filter INPUT only), else nil.
 // firewalld trust is applied separately by the manager. Netstack has no kernel
 // interface to open.
-func interfaceAllower(iface IFaceMapper, mtu uint16) uspfilter.InterfaceAllower {
+func interfaceAllower(iface IFaceMapper, mtu uint16, session *SessionConfig) uspfilter.InterfaceAllower {
 	if netstack.IsEnabled() {
 		return nil
 	}
 
-	nftAllower, err := nbnftables.NewInterfaceAllower(iface, mtu)
+	nftAllower, err := session.newNftablesAllower(iface, mtu)
 	if err == nil {
 		return nftAllower
 	}
@@ -127,11 +138,12 @@ func logNativeFirewallUnavailable(err error) {
 	}
 }
 
-func createNativeFirewall(iface IFaceMapper, stateManager *statemanager.Manager, mtu uint16) (firewall.Manager, error) {
-	fm, err := createFW(iface, mtu)
+func createNativeFirewall(ctx context.Context, iface IFaceMapper, stateManager *statemanager.Manager, mtu uint16, session *SessionConfig) (firewall.Manager, error) {
+	fm, err := createFW(iface, mtu, session)
 	if err != nil {
 		return nil, fmt.Errorf("create firewall: %w", err)
 	}
+	fm.SetTrustContext(ctx)
 
 	if err = fm.Init(stateManager); err != nil {
 		return nil, fmt.Errorf("init firewall: %s", err)
@@ -140,7 +152,17 @@ func createNativeFirewall(iface IFaceMapper, stateManager *statemanager.Manager,
 	return fm, nil
 }
 
-func createFW(iface IFaceMapper, mtu uint16) (firewall.Manager, error) {
+// nativeManager is what createFW returns: the manager, with what aborts its firewalld call.
+type nativeManager interface {
+	firewall.Manager
+	SetTrustContext(ctx context.Context)
+}
+
+func createFW(iface IFaceMapper, mtu uint16, session *SessionConfig) (nativeManager, error) {
+	if session != nil {
+		return session.createNative(iface, mtu)
+	}
+
 	switch check() {
 	case IPTABLES:
 		log.Info("creating an iptables firewall manager")

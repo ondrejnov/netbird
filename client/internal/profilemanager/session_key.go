@@ -12,3 +12,9 @@ type SessionKey struct {
 func (a *ActiveProfileState) SessionKey() SessionKey {
 	return SessionKey{Profile: a.ID, Username: a.Username}
 }
+
+// SanitizedUsername returns the name of the directory that holds the profiles of username. Different
+// usernames can end up with the same directory.
+func SanitizedUsername(username string) string {
+	return sanitizeProfileName(username)
+}
