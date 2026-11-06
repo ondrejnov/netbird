@@ -4,17 +4,24 @@ import (
 	"net/netip"
 	"slices"
 
+	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/system"
 )
 
-// excludeSessionAddresses drops every address inside an overlay prefix of any
-// session from the reported network addresses. It builds a new slice because
-// the info source may share the gathered one between calls.
+// excludeSessionAddresses keeps the addresses of all sessions out of what goes to
+// Management (I5).
 func (e *Engine) excludeSessionAddresses(info *system.Info) {
 	if e.config.Sessions == nil {
 		return
 	}
-	prefixes := e.config.Sessions.OverlayPrefixes()
+	excludeAddressesOf(e.config.Sessions, info)
+}
+
+// excludeAddressesOf drops every address inside an overlay prefix of any session
+// from the reported network addresses. It builds a new slice because the info
+// source may share the gathered one between calls.
+func excludeAddressesOf(sessions hostcoord.SessionSource, info *system.Info) {
+	prefixes := sessions.OverlayPrefixes()
 	if len(prefixes) == 0 {
 		return
 	}

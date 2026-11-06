@@ -25,6 +25,8 @@ type Manager struct {
 	mutex sync.Mutex
 
 	wgIface iFaceMapper
+	// trustCtx aborts the firewalld call of Init, see SetTrustContext.
+	trustCtx context.Context
 	// slot selects the suffix of the chains and ipsets this manager owns.
 	slot uint
 	// sharedFwd says the IP forwarding state outlives the manager, see WithHostForwarding.
@@ -55,6 +57,7 @@ func Create(wgIface iFaceMapper, mtu uint16, opts ...Option) (*Manager, error) {
 	cfg := newConfig(opts...)
 	m := &Manager{
 		wgIface:    wgIface,
+		trustCtx:   context.Background(),
 		slot:       cfg.slot,
 		sharedFwd:  cfg.forwarding != nil,
 		ipv4Client: iptablesClient,
@@ -77,6 +80,12 @@ func Create(wgIface iFaceMapper, mtu uint16, opts ...Option) (*Manager, error) {
 	}
 
 	return m, nil
+}
+
+// SetTrustContext sets what aborts the firewalld call of Init. A firewalld that does not
+// answer must not hold up the stop of the engine this manager belongs to.
+func (m *Manager) SetTrustContext(ctx context.Context) {
+	m.trustCtx = ctx
 }
 
 func (m *Manager) createIPv6Components(wgIface iFaceMapper, mtu uint16, opts ...Option) error {
@@ -124,7 +133,7 @@ func (m *Manager) Init(stateManager *statemanager.Manager) error {
 
 	// Trust after all fatal init steps so a later failure doesn't leave the
 	// interface in firewalld's trusted zone without a corresponding Close.
-	if err := firewalld.TrustInterface(m.wgIface.Name()); err != nil {
+	if err := firewalld.TrustInterface(m.trustCtx, m.wgIface.Name()); err != nil {
 		log.Warnf("failed to trust interface in firewalld: %v", err)
 	}
 

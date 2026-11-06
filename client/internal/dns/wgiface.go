@@ -19,4 +19,5 @@ type WGIface interface {
 	GetFilter() device.PacketFilter
 	GetDevice() *device.FilteredDevice
 	GetNet() *wgbackend.NetstackNet
+	MTU() uint16
 }

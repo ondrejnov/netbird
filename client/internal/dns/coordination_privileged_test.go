@@ -408,6 +408,40 @@ func TestResolved_ReleasedCatchAllTakenWithSameConfig(t *testing.T) {
 	assert.Len(t, fixture.warningsB.kinds(), 1, "taking the catch-all must not warn again")
 }
 
+// Section 6: the same domain on two links works as 5.3 describes, and both sessions hear of it. A
+// session that stops serving it, or stops altogether, has no conflict left.
+func TestResolved_SharedDomainWarnsBothSessions(t *testing.T) {
+	fake := startFakeResolved(t)
+	owners := hostcoord.NewDNSOwners()
+	addLink(t, resolvedLinkA)
+	ifB := addLink(t, resolvedLinkB)
+	warningsA, warningsB := &warningLog{}, &warningLog{}
+
+	serverA := dns.NewTestSessionServer(t, resolvedLinkA, dnsIPA, dns.TestBackendSystemd, owners.Session(sessionKeyA, allLinksFunc, warningsA.add))
+	require.NoError(t, serverA.UpdateDNSServer(1, dnsConfig("shared.test", false)))
+	serverB := dns.NewTestSessionServer(t, resolvedLinkB, dnsIPB, dns.TestBackendSystemd, owners.Session(sessionKeyB, allLinksFunc, warningsB.add))
+	require.NoError(t, serverB.UpdateDNSServer(1, dnsConfig("own.test", false)))
+	assert.Empty(t, warningsA.kinds(), "different domains are no conflict")
+	assert.Empty(t, warningsB.kinds(), "different domains are no conflict")
+
+	require.NoError(t, serverB.UpdateDNSServer(2, dnsConfig("shared.test", false)))
+
+	shared := []dns.HostDNSWarningKind{dns.HostDNSDomainShared}
+	assert.Equal(t, shared, warningsA.kinds(), "the session that had the domain first must be warned")
+	assert.Equal(t, shared, warningsB.kinds(), "the session that came second must be warned")
+	assert.Contains(t, fake.link(ifB).Domains, resolvedDomainEntry{Domain: "shared.test.", MatchOnly: true}, "the domain must stay on the link: resolved asks both")
+	assert.True(t, owners.InConflict(sessionKeyA), "both sessions are in conflict")
+	assert.True(t, owners.InConflict(sessionKeyB), "both sessions are in conflict")
+
+	require.NoError(t, serverB.UpdateDNSServer(3, dnsConfig("own.test", false)))
+	assert.False(t, owners.InConflict(sessionKeyA), "the domain is no longer shared")
+
+	require.NoError(t, serverB.UpdateDNSServer(4, dnsConfig("shared.test", false)))
+	assert.True(t, owners.InConflict(sessionKeyA), "the domain is shared again")
+	serverB.Stop()
+	assert.False(t, owners.InConflict(sessionKeyA), "the stop of the other session ends it")
+}
+
 // While the owner stays, retrying the claim must not reprogram the link: on
 // NetworkManager the same path would reapply the connection with every network map.
 func TestResolved_RefusedClaimDoesNotReprogramLink(t *testing.T) {

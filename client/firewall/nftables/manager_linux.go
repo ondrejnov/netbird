@@ -52,6 +52,8 @@ type Manager struct {
 
 	tableName string
 	scope     *sessionScope
+	// trustCtx aborts the firewalld call of Init, see SetTrustContext.
+	trustCtx context.Context
 
 	family4 *family
 	// IPv6 counterpart, nil when no v6 overlay.
@@ -79,12 +81,19 @@ func CreateForSession(wgIface iFaceMapper, mtu uint16, names SessionNames, opts 
 	return newManager(wgIface, mtu, names.Table, scope), nil
 }
 
+// SetTrustContext sets what aborts the firewalld call of Init. A firewalld that does not
+// answer must not hold up the stop of the engine this manager belongs to.
+func (m *Manager) SetTrustContext(ctx context.Context) {
+	m.trustCtx = ctx
+}
+
 func newManager(wgIface iFaceMapper, mtu uint16, tableName string, scope *sessionScope) *Manager {
 	m := &Manager{
 		rConn:     &nftables.Conn{},
 		wgIface:   wgIface,
 		tableName: tableName,
 		scope:     scope,
+		trustCtx:  context.Background(),
 	}
 
 	workTable := &nftables.Table{Name: tableName, Family: nftables.TableFamilyIPv4}
@@ -170,6 +179,11 @@ func (m *Manager) reconcileExternalChains() error {
 }
 
 func (m *Manager) initFirewall() (err error) {
+	m.family4.trustCtx = m.trustCtx
+	if m.hasIPv6() {
+		m.family6.trustCtx = m.trustCtx
+	}
+
 	workTable, err := m.createWorkTable()
 	if err != nil {
 		return fmt.Errorf("create work table: %w", err)

@@ -338,6 +338,17 @@ func runInDaemonMode(ctx context.Context, cmd *cobra.Command, pm *profilemanager
 			return nil
 		}
 
+		// With concurrent profiles the connected status is the one of the profile that was just
+		// selected, and the connections of the other profiles are not this command's to end.
+		gate, err := daemonConcurrentProfiles(ctx, client)
+		if err != nil {
+			return err
+		}
+		if gate == gateEnabled {
+			cmd.Println("Already connected")
+			return nil
+		}
+
 		if _, err := client.Down(ctx, &proto.DownRequest{}); err != nil {
 			log.Errorf("call service down method: %v", err)
 			return err

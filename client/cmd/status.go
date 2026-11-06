@@ -50,6 +50,7 @@ func init() {
 	statusCmd.PersistentFlags().BoolVarP(&ipv4Flag, "ipv4", "4", false, "display only NetBird IPv4 of this peer, e.g., --ipv4 will output 100.64.0.33")
 	statusCmd.PersistentFlags().BoolVarP(&ipv6Flag, "ipv6", "6", false, "display only NetBird IPv6 of this peer")
 	statusCmd.MarkFlagsMutuallyExclusive("detail", "table", "json", "yaml", "ipv4", "ipv6")
+	statusCmd.PersistentFlags().StringVar(&sessionProfile, sessionProfileFlag, "", "profile whose session to display, the focused one if not set (needs a daemon with concurrent profiles)")
 	statusCmd.PersistentFlags().StringSliceVarP(&ipsFilter, "filter-by-ips", "I", []string{}, "filters the detailed output by a list of one or more IPs (v4 or v6), e.g., --filter-by-ips 100.64.0.100,fd00::1")
 	statusCmd.PersistentFlags().StringSliceVarP(&prefixNamesFilter, "filter-by-names", "N", []string{}, "filters the detailed output by a list of one or more peer FQDN or hostnames, e.g., --filter-by-names peer-a,peer-b.netbird.cloud")
 	statusCmd.PersistentFlags().StringVarP(&statusFilter, "filter-by-status", "S", "", "filters the detailed output by connection status(idle|connecting|connected), e.g., --filter-by-status connected")
@@ -78,7 +79,7 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 
 	ctx := internal.CtxInitState(cmd.Context())
 
-	resp, err := getStatus(ctx, true, false)
+	resp, target, err := getSessionStatus(ctx, true, false, sessionProfile)
 	if err != nil {
 		return err
 	}
@@ -97,6 +98,7 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 			"More info: https://docs.netbird.io/how-to/register-machines-using-setup-keys\n\n",
 			resp.GetStatus(),
 		)
+		cmd.Print(sessionsBlock(nbstatus.SessionsSummaryOf(resp.GetSessions())))
 		return nil
 	}
 
@@ -116,7 +118,7 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 	// Resolve the active profile's display name via the daemon, which runs
 	// as root and can read the per-user profile files. The local profile
 	// manager only knows the active profile ID, not its display name.
-	profName := getActiveProfileName(ctx)
+	profName := statusProfileName(ctx, target)
 
 	var sessionExpiresAt time.Time
 	if ts := resp.GetSessionExpiresAt(); ts.IsValid() {
@@ -140,11 +142,12 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 		ConnectionTypeFilter: connectionTypeFilter,
 		ProfileName:          profName,
 		SessionExpiresAt:     sessionExpiresAt,
+		Sessions:             resp.GetSessions(),
 	})
 	var statusOutputString string
 	switch {
 	case detailFlag:
-		statusOutputString = outputInformationHolder.FullDetailSummary()
+		statusOutputString = outputInformationHolder.FullDetailSummary() + sessionsBlock(outputInformationHolder.SessionsSummary())
 	case tableFlag:
 		statusOutputString = outputInformationHolder.PeersTable()
 	case jsonFlag:
@@ -152,7 +155,8 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 	case yamlFlag:
 		statusOutputString, err = outputInformationHolder.YAML()
 	default:
-		statusOutputString = outputInformationHolder.GeneralSummary(false, false, false, false)
+		statusOutputString = outputInformationHolder.GeneralSummary(false, false, false, false) +
+			sessionsBlock(outputInformationHolder.SessionsSummary())
 	}
 
 	if err != nil {
@@ -165,21 +169,56 @@ func statusFunc(cmd *cobra.Command, args []string) error {
 }
 
 func getStatus(ctx context.Context, fullPeerStatus bool, shouldRunProbes bool) (*proto.StatusResponse, error) {
+	resp, _, err := getSessionStatus(ctx, fullPeerStatus, shouldRunProbes, "")
+	return resp, err
+}
+
+// getSessionStatus asks the daemon for the status of the session named by handle, or of the
+// focused one when handle is empty. It also returns the session it resolved, nil for the focused one.
+func getSessionStatus(ctx context.Context, fullPeerStatus bool, shouldRunProbes bool, handle string) (*proto.StatusResponse, sessionTarget, error) {
 	conn, err := DialClientGRPCServer(ctx, daemonAddr)
 	if err != nil {
 		//nolint
-		return nil, fmt.Errorf("failed to connect to daemon error: %v\n"+
+		return nil, sessionTarget{}, fmt.Errorf("failed to connect to daemon error: %v\n"+
 			"If the daemon is not running please run: "+
 			"\nnetbird service install \nnetbird service start\n", err)
 	}
 	defer conn.Close()
 
-	resp, err := proto.NewDaemonServiceClient(conn).Status(ctx, &proto.StatusRequest{GetFullPeerStatus: fullPeerStatus, ShouldRunProbes: shouldRunProbes})
+	client := proto.NewDaemonServiceClient(conn)
+	target, err := resolveSessionFlag(ctx, client, handle)
 	if err != nil {
-		return nil, fmt.Errorf("status failed: %v", status.Convert(err).Message())
+		return nil, sessionTarget{}, err
 	}
 
-	return resp, nil
+	resp, err := client.Status(ctx, &proto.StatusRequest{
+		GetFullPeerStatus: fullPeerStatus,
+		ShouldRunProbes:   shouldRunProbes,
+		Session:           sessionSelectorOf(target),
+	})
+	if err != nil {
+		return nil, sessionTarget{}, fmt.Errorf("status failed: %v", status.Convert(err).Message())
+	}
+
+	return resp, target, nil
+}
+
+// statusProfileName is the name shown for the profile of the status: the named session's, or the
+// focused one's, which the daemon holds.
+func statusProfileName(ctx context.Context, target sessionTarget) string {
+	if target.selector != nil {
+		return target.name
+	}
+	return getActiveProfileName(ctx)
+}
+
+// sessionsBlock separates the table of sessions from the text before it. A daemon without
+// concurrent profiles lists none, and the output stays what it was.
+func sessionsBlock(table string) string {
+	if table == "" {
+		return ""
+	}
+	return "\n" + table
 }
 
 // getActiveProfileName asks the daemon for the active profile's display
