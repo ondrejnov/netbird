@@ -377,6 +377,28 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
   `TestIsolationKeepsForwardingInsideOneNetwork` v harnessu s emulací prošel i před opravou, selhání testů izolace
   na runneru tedy emulace nezachytila. Jejich oprava stojí na tom, že vlastní netns hostitele nevidí.
 
+**CI na PR 44, druhé kolo:**
+
+- **`TestUp_RefusedProfileWithTheGateGivesTheFocusBack`** (Linux, macOS): CI pouští testy přes `sudo`, CLI tedy jedná
+  za `runner`, falešný daemon ale v `GetActiveProfile` vracel uživatele procesu, `root`. `giveBack` pak focus
+  nepovažoval za svůj a nevrátil ho. Falešný daemon teď drží uživatele focusu jako skutečný (ze `SwitchProfile`),
+  test má variantu se `SUDO_USER`, která chybu v harnessu reprodukuje.
+- **`TestOpenSlots_UnknownStateFileRefuses`** (Windows): cesta přes obyčejný soubor je na Windows
+  `ERROR_PATH_NOT_FOUND`, tedy `ErrNotExist`, a `StateFileProfiles` to četl jako „výchozí profil nemá stav". Vada
+  produkčního kódu: chybějící `state.json` teď platí za nepřítomný, jen když je adresář kolem něj adresářem.
+- **`TestNoGateHostSnapshotMatchesToday`** (Linux): sekce nftables obsahovala bajtkód pravidel, která daemon zapisuje
+  binárkou iptables. iptables 1.8.7 runneru je přeloží na xt match (`mark`, `tcp`), novější v harnessu na nativní
+  výrazy. Pravidla tabulek iptables-nft (`filter`, `mangle`, `nat`, `raw`, `security` rodin ip a ip6) se v sekci
+  nftables vynechávají, tabulky a chainy zůstávají a pravidla hlídá sekce iptables. Golden soubory ztratily jen tyto
+  řádky.
+- **`TestStart_ProbesRoutingWithoutASession`** (FreeBSD): `nbnet.Init` a `AdvancedRouting` jsou tam no-op, není co
+  sondovat. Test běží jen na Linuxu, macOS a Windows.
+- **`Test_ConnectPeers`:** fork nemění `client/iface` ani nic, co test na Linuxu spouští (z `client/net` jen
+  `Init`, který test nevolá). Selhání má podpis známého upstream flaku (#7944): oba konce poslaly 6 initiation a 6
+  response, přijaly jen initiation. Upstream v Docker jobu běžně potřebuje 5 až 15 s, tedy jedno až tři kola
+  handshaku. Harness po stejných předchozích balíčcích forku nenašel na hostiteli nic zbylého (rozhraní, pravidla,
+  procesy) a test prošel. Beze změny.
+
 **PR 12, `f3/proto`:**
 
 - Proto podle 5.6, handlery se nemění. Nová pole existujících zpráv jsou od 1000, `SessionSelector` a `SessionStatus` jsou
