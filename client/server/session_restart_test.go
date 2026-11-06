@@ -39,11 +39,11 @@ func startParkedRestart(t *testing.T) *parkedRestart {
 
 	config, err := f.s.storedRunningConfig(f.active)
 	require.NoError(t, err)
-	f.s.session.setConfig(f.active, config)
-	_, giveUp := f.s.session.beginRun(f.active)
+	f.s.focusedSession().setConfig(f.active, config)
+	_, giveUp := f.s.focusedSession().beginRun(f.active, nil)
 
 	cancelled := make(chan struct{})
-	f.s.session.setActCancel(sync.OnceFunc(func() { close(cancelled) }))
+	f.s.focusedSession().setActCancel(sync.OnceFunc(func() { close(cancelled) }))
 
 	p := &parkedRestart{
 		f:         f,
@@ -126,10 +126,10 @@ func TestMDMRestart_RPCsAnswerDuringTheWaitAndTheRunComesBack(t *testing.T) {
 	p.endRun()
 	require.NoError(t, p.waitRestarted(t))
 
-	running, giveUp := s.session.runChans()
+	running, giveUp := s.focusedSession().runChans()
 	assert.NotEqual(t, (<-chan struct{})(p.giveUp), giveUp, "the restart should have started a new run")
 	assert.NotNil(t, running, "the new run should have its channels")
-	key, alive := s.session.runningKey()
+	key, alive := s.focusedSession().runningKey()
 	assert.True(t, alive, "the new run should be alive")
 	assert.Equal(t, p.f.active, key, "the restart should bring back the profile that ran")
 }
@@ -146,16 +146,16 @@ func TestMDMRestart_DownDuringTheWaitStaysDown(t *testing.T) {
 		down <- err
 	}()
 
-	require.Eventually(t, func() bool { return !s.session.isClientRunning() }, rpcDeadline, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return !s.focusedSession().isClientRunning() }, rpcDeadline, 10*time.Millisecond,
 		"Down stayed blocked while the MDM restart waited for the run to end")
 
 	p.endRun()
 	require.NoError(t, <-down)
 	require.NoError(t, p.waitRestarted(t))
 
-	_, giveUp := s.session.runChans()
+	_, giveUp := s.focusedSession().runChans()
 	assert.Equal(t, (<-chan struct{})(p.giveUp), giveUp, "the restart must not start a run after a Down")
-	assert.False(t, s.session.isClientRunning(), "the daemon should stay down")
+	assert.False(t, s.focusedSession().isClientRunning(), "the daemon should stay down")
 }
 
 // An Up during the wait joins the run the restart brings back. The run it finds is on its
@@ -180,7 +180,7 @@ func TestMDMRestart_UpDuringTheWaitJoinsTheNewRun(t *testing.T) {
 	// The Management of the fixture is unreachable, so the new run never gets ready.
 	assert.ErrorIs(t, <-up, context.DeadlineExceeded, "Up should wait for the new run")
 
-	_, giveUp := s.session.runChans()
+	_, giveUp := s.focusedSession().runChans()
 	assert.NotEqual(t, (<-chan struct{})(p.giveUp), giveUp, "the restart should have started a new run")
 }
 
@@ -193,16 +193,16 @@ func TestMDMRestart_LoginDuringTheWaitKeepsTheSession(t *testing.T) {
 	active, err := s.profileManager.GetActiveProfileState()
 	require.NoError(t, err)
 	answersInTime(t, "Login", func() error {
-		_, _, _, err := s.authorizeAndPrepareLogin(p.f.ctx, &proto.LoginRequest{}, active)
+		_, _, _, err := s.authorizeAndPrepareLogin(p.f.ctx, s.focusedSession(), &proto.LoginRequest{}, active)
 		return err
 	})
 
 	p.endRun()
 	require.NoError(t, p.waitRestarted(t))
 
-	_, giveUp := s.session.runChans()
+	_, giveUp := s.focusedSession().runChans()
 	assert.Equal(t, (<-chan struct{})(p.giveUp), giveUp, "the restart must not start a run after a Login")
-	_, alive := s.session.runningKey()
+	_, alive := s.focusedSession().runningKey()
 	assert.False(t, alive, "nothing should run until the Up that follows the login")
 }
 
@@ -214,7 +214,7 @@ func TestMDMRestart_TimeoutReleasesWaiters(t *testing.T) {
 
 	require.Error(t, p.waitRestarted(t), "the restart should give up on a run that does not end")
 
-	_, giveUp := s.session.runChans()
+	_, giveUp := s.focusedSession().runChans()
 	assert.Equal(t, (<-chan struct{})(p.giveUp), giveUp, "the restart must not start a second run next to the old one")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -251,9 +251,9 @@ func TestMDMRestart_StatusWaitForReadyFollowsTheRestart(t *testing.T) {
 	}
 
 	// Stands in for the engine of the new run coming up.
-	s.session.mu.Lock()
-	close(s.session.clientRunningChan)
-	s.session.mu.Unlock()
+	s.focusedSession().mu.Lock()
+	close(s.focusedSession().clientRunningChan)
+	s.focusedSession().mu.Unlock()
 
 	select {
 	case err := <-status:
@@ -268,7 +268,7 @@ func TestMDMRestart_StatusWaitForReadyFollowsTheRestart(t *testing.T) {
 func TestMDMRestart_RunCountsAsRunningAfterItsGoroutineEnded(t *testing.T) {
 	ss := newSession()
 	key := profilemanager.SessionKey{Profile: "work", Username: "user"}
-	_, giveUp := ss.beginRun(key)
+	_, giveUp := ss.beginRun(key, nil)
 
 	restart, ok := ss.beginRestart()
 	require.True(t, ok, "a running session should be restartable")
@@ -296,7 +296,7 @@ func TestMDMRestart_DoesNotKeepARunThatIsNotComingBack(t *testing.T) {
 
 	t.Run("the run had already given up", func(t *testing.T) {
 		ss := newSession()
-		_, giveUp := ss.beginRun(key)
+		_, giveUp := ss.beginRun(key, nil)
 		close(giveUp)
 
 		restart, ok := ss.beginRestart()
@@ -310,7 +310,7 @@ func TestMDMRestart_DoesNotKeepARunThatIsNotComingBack(t *testing.T) {
 
 	t.Run("a Login took the session over", func(t *testing.T) {
 		ss := newSession()
-		_, giveUp := ss.beginRun(key)
+		_, giveUp := ss.beginRun(key, nil)
 
 		_, ok := ss.beginRestart()
 		require.True(t, ok)
@@ -342,14 +342,14 @@ func TestRestartStillWanted(t *testing.T) {
 		{name: "Login or WaitSSOLogin", step: func(ss *session) { ss.setActCancel(func() {}) }, want: false},
 		{name: "Up", step: func(ss *session) {
 			ss.setActCancel(func() {})
-			ss.beginRun(key)
+			ss.beginRun(key, nil)
 		}, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ss := newSession()
-			ss.beginRun(key)
+			ss.beginRun(key, nil)
 			ss.setActCancel(func() {})
 
 			restart, ok := ss.beginRestart()
@@ -368,7 +368,7 @@ func TestAwaitRestart_EndsWithContextAndRestart(t *testing.T) {
 	ss := newSession()
 	require.NoError(t, ss.awaitRestart(context.Background()), "with no restart there is nothing to wait for")
 
-	ss.beginRun(profilemanager.SessionKey{})
+	ss.beginRun(profilemanager.SessionKey{}, nil)
 	_, ok := ss.beginRestart()
 	require.True(t, ok)
 
@@ -401,7 +401,7 @@ func TestMDMRestart_DownDuringTheWaitStillAppliesThePolicy(t *testing.T) {
 		_, err := s.Down(context.Background(), &proto.DownRequest{})
 		down <- err
 	}()
-	require.Eventually(t, func() bool { return !s.session.isClientRunning() }, rpcDeadline, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return !s.focusedSession().isClientRunning() }, rpcDeadline, 10*time.Millisecond,
 		"Down stayed blocked while the MDM restart waited for the run to end")
 
 	p.endRun()
@@ -411,7 +411,7 @@ func TestMDMRestart_DownDuringTheWaitStillAppliesThePolicy(t *testing.T) {
 	assert.True(t, s.checkProfilesDisabled(), "the new policy should be in force although nothing restarted")
 
 	var announced bool
-	for _, event := range s.session.statusRecorder.GetEventHistory() {
+	for _, event := range s.focusedSession().statusRecorder.GetEventHistory() {
 		announced = announced || event.GetMetadata()[proto.MetadataTypeKey] == proto.MetadataTypePolicyApplied
 	}
 	assert.True(t, announced, "the operator should learn that the policy was applied")
@@ -434,7 +434,7 @@ func TestMDMRestart_DownDuringTheWaitWithUnreadableProfileStillAppliesThePolicy(
 		_, err := s.Down(context.Background(), &proto.DownRequest{})
 		down <- err
 	}()
-	require.Eventually(t, func() bool { return !s.session.isClientRunning() }, rpcDeadline, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return !s.focusedSession().isClientRunning() }, rpcDeadline, 10*time.Millisecond,
 		"Down stayed blocked while the MDM restart waited for the run to end")
 
 	p.endRun()
@@ -442,7 +442,7 @@ func TestMDMRestart_DownDuringTheWaitWithUnreadableProfileStillAppliesThePolicy(
 	require.NoError(t, p.waitRestarted(t))
 
 	assert.True(t, s.checkProfilesDisabled(), "the new policy should be in force")
-	key, _ := s.session.selectedConfig()
+	key, _ := s.focusedSession().selectedConfig()
 	assert.Equal(t, f.active, key, "the selection should stay where it was")
 	assert.NoFileExists(t, path, "the refresh must not bring the profile back")
 }

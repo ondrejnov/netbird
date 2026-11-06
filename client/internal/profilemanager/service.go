@@ -482,6 +482,12 @@ func (s *ServiceManager) GetStatePath() string {
 	return s.GetStatePathFor(activeProf.SessionKey())
 }
 
+// StateFileOverridden reports whether NB_DNS_STATE_FILE gives every profile the same state
+// file, which sessions running side by side cannot share.
+func StateFileOverridden() bool {
+	return os.Getenv(envStateFile) != ""
+}
+
 // GetStatePathFor returns the path to the state file of the given profile. It does
 // not read the active profile.
 func (s *ServiceManager) GetStatePathFor(key SessionKey) string {

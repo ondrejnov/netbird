@@ -132,8 +132,8 @@ func TestLogout_ForeignUserProfileDoesNotUseTheRunningConfig(t *testing.T) {
 	enableSSHOnProfile(t, cfgPath)
 	running, err := profilemanager.GetExistingConfig(cfgPath)
 	require.NoError(t, err)
-	s.session.setConfig(profilemanager.SessionKey{}, running)
-	s.session.connectClient = newDummyConnectClient(context.Background())
+	s.focusedSession().setConfig(profilemanager.SessionKey{}, running)
+	s.focusedSession().connectClient = newDummyConnectClient(context.Background())
 
 	shared := "shared-legacy-name"
 	_, err = profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
@@ -169,7 +169,7 @@ func TestCleanupAfterProfileLogout_FollowsTheCurrentActiveProfile(t *testing.T) 
 	s, _, activeProfile, username, _ := setupServerWithProfile(t)
 	s.rootCtx = context.Background()
 
-	state := s.session.state
+	state := s.focusedSession().state
 
 	s.cleanupAfterProfileLogout("some-other-profile", username)
 	status, err := state.Status()
@@ -243,17 +243,17 @@ func setupSwitchedWithoutDown(t *testing.T, def, work func(path string) *profile
 		Username: workKey.Username,
 	}))
 
-	s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
-	s.session.setActCancel(func() {})
-	s.session.setClient(newDummyConnectClient(internal.CtxWithState(s.rootCtx, s.session.state)))
-	s.session.setConfig(workKey, workCfg)
+	s.focusedSession().beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
+	s.focusedSession().setActCancel(func() {})
+	s.focusedSession().setClient(newDummyConnectClient(internal.CtxWithState(s.rootCtx, s.focusedSession().state)))
+	s.focusedSession().setConfig(workKey, workCfg)
 
 	return switchedDaemon{s: s, username: username, work: workName, defName: profilemanager.DefaultProfileName}
 }
 
 func (d switchedDaemon) status(t *testing.T) internal.StatusType {
 	t.Helper()
-	status, err := d.s.session.state.Status()
+	status, err := d.s.focusedSession().state.Status()
 	require.NoError(t, err)
 	return status
 }
@@ -269,7 +269,7 @@ func TestLogout_SelectedProfileLeavesRunningSessionUp(t *testing.T) {
 	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.work, Username: &d.username})
 	require.NoError(t, err)
 
-	assert.True(t, d.s.session.isClientRunning(), "a logout of the selected profile must not stop the session of default")
+	assert.True(t, d.s.focusedSession().isClientRunning(), "a logout of the selected profile must not stop the session of default")
 	assert.NotEqual(t, internal.StatusNeedsLogin, d.status(t), "the running session did not lose its login")
 }
 
@@ -285,7 +285,7 @@ func TestLogout_RunningProfileTearsDownWithItsOwnConfig(t *testing.T) {
 	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.defName, Username: &d.username})
 	require.NoError(t, err, "the logout must not go out with the config of the selected profile")
 
-	assert.False(t, d.s.session.isClientRunning(), "the logout of the running profile must stop its session")
+	assert.False(t, d.s.focusedSession().isClientRunning(), "the logout of the running profile must stop its session")
 	assert.Equal(t, internal.StatusNeedsLogin, d.status(t), "the deregistered session needs a new login")
 }
 
@@ -300,7 +300,7 @@ func TestLogout_WithoutProfileTargetsRunningSession(t *testing.T) {
 		_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{})
 		require.NoError(t, err, "the logout must not go out with the config of the selected profile")
 
-		assert.False(t, d.s.session.isClientRunning(), "the logout must stop the running session")
+		assert.False(t, d.s.focusedSession().isClientRunning(), "the logout must stop the running session")
 		assert.Equal(t, internal.StatusNeedsLogin, d.status(t), "the deregistered session needs a new login")
 	})
 
@@ -312,7 +312,7 @@ func TestLogout_WithoutProfileTargetsRunningSession(t *testing.T) {
 
 		_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{})
 		require.Equal(t, codes.PermissionDenied, gstatus.Code(err), "want the refusal for the SSH enabled running profile, got %v", err)
-		assert.True(t, d.s.session.isClientRunning(), "a refused logout must leave the session up")
+		assert.True(t, d.s.focusedSession().isClientRunning(), "a refused logout must leave the session up")
 	})
 }
 
@@ -338,12 +338,12 @@ func TestLogout_FollowsActiveProfileWhenRunIsOver(t *testing.T) {
 		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, true, false) },
 		func(path string) *profilemanager.Config { return writeLogoutProfile(t, path, false, false) },
 	)
-	_, giveUp := d.s.session.beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName})
+	_, giveUp := d.s.focusedSession().beginRun(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}, nil)
 	close(giveUp)
 
 	_, err := d.s.Logout(userCtx(), &proto.LogoutRequest{ProfileName: &d.work, Username: &d.username})
 	require.NoError(t, err)
 
-	assert.False(t, d.s.session.isClientRunning(), "the active profile owns the teardown once no run is alive")
+	assert.False(t, d.s.focusedSession().isClientRunning(), "the active profile owns the teardown once no run is alive")
 	assert.Equal(t, internal.StatusNeedsLogin, d.status(t), "the deregistered active profile needs a new login")
 }

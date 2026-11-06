@@ -26,7 +26,6 @@ import (
 	"github.com/netbirdio/netbird/client/anonymize"
 	nberrors "github.com/netbirdio/netbird/client/errors"
 	"github.com/netbirdio/netbird/client/firewall"
-	"github.com/netbirdio/netbird/client/firewall/firewalld"
 	firewallManager "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/firewall/uspfilter/forwarder"
 	"github.com/netbirdio/netbird/client/iface"
@@ -131,6 +130,10 @@ type EngineConfig struct {
 	// Sessions reports the interfaces and overlay prefixes of all sessions of the
 	// daemon. Nil keeps the single-session behavior.
 	Sessions hostcoord.SessionSource
+
+	// Session is the share of the host of a client that runs next to others. Nil keeps the
+	// single-session behavior.
+	Session *SessionHost
 
 	PreSharedKey *wgtypes.Key
 
@@ -404,6 +407,7 @@ func NewEngine(
 		portForwardManager: portforward.NewManager(),
 		checks:             services.Checks,
 		certWake:           make(chan struct{}, 1),
+		certProofs:         certproof.Collector{WaitForSlot: config.Session != nil},
 		probeStunTurn:      relay.NewStunTurnProbe(relay.DefaultCacheTTL),
 		jobExecutor:        jobexec.NewExecutor(),
 		clientMetrics:      services.ClientMetrics,
@@ -607,7 +611,7 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL) 
 
 	// start flow manager right after interface creation
 	publicKey := e.config.WgPrivateKey.PublicKey()
-	e.flowManager = netflow.NewManager(e.wgInterface, publicKey[:], e.statusRecorder)
+	e.flowManager = netflow.NewManager(e.wgInterface, publicKey[:], e.statusRecorder, e.config.Session.conntrackOptions()...)
 
 	if e.config.RosenpassEnabled {
 		log.Infof("rosenpass is enabled")
@@ -649,6 +653,7 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL) 
 		PeerStore:           e.peerStore,
 		DisableClientRoutes: e.config.DisableClientRoutes,
 		DisableServerRoutes: e.config.DisableServerRoutes,
+		NewSysOps:           e.config.Session.newSysOps(e),
 	})
 	if err := e.routeManager.Init(); err != nil {
 		log.Errorf("Failed to initialize route manager: %s", err)
@@ -682,6 +687,7 @@ func (e *Engine) Start(netbirdConfig *mgmProto.NetbirdConfig, mgmtURL *url.URL) 
 		return fmt.Errorf("up wg interface: %w", err)
 	}
 	e.wgDevice.Store(e.wgInterface.GetWGDevice())
+	e.config.Session.retryHandovers()
 
 	// Start after interface is up since port may have been resolved from 0 or changed if occupied
 	e.shutdownWg.Add(1)
@@ -768,10 +774,12 @@ func (e *Engine) createFirewall() error {
 		return nil
 	}
 
-	firewalld.SetParentContext(e.ctx)
-
 	var err error
-	e.firewall, err = firewall.NewFirewall(e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU)
+	if e.config.Session != nil {
+		e.firewall, err = e.config.Session.newFirewall(e)
+	} else {
+		e.firewall, err = firewall.NewFirewall(e.ctx, e.wgInterface, e.stateManager, e.flowManager.GetLogger(), e.config.DisableServerRoutes, e.config.MTU)
+	}
 	if err != nil {
 		return fmt.Errorf("create firewall manager: %w", err)
 	}
@@ -1501,18 +1509,7 @@ func (e *Engine) handleBundle(params *mgmProto.BundleParameters) (*mgmProto.JobR
 		log.Warnf("get latest sync response: %v", err)
 	}
 
-	bundleDeps := debug.GeneratorDependencies{
-		InternalConfig: e.config.ProfileConfig,
-		StatusRecorder: e.statusRecorder,
-		SyncResponse:   syncResponse,
-		LogPath:        e.config.LogPath,
-		TempDir:        e.config.TempDir,
-		ClientMetrics:  e.clientMetrics,
-		DaemonVersion:  version.NetbirdVersion(),
-		RefreshStatus: func() {
-			e.RunHealthProbes(e.ctx, true)
-		},
-	}
+	bundleDeps := e.remoteBundleDependencies(syncResponse)
 
 	bundleJobParams := debug.BundleConfig{
 		Anonymize:         params.Anonymize,
@@ -1534,6 +1531,23 @@ func (e *Engine) handleBundle(params *mgmProto.BundleParameters) (*mgmProto.JobR
 		},
 	}
 	return response, nil
+}
+
+func (e *Engine) remoteBundleDependencies(syncResponse *mgmProto.SyncResponse) debug.GeneratorDependencies {
+	deps := debug.GeneratorDependencies{
+		InternalConfig: e.config.ProfileConfig,
+		StatusRecorder: e.statusRecorder,
+		SyncResponse:   syncResponse,
+		LogPath:        e.config.LogPath,
+		TempDir:        e.config.TempDir,
+		ClientMetrics:  e.clientMetrics,
+		DaemonVersion:  version.NetbirdVersion(),
+		RefreshStatus: func() {
+			e.RunHealthProbes(e.ctx, true)
+		},
+	}
+	e.config.Session.scopeRemoteBundle(&deps)
+	return deps
 }
 
 // validateBundleUploadURL sanity-checks a management-supplied upload URL for a
@@ -2310,6 +2324,7 @@ func (e *Engine) newDnsServer() (dns.Server, error) {
 			StatusRecorder: e.statusRecorder,
 			StateManager:   e.stateManager,
 			DisableSys:     e.config.DisableDNS,
+			HostDNS:        e.config.Session.hostDNS(),
 		})
 		if err != nil {
 			return nil, err
@@ -2487,7 +2502,7 @@ func (e *Engine) startNetworkMonitor() {
 		return
 	}
 
-	e.networkMonitor = networkmonitor.New()
+	e.networkMonitor = networkmonitor.New(e.config.Session.networkMonitorOptions()...)
 	e.shutdownWg.Add(1)
 	go func() {
 		defer e.shutdownWg.Done()

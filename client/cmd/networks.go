@@ -47,6 +47,7 @@ var routesDeselectCmd = &cobra.Command{
 }
 
 func init() {
+	networksCMD.PersistentFlags().StringVar(&sessionProfile, sessionProfileFlag, "", sessionProfileDesc)
 	routesSelectCmd.PersistentFlags().BoolVarP(&appendFlag, "append", "a", false, "Append to current network selection instead of replacing")
 }
 
@@ -58,7 +59,11 @@ func networksList(cmd *cobra.Command, _ []string) error {
 	defer conn.Close()
 
 	client := proto.NewDaemonServiceClient(conn)
-	resp, err := client.ListNetworks(cmd.Context(), &proto.ListNetworksRequest{})
+	session, err := sessionFromFlag(cmd.Context(), client)
+	if err != nil {
+		return err
+	}
+	resp, err := client.ListNetworks(cmd.Context(), &proto.ListNetworksRequest{Session: session})
 	if err != nil {
 		return fmt.Errorf("failed to list network: %v", status.Convert(err).Message())
 	}
@@ -128,8 +133,13 @@ func networksSelect(cmd *cobra.Command, args []string) error {
 	defer conn.Close()
 
 	client := proto.NewDaemonServiceClient(conn)
+	session, err := sessionFromFlag(cmd.Context(), client)
+	if err != nil {
+		return err
+	}
 	req := &proto.SelectNetworksRequest{
 		NetworkIDs: args,
+		Session:    session,
 	}
 
 	if len(args) == 1 && args[0] == "all" {
@@ -155,8 +165,13 @@ func networksDeselect(cmd *cobra.Command, args []string) error {
 	defer conn.Close()
 
 	client := proto.NewDaemonServiceClient(conn)
+	session, err := sessionFromFlag(cmd.Context(), client)
+	if err != nil {
+		return err
+	}
 	req := &proto.SelectNetworksRequest{
 		NetworkIDs: args,
+		Session:    session,
 	}
 
 	if len(args) == 1 && args[0] == "all" {

@@ -581,14 +581,14 @@ func (d *DnsInterceptor) queryUpstreamDNS(ctx context.Context, w dns.ResponseWri
 	var err error
 
 	if nsNet != nil {
-		reply, err = nbdns.ExchangeWithNetstack(ctx, nsNet, r, upstream)
+		reply, err = nbdns.ExchangeWithNetstack(ctx, nsNet, r, upstream, d.wgInterface.MTU())
 	} else {
 		client, clientErr := nbdns.GetClientPrivate(d.wgInterface, upstreamIP, dnsTimeout)
 		if clientErr != nil {
 			d.writeDNSError(w, r, logger, fmt.Sprintf("create DNS client: %v", clientErr))
 			return nil
 		}
-		reply, _, err = nbdns.ExchangeWithFallback(ctx, client, r, upstream)
+		reply, _, err = nbdns.ExchangeWithFallback(ctx, client, r, upstream, d.wgInterface.MTU())
 	}
 
 	if err == nil {

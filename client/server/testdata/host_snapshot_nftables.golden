@@ -1,0 +1,66 @@
+== iptables ==
+iptables-save *filter -A FORWARD -i wt0 -j ACCEPT
+iptables-save *filter -A FORWARD -o wt0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables-save *filter -A INPUT -i wt0 -j ACCEPT
+iptables-save *filter :FORWARD ACCEPT 
+iptables-save *filter :INPUT ACCEPT 
+iptables-save *filter :OUTPUT ACCEPT 
+== links ==
+wt0 type=tuntap mtu=1280 addrs=[<overlay>/16]
+== nftables ==
+table 2/filter
+table 2/filter chain FORWARD rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain FORWARD rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain FORWARD type=filter hook=2 prio=0 policy=1
+table 2/filter chain INPUT rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain INPUT type=filter hook=1 prio=0 policy=1
+table 2/netbird
+table 2/netbird chain netbird-acl-forward-filter rule "" *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[32 189 1 0]} *expr.Verdict{Kind:1 Chain:}
+table 2/netbird chain netbird-acl-forward-filter rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Verdict{Kind:-3 Chain:netbird-rt-fwd}
+table 2/netbird chain netbird-acl-forward-filter rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Verdict{Kind:0 Chain:}
+table 2/netbird chain netbird-acl-forward-filter type=filter hook=2 prio=0 policy=1
+table 2/netbird chain netbird-acl-input-filter rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Verdict{Kind:-3 Chain:netbird-acl-input-rules}
+table 2/netbird chain netbird-acl-input-filter rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Verdict{Kind:0 Chain:}
+table 2/netbird chain netbird-acl-input-filter type=filter hook=1 prio=0 policy=1
+table 2/netbird chain netbird-acl-input-rules rule "" *expr.Ct{Register:1 SourceRegister:false Key:0 Direction:0} *expr.Bitwise{SourceRegister:1 DestRegister:1 Len:4 Mask:[6 0 0 0] Xor:[0 0 0 0]} *expr.Cmp{Op:1 Register:1 Data:[0 0 0 0]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/netbird chain netbird-acl-input-rules rule "<invalid network>-c20af613fddcefb5" *expr.Payload{OperationType:0 DestRegister:1 SourceRegister:0 Base:1 Offset:12 Len:4 CsumType:0 CsumOffset:0 CsumFlags:0} *expr.Cmp{Op:0 Register:1 Data:[100 71 0 2]} *expr.Verdict{Kind:1 Chain:}
+table 2/netbird chain netbird-acl-input-rules type= hook= prio= policy=
+table 2/netbird chain netbird-mangle-forward rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Meta{Key:16 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[6]} *expr.Payload{OperationType:0 DestRegister:1 SourceRegister:0 Base:2 Offset:13 Len:1 CsumType:0 CsumOffset:0 CsumFlags:0} *expr.Bitwise{SourceRegister:1 DestRegister:1 Len:1 Mask:[2] Xor:[0]} *expr.Cmp{Op:1 Register:1 Data:[0]} *expr.Counter} *expr.Exthdr{DestRegister:1 Type:2 Offset:2 Len:2 Flags:0 Op:1 SourceRegister:0} *expr.Cmp{Op:4 Register:1 Data:[4 216]} *expr.Immediate{Register:1 Data:[4 216]} *expr.Exthdr{DestRegister:0 Type:2 Offset:2 Len:2 Flags:0 Op:1 SourceRegister:1}
+table 2/netbird chain netbird-mangle-forward type=filter hook=2 prio=-150 policy=1
+table 2/netbird chain netbird-mangle-postrouting rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Ct{Register:1 SourceRegister:false Key:0 Direction:0} *expr.Bitwise{SourceRegister:1 DestRegister:1 Len:4 Mask:[8 0 0 0] Xor:[0 0 0 0]} *expr.Cmp{Op:1 Register:1 Data:[0 0 0 0]} *expr.Immediate{Register:1 Data:[17 189 1 0]} *expr.Ct{Register:0 SourceRegister:false Key:3 Direction:0}
+table 2/netbird chain netbird-mangle-postrouting type=filter hook=4 prio=-150 policy=1
+table 2/netbird chain netbird-mangle-prerouting rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Ct{Register:1 SourceRegister:false Key:0 Direction:0} *expr.Bitwise{SourceRegister:1 DestRegister:1 Len:4 Mask:[8 0 0 0] Xor:[0 0 0 0]} *expr.Cmp{Op:1 Register:1 Data:[0 0 0 0]} *expr.Immediate{Register:1 Data:[16 189 1 0]} *expr.Ct{Register:0 SourceRegister:false Key:3 Direction:0}
+table 2/netbird chain netbird-mangle-prerouting rule "<invalid network>-c20af613fddcefb5" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Payload{OperationType:0 DestRegister:1 SourceRegister:0 Base:1 Offset:12 Len:4 CsumType:0 CsumOffset:0 CsumFlags:0} *expr.Cmp{Op:0 Register:1 Data:[100 71 0 2]} *expr.Fib{Register:1 ResultOIF:false ResultOIFNAME:false ResultADDRTYPE:true FlagSADDR:false FlagDADDR:true FlagMARK:false FlagIIF:false FlagOIF:false FlagPRESENT:false} *expr.Cmp{Op:0 Register:1 Data:[2 0 0 0]} *expr.Immediate{Register:1 Data:[32 189 1 0]} *expr.Meta{Key:3 SourceRegister:true Register:1}
+table 2/netbird chain netbird-mangle-prerouting type=filter hook=0 prio=-150 policy=1
+table 2/netbird chain netbird-rt-fwd rule "" *expr.Ct{Register:1 SourceRegister:false Key:0 Direction:0} *expr.Bitwise{SourceRegister:1 DestRegister:1 Len:4 Mask:[6 0 0 0] Xor:[0 0 0 0]} *expr.Cmp{Op:1 Register:1 Data:[0 0 0 0]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/netbird chain netbird-rt-fwd rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Verdict{Kind:0 Chain:}
+table 2/netbird chain netbird-rt-fwd type= hook= prio= policy=
+table 2/netbird chain netbird-rt-postrouting rule "" *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[33 189 1 0]} *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:1 Register:1 Data:[108 111 0 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Counter} *expr.Masq{Random:false FullyRandom:false Persistent:false ToPorts:false RegProtoMin:0 RegProtoMax:0}
+table 2/netbird chain netbird-rt-postrouting rule "" *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[34 189 1 0]} *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0 0 0 0 0 0 0 0 0 0 0 0 0]} *expr.Counter} *expr.Masq{Random:false FullyRandom:false Persistent:false ToPorts:false RegProtoMin:0 RegProtoMax:0}
+table 2/netbird chain netbird-rt-postrouting type=nat hook=4 prio=99 policy=1
+table 2/netbird chain netbird-rt-redirect type=nat hook=0 prio=-100 policy=1
+== resolv ==
+# Generated by NetBird
+# The original file can be restored from /etc/resolv.conf.original.netbird
+nameserver 100.71.255.254
+search netbird.selfhosted .
+== routes ==
+family=10 table=254 dst=fe80::/64 dev=wt0 type=1 scope=0
+family=2 table=254 dst=100.71.0.0/16 dev=wt0 type=1 scope=253
+family=2 table=7120 dst=10.71.0.0/16 dev=wt0 type=1 scope=0
+family=2 table=7120 dst=10.77.0.0/16 dev=wt0 type=1 scope=0
+== rules ==
+family=10 prio=0 table=255 mark=0 invert=false suppress=-1
+family=10 prio=105 table=254 mark=0 invert=false suppress=0
+family=10 prio=110 table=7120 mark=113920 invert=true suppress=-1
+family=10 prio=32766 table=254 mark=0 invert=false suppress=-1
+family=2 prio=0 table=255 mark=0 invert=false suppress=-1
+family=2 prio=105 table=254 mark=0 invert=false suppress=0
+family=2 prio=110 table=7120 mark=113920 invert=true suppress=-1
+family=2 prio=32766 table=254 mark=0 invert=false suppress=-1
+family=2 prio=32767 table=253 mark=0 invert=false suppress=-1
+== sysctl ==
+/proc/sys/net/ipv4/conf/all/rp_filter=2
+/proc/sys/net/ipv4/conf/all/src_valid_mark=1
+/proc/sys/net/ipv4/ip_forward=1
+/proc/sys/net/netfilter/nf_conntrack_acct=0

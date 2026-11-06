@@ -57,7 +57,7 @@ func TestSetConfig_AllFieldsSaved(t *testing.T) {
 	// This test drives the handler directly, so it stands in for a root caller;
 	// without an identity the gate would (correctly) refuse the SSH fields.
 	ctx := privilegedTestCtx()
-	s := New(ctx, "console", "", false, false, false, false)
+	s := New(ctx, "console", "", false, false, false, false, false)
 
 	rosenpassEnabled := true
 	rosenpassPermissive := true

@@ -31,19 +31,25 @@ import (
 func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 	log.Warn("MDM policy changed; restarting engine to apply new configuration")
 
+	return s.forEachSession(s.allSessions(), s.applyMDMPolicyToSession)
+}
+
+// applyMDMPolicyToSession runs the restart sequence for one session.
+func (s *Server) applyMDMPolicyToSession(ss *session) error {
 	s.mutex.Lock()
 	// Read before the cancel: the restart itself ends the run it has to bring back.
-	restart, ok := s.session.beginRestart()
+	restart, ok := ss.beginRestart()
 	if !ok {
+		s.refreshIdleSessionConfig(ss)
 		s.mutex.Unlock()
 		// The client is not running, so there's no engine to restart.
 		return nil
 	}
-	s.session.cancelAct()
+	ss.cancelAct()
 	s.mutex.Unlock()
 
 	// After the final unlock below, so an Up that wakes up here finds the new run.
-	defer s.session.endRestart()
+	defer ss.endRestart()
 
 	// Wait for previous connectWithRetryRuns to exit so we don't end up
 	// with two goroutines fighting over the same status recorder + engine.
@@ -61,33 +67,40 @@ func (s *Server) onMDMPolicyChange(_, _ *mdm.Policy) error {
 		}
 	}
 
+	// Not bound to rootCtx: the decision below has to be taken either way, and whoever holds
+	// the lifecycle releases it when its teardown ends.
+	if err := ss.lockLifecycle(context.Background()); err != nil {
+		return fmt.Errorf("wait for the session to settle: %w", err)
+	}
+	defer ss.unlockLifecycle()
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	// The lock was free during the wait, so the session may have moved on.
-	if !s.session.restartStillWanted(restart) {
+	if !ss.restartStillWanted(restart) {
 		log.Info("MDM restart: the session was taken down or over during the wait, not restarting")
-		s.refreshSelectedConfig()
-		s.publishConfigChangedEvent(proto.MetadataSourceMDM)
-		s.publishPolicyApplied()
+		s.refreshSelectedConfig(ss)
+		s.publishConfigChangedEvent(ss, proto.MetadataSourceMDM)
+		s.publishPolicyApplied(ss)
 		return nil
 	}
 
-	if err := s.restartEngineForMDMLocked(restart.key, restart.running); err != nil {
+	if err := s.restartEngineForMDMLocked(ss, restart.key, restart.running); err != nil {
 		log.Errorf("MDM restart failed: %v", err)
 		return err
 	}
 
 	// publishConfigChangedEvent has already fired inside
 	// restartEngineForMDMLocked with source="mdm".
-	s.publishPolicyApplied()
+	s.publishPolicyApplied(ss)
 	return nil
 }
 
 // publishPolicyApplied emits an MDM-specific user-visible toast so the operator knows their
 // IT policy was applied (UserMessage != "" triggers the GUI notifier).
-func (s *Server) publishPolicyApplied() {
-	s.session.statusRecorder.PublishEvent(
+func (s *Server) publishPolicyApplied(ss *session) {
+	ss.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		"MDM policy applied",
@@ -109,11 +122,11 @@ func (s *Server) publishPolicyApplied() {
 // handler. UserMessage is left empty so the system tray does not toast
 // for every internal restart; the MDM path emits a separate
 // "policy_applied" event (with UserMessage) for that purpose.
-func (s *Server) publishConfigChangedEvent(source string) {
-	if s.session.statusRecorder == nil {
+func (s *Server) publishConfigChangedEvent(ss *session, source string) {
+	if ss.statusRecorder == nil {
 		return
 	}
-	s.session.statusRecorder.PublishEvent(
+	ss.statusRecorder.PublishEvent(
 		proto.SystemEvent_INFO,
 		proto.SystemEvent_SYSTEM,
 		fmt.Sprintf("daemon config changed (source=%s)", source),
@@ -137,31 +150,45 @@ func (s *Server) publishConfigChangedEvent(source string) {
 //
 // MUST be called with s.mutex held, so that the re-spawn is one step for
 // the RPCs that decide on the run.
-func (s *Server) restartEngineForMDMLocked(runKey profilemanager.SessionKey, running bool) error {
-	key, config, err := s.mdmRestartConfig(runKey, running)
+func (s *Server) restartEngineForMDMLocked(ss *session, runKey profilemanager.SessionKey, running bool) error {
+	key, config, err := s.mdmRestartConfig(ss, runKey, running)
 	if err != nil {
 		return err
 	}
+	if err := s.admitRestartLocked(ss); err != nil {
+		return err
+	}
 
-	s.session.setConfig(key, config)
-	s.session.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
-	s.session.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
+	s.refreshConfigsAfterRestart(ss, key, config)
+	ss.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
+	ss.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
 
-	ctx, cancel := s.session.runContext(s.rootCtx)
-	s.session.setActCancel(cancel)
-	runningChan, giveUpChan := s.session.beginRun(key)
+	ctx, cancel := ss.runContext(s.rootCtx)
+	ss.setActCancel(cancel)
+	runningChan, giveUpChan := ss.beginRun(key, config)
 	log.Info("MDM restart: spawning connectWithRetryRuns with re-resolved config")
-	go s.connectWithRetryRuns(ctx, key, config, s.session.statusRecorder, runningChan, giveUpChan)
-	s.publishConfigChangedEvent(proto.MetadataSourceMDM)
+	go s.connectWithRetryRuns(ctx, ss, key, config, runningChan, giveUpChan)
+	s.publishConfigChangedEvent(ss, proto.MetadataSourceMDM)
 	return nil
+}
+
+// refreshConfigsAfterRestart replaces the selected config for the new policy. A profile
+// selected since the run started stays selected and gets its own config.
+func (s *Server) refreshConfigsAfterRestart(ss *session, key profilemanager.SessionKey, config *profilemanager.Config) {
+	selectedKey, selected := ss.selectedConfig()
+	if selected == nil || sameSessionProfile(selectedKey, key) {
+		ss.setConfig(key, config)
+		return
+	}
+	s.refreshSelectedConfig(ss)
 }
 
 // refreshSelectedConfig re-reads the selected config, whose overlay the kill switches read,
 // for a policy change that did not replace it. An unreadable file must not leave them on the
 // old policy, so the new one then goes on a copy of what is there. The overlay cannot be
 // undone: what the policy dropped stays until the next load.
-func (s *Server) refreshSelectedConfig() {
-	key, config := s.session.selectedConfig()
+func (s *Server) refreshSelectedConfig(ss *session) {
+	key, config := ss.selectedConfig()
 	if config == nil {
 		return
 	}
@@ -172,29 +199,38 @@ func (s *Server) refreshSelectedConfig() {
 		overlaid.ApplyMDMPolicy(s.mdmLoader.Load())
 		fresh = &overlaid
 	}
-	s.session.setConfig(key, fresh)
+	ss.setConfig(key, fresh)
 }
 
-// lockAfterRestart takes s.mutex for an RPC that needs the outcome of an MDM restart in
-// progress, instead of the run that restart is taking down. It gives up with ctx.
-func (s *Server) lockAfterRestart(ctx context.Context) error {
+// lockForStart takes the lifecycle of ss and s.mutex for an RPC that starts a run and needs
+// the outcome of an MDM restart in progress, instead of the run that restart is taking down.
+// It gives up with ctx.
+func (s *Server) lockForStart(ctx context.Context, ss *session) error {
 	for {
-		if err := s.session.awaitRestart(ctx); err != nil {
+		if err := ss.awaitRestart(ctx); err != nil {
+			return err
+		}
+		if err := ss.lockLifecycle(ctx); err != nil {
 			return err
 		}
 		s.mutex.Lock()
-		if !s.session.restarting() {
+		if !ss.restarting() {
 			return nil
 		}
 		s.mutex.Unlock()
+		ss.unlockLifecycle()
 	}
 }
 
-func (s *Server) mdmRestartConfig(runKey profilemanager.SessionKey, running bool) (profilemanager.SessionKey, *profilemanager.Config, error) {
+func (s *Server) mdmRestartConfig(ss *session, runKey profilemanager.SessionKey, running bool) (profilemanager.SessionKey, *profilemanager.Config, error) {
+	// With the gate a session belongs to one profile, the active one has nothing to do with it.
+	if !running && s.concurrentProfiles {
+		runKey, running = ss.key, true
+	}
 	if running {
 		config, err := s.storedRunningConfig(runKey)
 		if err != nil {
-			s.session.markClientDown()
+			ss.markClientDown()
 			return profilemanager.SessionKey{}, nil, fmt.Errorf("get running profile config: %w", err)
 		}
 		return runKey, config, nil

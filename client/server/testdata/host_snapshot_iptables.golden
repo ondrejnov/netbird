@@ -1,0 +1,111 @@
+== iptables ==
+iptables-save *filter -A FORWARD -i wt0 -j DROP
+iptables-save *filter -A FORWARD -i wt0 -j NETBIRD-RT-FWD-IN
+iptables-save *filter -A FORWARD -m mark --mark 0x1bd20 -j ACCEPT
+iptables-save *filter -A FORWARD -o wt0 -j NETBIRD-RT-FWD-OUT
+iptables-save *filter -A INPUT -i wt0 -j DROP
+iptables-save *filter -A INPUT -i wt0 -j NETBIRD-ACL-INPUT
+iptables-save *filter -A INPUT -i wt0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables-save *filter -A NETBIRD-ACL-INPUT -s 100.71.0.2/32 -j ACCEPT
+iptables-save *filter -A NETBIRD-RT-FWD-IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables-save *filter -A NETBIRD-RT-FWD-OUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables-save *filter :FORWARD ACCEPT 
+iptables-save *filter :INPUT ACCEPT 
+iptables-save *filter :NETBIRD-ACL-INPUT - 
+iptables-save *filter :NETBIRD-RT-FWD-IN - 
+iptables-save *filter :NETBIRD-RT-FWD-OUT - 
+iptables-save *filter :OUTPUT ACCEPT 
+iptables-save *mangle -A FORWARD -i wt0 -m conntrack --ctstate DNAT -m mark ! --mark 0x1bd20 -j DROP
+iptables-save *mangle -A FORWARD -i wt0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables-save *mangle -A FORWARD -i wt0 -o wt0 -m mark ! --mark 0x1bd20 -j DROP
+iptables-save *mangle -A FORWARD -j NETBIRD-RT-MSSCLAMP
+iptables-save *mangle -A NETBIRD-RT-MSSCLAMP -o wt0 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
+iptables-save *mangle -A NETBIRD-RT-PRE -s 100.71.0.2/32 -i wt0 -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
+iptables-save *mangle -A POSTROUTING -o wt0 -m conntrack --ctstate NEW -j CONNMARK --set-xmark 0x1bd11/0xffffffff
+iptables-save *mangle -A PREROUTING -i wt0 -m conntrack --ctstate NEW -j CONNMARK --set-xmark 0x1bd10/0xffffffff
+iptables-save *mangle -A PREROUTING -j NETBIRD-RT-PRE
+iptables-save *mangle :FORWARD ACCEPT 
+iptables-save *mangle :INPUT ACCEPT 
+iptables-save *mangle :NETBIRD-RT-MSSCLAMP - 
+iptables-save *mangle :NETBIRD-RT-PRE - 
+iptables-save *mangle :OUTPUT ACCEPT 
+iptables-save *mangle :POSTROUTING ACCEPT 
+iptables-save *mangle :PREROUTING ACCEPT 
+iptables-save *nat -A NETBIRD-RT-NAT ! -o lo -m mark --mark 0x1bd21 -j MASQUERADE
+iptables-save *nat -A NETBIRD-RT-NAT -o wt0 -m mark --mark 0x1bd22 -j MASQUERADE
+iptables-save *nat -A POSTROUTING -j NETBIRD-RT-NAT
+iptables-save *nat -A PREROUTING -j NETBIRD-RT-RDR
+iptables-save *nat :INPUT ACCEPT 
+iptables-save *nat :NETBIRD-RT-NAT - 
+iptables-save *nat :NETBIRD-RT-RDR - 
+iptables-save *nat :OUTPUT ACCEPT 
+iptables-save *nat :POSTROUTING ACCEPT 
+iptables-save *nat :PREROUTING ACCEPT 
+== links ==
+wt0 type=tuntap mtu=1280 addrs=[<overlay>/16]
+== nftables ==
+table 2/filter
+table 2/filter chain FORWARD rule "" *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[32 189 1 0]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain FORWARD rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:-3 Chain:NETBIRD-RT-FWD-IN}
+table 2/filter chain FORWARD rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:0 Chain:}
+table 2/filter chain FORWARD rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:-3 Chain:NETBIRD-RT-FWD-OUT}
+table 2/filter chain FORWARD type=filter hook=2 prio=0 policy=1
+table 2/filter chain INPUT rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:-3 Chain:NETBIRD-ACL-INPUT}
+table 2/filter chain INPUT rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Counter} *expr.Verdict{Kind:0 Chain:}
+table 2/filter chain INPUT rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain INPUT type=filter hook=1 prio=0 policy=1
+table 2/filter chain NETBIRD-ACL-INPUT rule "" *expr.Payload{OperationType:0 DestRegister:1 SourceRegister:0 Base:1 Offset:12 Len:4 CsumType:0 CsumOffset:0 CsumFlags:0} *expr.Cmp{Op:0 Register:1 Data:[100 71 0 2]} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain NETBIRD-ACL-INPUT type= hook= prio= policy=
+table 2/filter chain NETBIRD-RT-FWD-IN rule "" *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain NETBIRD-RT-FWD-IN type= hook= prio= policy=
+table 2/filter chain NETBIRD-RT-FWD-OUT rule "" *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/filter chain NETBIRD-RT-FWD-OUT type= hook= prio= policy=
+table 2/mangle
+table 2/mangle chain FORWARD rule "" *expr.Counter} *expr.Verdict{Kind:-3 Chain:NETBIRD-RT-MSSCLAMP}
+table 2/mangle chain FORWARD rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Verdict{Kind:1 Chain:}
+table 2/mangle chain FORWARD rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:conntrack Rev:3 Info} *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:1 Register:1 Data:[32 189 1 0]} *expr.Counter} *expr.Verdict{Kind:0 Chain:}
+table 2/mangle chain FORWARD rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:1 Register:1 Data:[32 189 1 0]} *expr.Counter} *expr.Verdict{Kind:0 Chain:}
+table 2/mangle chain FORWARD type=filter hook=2 prio=-150 policy=1
+table 2/mangle chain NETBIRD-RT-MSSCLAMP rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Payload{OperationType:0 DestRegister:1 SourceRegister:0 Base:1 Offset:9 Len:1 CsumType:0 CsumOffset:0 CsumFlags:0} *expr.Cmp{Op:0 Register:1 Data:[6]} *expr.Payload{OperationType:0 DestRegister:1 SourceRegister:0 Base:2 Offset:13 Len:1 CsumType:0 CsumOffset:0 CsumFlags:0} *expr.Bitwise{SourceRegister:1 DestRegister:1 Len:1 Mask:[6] Xor:[0]} *expr.Cmp{Op:0 Register:1 Data:[2]} *expr.Counter} *expr.Target{Name:TCPMSS Rev:0 Info}
+table 2/mangle chain NETBIRD-RT-MSSCLAMP type= hook= prio= policy=
+table 2/mangle chain NETBIRD-RT-PRE rule "" *expr.Payload{OperationType:0 DestRegister:1 SourceRegister:0 Base:1 Offset:12 Len:4 CsumType:0 CsumOffset:0 CsumFlags:0} *expr.Cmp{Op:0 Register:1 Data:[100 71 0 2]} *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:addrtype Rev:1 Info} *expr.Counter} *expr.Target{Name:MARK Rev:2 Info}
+table 2/mangle chain NETBIRD-RT-PRE type= hook= prio= policy=
+table 2/mangle chain POSTROUTING rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Target{Name:CONNMARK Rev:2 Info}
+table 2/mangle chain POSTROUTING type=filter hook=4 prio=-150 policy=1
+table 2/mangle chain PREROUTING rule "" *expr.Counter} *expr.Verdict{Kind:-3 Chain:NETBIRD-RT-PRE}
+table 2/mangle chain PREROUTING rule "" *expr.Meta{Key:6 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Match{Name:conntrack Rev:3 Info} *expr.Counter} *expr.Target{Name:CONNMARK Rev:2 Info}
+table 2/mangle chain PREROUTING type=filter hook=0 prio=-150 policy=1
+table 2/nat
+table 2/nat chain NETBIRD-RT-NAT rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[119 116 48 0]} *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[34 189 1 0]} *expr.Counter} *expr.Target{Name:MASQUERADE Rev:0 Info}
+table 2/nat chain NETBIRD-RT-NAT rule "" *expr.Meta{Key:7 SourceRegister:false Register:1} *expr.Cmp{Op:1 Register:1 Data:[108 111 0]} *expr.Meta{Key:3 SourceRegister:false Register:1} *expr.Cmp{Op:0 Register:1 Data:[33 189 1 0]} *expr.Counter} *expr.Target{Name:MASQUERADE Rev:0 Info}
+table 2/nat chain NETBIRD-RT-NAT type= hook= prio= policy=
+table 2/nat chain NETBIRD-RT-RDR type= hook= prio= policy=
+table 2/nat chain POSTROUTING rule "" *expr.Counter} *expr.Verdict{Kind:-3 Chain:NETBIRD-RT-NAT}
+table 2/nat chain POSTROUTING type=nat hook=4 prio=100 policy=1
+table 2/nat chain PREROUTING rule "" *expr.Counter} *expr.Verdict{Kind:-3 Chain:NETBIRD-RT-RDR}
+table 2/nat chain PREROUTING type=nat hook=0 prio=-100 policy=1
+== resolv ==
+# Generated by NetBird
+# The original file can be restored from /etc/resolv.conf.original.netbird
+nameserver 100.71.255.254
+search netbird.selfhosted .
+== routes ==
+family=10 table=254 dst=fe80::/64 dev=wt0 type=1 scope=0
+family=2 table=254 dst=100.71.0.0/16 dev=wt0 type=1 scope=253
+family=2 table=7120 dst=10.71.0.0/16 dev=wt0 type=1 scope=0
+family=2 table=7120 dst=10.77.0.0/16 dev=wt0 type=1 scope=0
+== rules ==
+family=10 prio=0 table=255 mark=0 invert=false suppress=-1
+family=10 prio=105 table=254 mark=0 invert=false suppress=0
+family=10 prio=110 table=7120 mark=113920 invert=true suppress=-1
+family=10 prio=32766 table=254 mark=0 invert=false suppress=-1
+family=2 prio=0 table=255 mark=0 invert=false suppress=-1
+family=2 prio=105 table=254 mark=0 invert=false suppress=0
+family=2 prio=110 table=7120 mark=113920 invert=true suppress=-1
+family=2 prio=32766 table=254 mark=0 invert=false suppress=-1
+family=2 prio=32767 table=253 mark=0 invert=false suppress=-1
+== sysctl ==
+/proc/sys/net/ipv4/conf/all/rp_filter=2
+/proc/sys/net/ipv4/conf/all/src_valid_mark=1
+/proc/sys/net/ipv4/ip_forward=1
+/proc/sys/net/netfilter/nf_conntrack_acct=0

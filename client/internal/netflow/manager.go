@@ -38,7 +38,7 @@ type Manager struct {
 }
 
 // NewManager creates a new netflow manager
-func NewManager(iface nftypes.IFaceMapper, publicKey []byte, statusRecorder *peer.Status) *Manager {
+func NewManager(iface nftypes.IFaceMapper, publicKey []byte, statusRecorder *peer.Status, conntrackOpts ...conntrack.Option) *Manager {
 	var prefix, prefixV6 netip.Prefix
 	if iface != nil {
 		prefix = iface.Address().Network
@@ -48,7 +48,7 @@ func NewManager(iface nftypes.IFaceMapper, publicKey []byte, statusRecorder *pee
 
 	var ct nftypes.ConnTracker
 	if runtime.GOOS == "linux" && iface != nil && !iface.IsUserspaceBind() {
-		ct = conntrack.New(flowLogger, iface)
+		ct = conntrack.New(flowLogger, iface, conntrackOpts...)
 	}
 
 	return &Manager{

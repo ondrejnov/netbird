@@ -48,6 +48,8 @@ func newResidualFixture(t *testing.T) *residualFixture {
 		f.flushes++
 		return nil
 	}
+	// These tests run without a harness, next to whatever interfaces the host has.
+	s.removeLinksFn = func([]hostcoord.SlotRecord) error { return nil }
 
 	// Nothing may leave the test host, whichever profile a test ends up connecting.
 	for _, path := range []string{cfgPath, filepath.Join(filepath.Dir(cfgPath), "other-profile.json")} {
@@ -253,7 +255,7 @@ func TestStart_CleansStoredSessionsBeforeTheFirstRun(t *testing.T) {
 
 	var runningAtFlush, otherCleanAtFlush bool
 	f.s.flushRoutesFn = func() error {
-		runningAtFlush = f.s.session.isClientRunning() || f.s.session.hasActCancel()
+		runningAtFlush = f.s.focusedSession().isClientRunning() || f.s.focusedSession().hasActCancel()
 		otherCleanAtFlush = !f.residual(t, f.other)
 		return nil
 	}
@@ -263,14 +265,14 @@ func TestStart_CleansStoredSessionsBeforeTheFirstRun(t *testing.T) {
 	assert.False(t, runningAtFlush, "the cleanup should finish before a session starts")
 	assert.True(t, otherCleanAtFlush, "the state files should be clean before the flush")
 	assert.False(t, f.residual(t, f.active), "the active profile should be clean")
-	assert.True(t, f.s.session.isClientRunning(), "the session should start afterwards")
+	assert.True(t, f.s.focusedSession().isClientRunning(), "the session should start afterwards")
 }
 
 // Up with a profile runs the session of that profile, so its file is the one to clean. The
 // file of the profile that was active until now could belong to a running session.
 func TestUp_CleansOnlyTheStateFileOfItsProfile(t *testing.T) {
 	f := newResidualFixture(t)
-	f.s.session.setConfig(f.active, &profilemanager.Config{})
+	f.s.focusedSession().setConfig(f.active, &profilemanager.Config{})
 	rootCtx, cancel := context.WithCancel(f.ctx)
 	f.s.rootCtx = rootCtx
 	stopRunAtCleanup(t, f.s, cancel)
@@ -291,7 +293,7 @@ func TestLogin_CleansOnlyTheStateFileOfItsProfile(t *testing.T) {
 	require.NoError(t, err)
 
 	name, username := f.other.Profile.String(), f.other.Username
-	_, resolved, switched, err := f.s.authorizeAndPrepareLogin(f.ctx, &proto.LoginRequest{ProfileName: &name, Username: &username}, active)
+	_, resolved, switched, err := f.s.authorizeAndPrepareLogin(f.ctx, f.s.focusedSession(), &proto.LoginRequest{ProfileName: &name, Username: &username}, active)
 	require.NoError(t, err)
 	require.True(t, switched, "the login should have switched the profile")
 	require.Equal(t, f.other, resolved.SessionKey(), "the login should target the other profile")
@@ -305,7 +307,7 @@ func (f *residualFixture) login(t *testing.T) {
 	t.Helper()
 	active, err := f.s.profileManager.GetActiveProfileState()
 	require.NoError(t, err)
-	_, _, _, err = f.s.authorizeAndPrepareLogin(f.ctx, &proto.LoginRequest{}, active)
+	_, _, _, err = f.s.authorizeAndPrepareLogin(f.ctx, f.s.focusedSession(), &proto.LoginRequest{}, active)
 	require.NoError(t, err)
 }
 
@@ -353,8 +355,8 @@ func TestLogin_RunStartedAfterTheCancel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newResidualFixture(t)
-			f.s.session.beginRun(f.active)
-			f.s.session.setActCancel(func() { f.s.session.beginRun(tt.newRun(f)) })
+			f.s.focusedSession().beginRun(f.active, nil)
+			f.s.focusedSession().setActCancel(func() { f.s.focusedSession().beginRun(tt.newRun(f), nil) })
 
 			f.login(t)
 
@@ -368,8 +370,8 @@ func TestLogin_RunStartedAfterTheCancel(t *testing.T) {
 // leaves in the file is what Login is there to clean.
 func TestLogin_CleansAfterItsOwnCancelledRun(t *testing.T) {
 	f := newResidualFixture(t)
-	f.s.session.beginRun(f.active)
-	f.s.session.setActCancel(func() {})
+	f.s.focusedSession().beginRun(f.active, nil)
+	f.s.focusedSession().setActCancel(func() {})
 
 	f.login(t)
 
@@ -391,14 +393,14 @@ func TestMDMRestart_RunningProfileWithoutConfigEndsTheRun(t *testing.T) {
 	f.s.rootCtx = rootCtx
 	stopRunAtCleanup(t, f.s, cancel)
 
-	_, giveUp := f.s.session.beginRun(removed)
-	f.s.session.setActCancel(func() { close(giveUp) })
+	_, giveUp := f.s.focusedSession().beginRun(removed, nil)
+	f.s.focusedSession().setActCancel(func() { close(giveUp) })
 
 	assert.Error(t, f.s.onMDMPolicyChange(nil, nil), "the restart should be refused")
 
 	assert.NoFileExists(t, cfgPath, "the removed profile should not get a new config")
-	assert.False(t, f.s.session.isClientRunning(), "the run should count as ended")
-	_, running := f.s.session.runningKey()
+	assert.False(t, f.s.focusedSession().isClientRunning(), "the run should count as ended")
+	_, running := f.s.focusedSession().runningKey()
 	assert.False(t, running, "nothing should run")
 }
 
@@ -416,21 +418,21 @@ func TestRestoreOwnResidual_Flush(t *testing.T) {
 		{
 			name: "own session is the one running",
 			setup: func(f *residualFixture) {
-				f.s.session.beginRun(f.active)
+				f.s.focusedSession().beginRun(f.active, nil)
 			},
 			want: 1,
 		},
 		{
 			name: "another session runs",
 			setup: func(f *residualFixture) {
-				f.s.session.beginRun(f.other)
+				f.s.focusedSession().beginRun(f.other, nil)
 			},
 			want: 0,
 		},
 		{
 			name: "another session wants to run but its goroutine is gone",
 			setup: func(f *residualFixture) {
-				_, giveUp := f.s.session.beginRun(f.other)
+				_, giveUp := f.s.focusedSession().beginRun(f.other, nil)
 				close(giveUp)
 			},
 			want: 1,
@@ -438,8 +440,8 @@ func TestRestoreOwnResidual_Flush(t *testing.T) {
 		{
 			name: "another session was brought down",
 			setup: func(f *residualFixture) {
-				f.s.session.beginRun(f.other)
-				f.s.session.markClientDown()
+				f.s.focusedSession().beginRun(f.other, nil)
+				f.s.focusedSession().markClientDown()
 			},
 			want: 1,
 		},

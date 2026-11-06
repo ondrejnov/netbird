@@ -19,7 +19,9 @@ func TestUpDaemon(t *testing.T) {
 	tempDir := t.TempDir()
 	origDefaultProfileDir := profilemanager.DefaultConfigPathDir
 	origActiveProfileStatePath := profilemanager.ActiveProfileStatePath
+	origDefaultConfigPath := profilemanager.DefaultConfigPath
 	profilemanager.DefaultConfigPathDir = tempDir
+	profilemanager.DefaultConfigPath = tempDir + "/default.json"
 	profilemanager.ActiveProfileStatePath = tempDir + "/active_profile.json"
 	profilemanager.ConfigDirOverride = tempDir
 
@@ -48,14 +50,27 @@ func TestUpDaemon(t *testing.T) {
 	t.Cleanup(func() {
 		profilemanager.DefaultConfigPathDir = origDefaultProfileDir
 		profilemanager.ActiveProfileStatePath = origActiveProfileStatePath
+		profilemanager.DefaultConfigPath = origDefaultConfigPath
 		profilemanager.ConfigDirOverride = ""
 	})
 
-	mgmAddr := startTestingServices(t)
+	// A foreground login reads the Management URL from the config of the profile the CLI runs on, the
+	// default one, and from nowhere else. The daemon reads it from the config of its active profile.
+	// Without them the setup key of this test goes to the default Management, which calls it invalid.
+	mgmtURL := "http://" + startTestingServices(t)
+	activeConfigPath, err := created.FilePath()
+	if err != nil {
+		t.Fatalf("failed to get the path of the profile: %v", err)
+	}
+	for _, path := range []string{profilemanager.DefaultConfigPath, activeConfigPath} {
+		if _, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{ConfigPath: path, ManagementURL: mgmtURL}); err != nil {
+			t.Fatalf("failed to write the profile config: %v", err)
+		}
+	}
 
 	confPath := tempDir + "/config.json"
 
-	_, cliLis := startClientDaemon(t, context.Background(), "http://"+mgmAddr, confPath)
+	_, cliLis := startClientDaemon(t, context.Background(), mgmtURL, confPath)
 
 	cliAddr = cliLis.Addr().String()
 
@@ -90,6 +105,13 @@ func TestUpDaemon(t *testing.T) {
 	if err := tempFile.Close(); err != nil {
 		t.Errorf("unable to close file, got error %v", err)
 	}
+	// The flags of rootCmd stay set between executions, and these two exclude each other.
+	setupKey = ""
+	rootCmd.PersistentFlags().Lookup("setup-key").Changed = false
+	t.Cleanup(func() {
+		setupKeyPath = ""
+		rootCmd.PersistentFlags().Lookup("setup-key-file").Changed = false
+	})
 	rootCmd.SetArgs([]string{
 		"login",
 		"--daemon-addr", "tcp://" + cliAddr,
@@ -140,8 +162,7 @@ func TestUpDaemon(t *testing.T) {
 	// we can't check status here, because context already canceled
 }
 
-// daemonStatus asks the daemon, since the status lives on its session. The daemon of this
-// test talks to its default Management, so it stays at NeedsLogin whatever the CLI does.
+// daemonStatus asks the daemon, since the status lives on its session.
 func daemonStatus(t *testing.T, addr string) internal.StatusType {
 	t.Helper()
 
