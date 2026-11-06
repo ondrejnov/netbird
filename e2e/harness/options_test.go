@@ -20,6 +20,29 @@ import (
 // Docker — which is the point: a wiring mistake here would otherwise only show up
 // as a puzzling failure minutes into a container run.
 
+// Two servers on the networks of one agent need different addresses, and the default
+// has to stay what the proxy and nblink helpers assume.
+func TestCombinedDomain(t *testing.T) {
+	var def combinedOptions
+	assert.Equal(t, combinedExposedURL, exposedURL(def.deploymentDomain()),
+		"without the option the server keeps the default address")
+
+	var other combinedOptions
+	WithDomain("other.local")(&other)
+	assert.Equal(t, "http://other.local:8080", exposedURL(other.deploymentDomain()),
+		"the option gives the server the named address")
+}
+
+func TestClientEnvOverride(t *testing.T) {
+	var o clientOptions
+	WithClientEnv(map[string]string{"NB_DAEMON_ADDR": "unix:///var/run/other.sock", "NB_LOG_LEVEL": "debug"})(&o)
+	env := clientEnv("http://server:8080", "key", o)
+	assert.Equal(t, "unix:///var/run/other.sock", env["NB_DAEMON_ADDR"], "an added variable reaches the agent")
+	assert.Equal(t, "debug", env["NB_LOG_LEVEL"], "an added variable wins over the default")
+	assert.Equal(t, "http://server:8080", env["NB_MANAGEMENT_URL"], "the address of the server stays")
+	assert.Equal(t, "key", env["NB_SETUP_KEY"], "the setup key stays")
+}
+
 func TestCombinedEnvGeolocation(t *testing.T) {
 	var off combinedOptions
 	assert.Equal(t, "true", combinedEnv(off)["NB_DISABLE_GEOLOCATION"],

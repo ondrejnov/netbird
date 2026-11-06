@@ -31,9 +31,10 @@ var (
 
 // NetbirdVersion returns the Netbird version. For non-release builds the
 // value is the literal DevelopmentVersion constant; the VCS revision is
-// exposed separately via NetbirdCommit so the wire format stays stable.
+// exposed separately via NetbirdCommit so the wire format stays stable. The
+// fork build (multiprofile tag) appends "+multiprofile".
 func NetbirdVersion() string {
-	return version
+	return markFork(version)
 }
 
 // NetbirdCommit returns the VCS revision (truncated to 12 chars) of the

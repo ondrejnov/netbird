@@ -114,6 +114,10 @@ type session struct {
 	// persistSyncResponse makes the clients of this session keep the latest sync response.
 	persistSyncResponse bool
 
+	// probeThrottle bounds the health probes of this session, which are its own: the probe of
+	// another session says nothing about its relays.
+	probeThrottle *probeThrottle
+
 	// refusal says why the most recent run was refused, until the session gets another chance or
 	// is taken down.
 	refusal *internal.SessionRefusal
@@ -127,6 +131,7 @@ func newSession() *session {
 		extendAuthSessionFlow: auth.NewPendingFlow(),
 		jwtCache:              newJWTCache(),
 		persistSyncResponse:   true,
+		probeThrottle:         newProbeThrottle(probeThreshold),
 	}
 }
 

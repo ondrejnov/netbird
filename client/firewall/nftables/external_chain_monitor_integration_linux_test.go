@@ -4,6 +4,7 @@ package nftables
 
 import (
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,4 +74,35 @@ func (c *countingReconciler) reconcileExternalChains() error {
 	default:
 	}
 	return nil
+}
+
+// The library hands over events on an unbuffered channel. A monitor that stops with events on their
+// way, which is what a session sees when other sessions come and go, must not leave its goroutines
+// waiting for a reader that is gone.
+func TestExternalChainMonitorStopLeavesNoGoroutines(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root required")
+	}
+	const rounds = 20
+
+	m := newExternalChainMonitor(&countingReconciler{calls: make(chan struct{}, 1), count: &atomic.Int32{}})
+	before := runtime.NumGoroutine()
+	for range rounds {
+		_, closeMonitor, err := m.subscribe()
+		require.NoError(t, err)
+
+		conn := &nftables.Conn{}
+		table := conn.AddTable(&nftables.Table{Name: "nbmon_stop_test", Family: nftables.TableFamilyINet})
+		require.NoError(t, conn.Flush(), "create a table")
+		conn.DelTable(table)
+		require.NoError(t, conn.Flush(), "delete the table")
+
+		// The events have reached the monitor before it stops.
+		time.Sleep(20 * time.Millisecond)
+		closeMonitor()
+	}
+
+	require.Eventuallyf(t, func() bool {
+		return runtime.NumGoroutine() <= before+1
+	}, 5*time.Second, 50*time.Millisecond, "%d stopped monitors should leave no goroutines, %d before", rounds, before)
 }

@@ -1,0 +1,61 @@
+version: 2
+# Build of the multi-profile fork (docs/specs/concurrent-profiles.md, 2.1).
+# Run it next to the upstream configuration, never in place of it:
+#   goreleaser release --snapshot --clean --config .goreleaser_multiprofile.yaml
+# Linux only. The multiprofile tag marks the version, switches off the lookup of
+# the latest upstream release and keeps the updater from installing
+# anything. Nothing here publishes a package or adds the official repository.
+project_name: netbird-multiprofile
+
+builds:
+  - id: netbird-multiprofile
+    dir: client
+    binary: netbird
+    env: [CGO_ENABLED=0]
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/netbirdio/netbird/version.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    tags:
+      - multiprofile
+      - load_wgnt_from_rsrc
+
+archives:
+  - id: netbird-multiprofile
+    builds:
+      - netbird-multiprofile
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+nfpms:
+  - id: netbird-multiprofile
+    package_name: netbird-multiprofile
+    maintainer: ondrejnov fork maintainers
+    description: NetBird client with concurrent profiles (fork).
+    homepage: https://github.com/ondrejnov/netbird
+    license: BSD-3-Clause
+    vendor: NetBird fork
+    bindir: /usr/bin
+    builds:
+      - netbird-multiprofile
+    formats:
+      - deb
+      - rpm
+    # Both packages install /usr/bin/netbird and the netbird service.
+    conflicts:
+      - netbird
+    replaces:
+      - netbird
+    scripts:
+      postinstall: "release_files/post_install.sh"
+      preremove: "release_files/pre_remove.sh"
+
+# Nothing is uploaded: the artifacts stay in dist/ and the owner distributes them.
+release:
+  disable: true
+
+changelog:
+  disable: true

@@ -43,14 +43,14 @@ func (u *upstreamResolver) exchange(ctx context.Context, upstream string, r *dns
 	// For now, only use netstack on JS platform where direct access is not possible.
 	if u.nsNet != nil && runtime.GOOS == "js" {
 		start := time.Now()
-		reply, err := ExchangeWithNetstack(ctx, u.nsNet, r, upstream)
+		reply, err := ExchangeWithNetstack(ctx, u.nsNet, r, upstream, u.tunnelMTU())
 		return reply, time.Since(start), err
 	}
 
 	client := &dns.Client{
 		Timeout: ClientTimeout,
 	}
-	return ExchangeWithFallback(ctx, client, r, upstream)
+	return ExchangeWithFallback(ctx, client, r, upstream, u.tunnelMTU())
 }
 
 func GetClientPrivate(_ privateClientIface, _ netip.Addr, dialTimeout time.Duration) (*dns.Client, error) {
