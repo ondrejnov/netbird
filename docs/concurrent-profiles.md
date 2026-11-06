@@ -62,7 +62,7 @@ Sessions:
 
 | Příkaz | Chování s gate |
 |---|---|
-| `netbird up --profile X` | Přidá session X a přesune na ni focus, ostatních se nedotkne |
+| `netbird up --profile X` | Přidá session X a přesune na ni focus, ostatních se nedotkne. Když se X nespustí, vrátí focus session, která ho měla předtím |
 | `netbird down` | Odpojí `focused` a vypíše, co dál běží |
 | `netbird down --profile X`, `--all` | Odpojí pojmenovanou session, nebo všechny, na které volající dosáhne |
 | `netbird status --profile X` | Souhrn session X, JSON přidá pole `sessions` |
@@ -86,10 +86,11 @@ Poznáte to takto:
 $ netbird up --profile doma
 Error: daemon up failed: call service up method: rpc error: code = FailedPrecondition desc = This session was not started: its overlay range overlaps another running session. Change network_range in the Management of one of the networks, or bring the other session down
 $ netbird status --profile doma
-  doma     Idle        -    -                  focused, conflict: overlay
+  doma     Idle        -    -                  conflict: overlay
 ```
 
-Běžící session se odmítnutí nedotkne. Řeší se změnou rozsahu v Managementu jedné ze sítí, v
+Běžící session se odmítnutí nedotkne. Focus se vrátí session, která ho měla před příkazem, prosté `netbird down`
+tedy nemíří na odmítnutou session. Řeší se změnou rozsahu v Managementu jedné ze sítí, v
 self-hosted instalaci je to nastavení účtu `network_range` (minimum /28 a musí pojmout peery s rezervou):
 
 ```bash
@@ -129,6 +130,14 @@ Změnou domény se změní FQDN všech peerů té sítě.
 
 UI se nemění a vidí jen `focused`. Přepínač profilů v UI přepne a zavolá `Down`, který s gate míří na nový `focused`.
 **Původní session proto běží dál a v UI není vidět**, ukáže ji jen `netbird status`.
+
+### SSH config dalších session
+
+Session ve slotu N (`wt1` a dál) zapisuje `/etc/ssh/ssh_config.d/99-netbird-N.conf` s právy 0644, stejně jako slot 0
+svůj `99-netbird.conf`. Soubor obsahuje overlay IP a FQDN peerů té session a přečte ho každý lokální uživatel, i ten,
+kterému daemon stav cizí session přes `status` nevydá. Práva 0600 nejdou, protože OpenSSH čte soubory z
+`ssh_config.d` pod účtem, který `ssh` spouští, a vlastník session by soubor nepřečetl. Na stroji, kde se adresy a
+jména peerů jedné sítě nemají dostat k ostatním lokálním uživatelům, souběžné profily nezapínejte.
 
 ### Konflikty
 

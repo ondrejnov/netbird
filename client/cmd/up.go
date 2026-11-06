@@ -126,8 +126,12 @@ func upFunc(cmd *cobra.Command, args []string) error {
 
 	var activeProf *profilemanager.Profile
 	var profileSwitched bool
+	var focus *focusReturn
 	// switch profile if provided
 	if profileName != "" {
+		if !foregroundMode {
+			focus = focusBeforeSwitch(cmd.Context(), pm)
+		}
 		activeProf, err = switchOrCreateProfile(cmd.Context(), pm, profileName, username.Username)
 		if err != nil {
 			return fmt.Errorf("switch profile: %v", err)
@@ -143,7 +147,11 @@ func upFunc(cmd *cobra.Command, args []string) error {
 	if foregroundMode {
 		return runInForegroundMode(ctx, cmd, activeProf)
 	}
-	return runInDaemonMode(ctx, cmd, pm, activeProf, profileSwitched)
+	if err := runInDaemonMode(ctx, cmd, pm, activeProf, profileSwitched); err != nil {
+		focus.giveBack(ctx, pm, activeProf.ID, username.Username)
+		return err
+	}
+	return nil
 }
 
 // switchOrCreateProfile switches the active profile to the one identified by
