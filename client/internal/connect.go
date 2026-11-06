@@ -488,7 +488,7 @@ func (c *ConnectClient) run(mobileDependency MobileDependency, runningChan chan 
 		}
 
 		if c.sessionHost != nil {
-			detach, err := c.sessionHost.attach(c.config, engineConfig)
+			detach, err := c.sessionHost.attach(engineCtx, c.config, engineConfig)
 			if err != nil {
 				log.Error(err)
 				return backoff.Permanent(wrapErr(err))

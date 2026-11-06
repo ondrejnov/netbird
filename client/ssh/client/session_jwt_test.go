@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +40,11 @@ func (d *jwtDaemon) GetFeatures(context.Context, *proto.GetFeaturesRequest) (*pr
 		return nil, d.featuresErr
 	}
 	return d.features, nil
+}
+
+// GetActiveProfile names the focused session, which a connection without --profile is fixed to.
+func (d *jwtDaemon) GetActiveProfile(context.Context, *proto.GetActiveProfileRequest) (*proto.GetActiveProfileResponse, error) {
+	return &proto.GetActiveProfileResponse{Id: "work", ProfileName: "work", Username: "alice"}, nil
 }
 
 func (d *jwtDaemon) RequestJWTAuth(context.Context, *proto.RequestJWTAuthRequest) (*proto.RequestJWTAuthResponse, error) {
@@ -199,4 +205,160 @@ func TestJWTGoesOnlyToAServerTheSessionKnows(t *testing.T) {
 			}
 		})
 	}
+}
+
+// focusDaemon holds two sessions, and the focus moves to the other one as soon as the first token is
+// handed out. A request without a selector goes to whichever has the focus at that moment.
+type focusDaemon struct {
+	proto.UnimplementedDaemonServiceServer
+	features  *proto.GetFeaturesResponse
+	activeErr error
+	// knownKeys has the host key each session knows the server by.
+	knownKeys map[string][]byte
+
+	mu        sync.Mutex
+	focused   string
+	focusNext string
+	asked     int
+	jwtFor    []string
+}
+
+func (d *focusDaemon) sessionOf(selector *proto.SessionSelector) string {
+	if selector != nil {
+		return selector.GetProfile()
+	}
+	return d.focused
+}
+
+func (d *focusDaemon) GetFeatures(context.Context, *proto.GetFeaturesRequest) (*proto.GetFeaturesResponse, error) {
+	return d.features, nil
+}
+
+func (d *focusDaemon) GetActiveProfile(context.Context, *proto.GetActiveProfileRequest) (*proto.GetActiveProfileResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.asked++
+	if d.activeErr != nil {
+		return nil, d.activeErr
+	}
+	return &proto.GetActiveProfileResponse{Id: d.focused, ProfileName: "name of " + d.focused, Username: "alice"}, nil
+}
+
+func (d *focusDaemon) RequestJWTAuth(_ context.Context, req *proto.RequestJWTAuthRequest) (*proto.RequestJWTAuthResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.jwtFor = append(d.jwtFor, d.sessionOf(req.GetSession()))
+	d.focused = d.focusNext
+	return &proto.RequestJWTAuthResponse{CachedToken: jwtOfTheSession}, nil
+}
+
+func (d *focusDaemon) GetPeerSSHHostKey(_ context.Context, req *proto.GetPeerSSHHostKeyRequest) (*proto.GetPeerSSHHostKeyResponse, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	key := d.knownKeys[d.sessionOf(req.GetSession())]
+	return &proto.GetPeerSSHHostKeyResponse{Found: key != nil, SshHostKey: key}, nil
+}
+
+func (d *focusDaemon) tokenRequests() (asked int, jwtFor []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.asked, slices.Clone(d.jwtFor)
+}
+
+func startFocusDaemon(t *testing.T, daemon *focusDaemon) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv := grpc.NewServer()
+	proto.RegisterDaemonServiceServer(srv, daemon)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return "tcp://" + lis.Addr().String()
+}
+
+// A token of one session must not go to a server that only another session knows, however the focus
+// moves between the two questions to the daemon (I9).
+func TestJWTAndHostKeyOfOneConnectionAskTheSameSession(t *testing.T) {
+	gateOn := &proto.GetFeaturesResponse{ConcurrentProfilesEnabled: true}
+
+	dial := func(t *testing.T, server *jwtServer, daemon *focusDaemon, session *proto.SessionSelector) error {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		client, err := Dial(ctx, server.addr, "user", DialOptions{
+			KnownHostsFile: knownHostsWith(t, server.addr, server.hostKey),
+			DaemonAddr:     startFocusDaemon(t, daemon),
+			NoBrowser:      true,
+			Session:        session,
+		})
+		if client != nil {
+			t.Cleanup(func() { _ = client.Close() })
+		}
+		return err
+	}
+
+	t.Run("the focus moves to a session that knows the server", func(t *testing.T) {
+		server := startJWTServer(t)
+		daemon := &focusDaemon{
+			features:  gateOn,
+			focused:   "work",
+			focusNext: "home",
+			knownKeys: map[string][]byte{"home": ssh.MarshalAuthorizedKey(server.hostKey)},
+		}
+
+		assert.Error(t, dial(t, server, daemon, nil), "the session of the token does not know the server")
+		assert.Empty(t, server.tokens(), "the server must not get the token of the other session")
+	})
+
+	t.Run("the focus moves away from the session that knows the server", func(t *testing.T) {
+		server := startJWTServer(t)
+		daemon := &focusDaemon{
+			features:  gateOn,
+			focused:   "work",
+			focusNext: "home",
+			knownKeys: map[string][]byte{"work": ssh.MarshalAuthorizedKey(server.hostKey)},
+		}
+
+		assert.NoError(t, dial(t, server, daemon, nil))
+		assert.Equal(t, []string{jwtOfTheSession}, server.tokens(), "the server should get the token of its session")
+	})
+
+	t.Run("a focus the caller may not read refuses the connection", func(t *testing.T) {
+		server := startJWTServer(t)
+		daemon := &focusDaemon{
+			features:  gateOn,
+			focused:   "work",
+			focusNext: "work",
+			activeErr: status.Error(codes.PermissionDenied, "not yours"),
+			knownKeys: map[string][]byte{"work": ssh.MarshalAuthorizedKey(server.hostKey)},
+		}
+
+		assert.Error(t, dial(t, server, daemon, nil))
+		_, jwtFor := daemon.tokenRequests()
+		assert.Empty(t, jwtFor, "without knowing the session no token should be asked for")
+	})
+
+	t.Run("a named session is asked as it is", func(t *testing.T) {
+		server := startJWTServer(t)
+		daemon := &focusDaemon{
+			features:  gateOn,
+			focused:   "work",
+			focusNext: "work",
+			knownKeys: map[string][]byte{"home": ssh.MarshalAuthorizedKey(server.hostKey)},
+		}
+
+		assert.NoError(t, dial(t, server, daemon, &proto.SessionSelector{Profile: "home", Username: "alice"}))
+		asked, jwtFor := daemon.tokenRequests()
+		assert.Zero(t, asked, "the focus does not matter for a named session")
+		assert.Equal(t, []string{"home"}, jwtFor)
+	})
+
+	t.Run("without the gate nothing is fixed", func(t *testing.T) {
+		server := startJWTServer(t)
+		daemon := &focusDaemon{features: &proto.GetFeaturesResponse{}, focused: "work", focusNext: "work"}
+
+		assert.NoError(t, dial(t, server, daemon, nil), "known_hosts counts as before")
+		asked, _ := daemon.tokenRequests()
+		assert.Zero(t, asked, "a daemon without the gate has no focus to fix")
+	})
 }

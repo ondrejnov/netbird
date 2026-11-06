@@ -1294,3 +1294,28 @@ func TestProfileListEvent_NamesNoProfileWithTheGate(t *testing.T) {
 	require.Eventually(t, func() bool { return stream.saw("Profile list changed") }, 5*time.Second, 10*time.Millisecond, "the list changed, which is what the event is for")
 	assert.False(t, stream.sawProfile(profile), "the event must not name the profile of bob")
 }
+
+// netbird ssh and its proxy fix the session of a connection by naming the focus they were told about.
+// The name has to come back to the same session.
+func TestSelectorOfTheActiveProfileNamesTheFocusedSession(t *testing.T) {
+	f := newAccessFixture(t)
+	for _, tc := range []struct {
+		name string
+		key  profilemanager.SessionKey
+	}{
+		{name: "the session of the caller", key: f.alice},
+		{name: "the shared session", key: f.shared},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.focus(t, tc.key)
+
+			active, err := f.s.GetActiveProfile(aliceCtx(), &proto.GetActiveProfileRequest{})
+			require.NoError(t, err)
+			ss, err := f.s.checkSessionSelector(aliceCtx(), &proto.SessionSelector{Profile: active.GetId(), Username: active.GetUsername()})
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.key.Profile, ss.key.Profile, "the selector should name the focused session")
+			assert.Same(t, f.s.focusedSession(), ss, "the selector should reach the focused session")
+		})
+	}
+}

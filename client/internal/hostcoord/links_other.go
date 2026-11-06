@@ -2,6 +2,8 @@
 
 package hostcoord
 
+import "context"
+
 // RemoveSessionLinks does nothing, as no session interface can outlive the daemon on this platform.
 func RemoveSessionLinks([]SlotRecord) error {
 	return nil
@@ -13,6 +15,6 @@ func VerifyNoSessionLinks([]SlotRecord) error {
 }
 
 // RefuseForeignLink finds nothing to refuse, for the same reason.
-func RefuseForeignLink(string) error {
+func RefuseForeignLink(context.Context, string) error {
 	return nil
 }

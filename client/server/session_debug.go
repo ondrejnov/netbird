@@ -18,12 +18,14 @@ type bundleScope struct {
 	labels map[*session]string
 	// omitHostWide leaves out what describes the whole host, see debug.GeneratorDependencies.
 	omitHostWide bool
+	// omitDaemonLog leaves out the log alone, see debug.GeneratorDependencies.
+	omitDaemonLog bool
 }
 
 // bundleScopeOf decides what a bundle about target holds for this caller. Without a selector it
 // covers each session the caller may read, and a selector asks for that session alone. A session
 // the caller may not read stays out, along with what also describes it (5.6). The log of the daemon
-// goes back further than what runs now, so any such session that ever was on record counts.
+// goes back further than any record, so only a privileged caller gets it.
 func (s *Server) bundleScopeOf(ctx context.Context, target *session, req *proto.DebugBundleRequest) bundleScope {
 	if !s.concurrentProfiles {
 		return bundleScope{}
@@ -33,7 +35,7 @@ func (s *Server) bundleScopeOf(ctx context.Context, target *session, req *proto.
 	focused := s.focusedSession()
 	all := s.allSessions()
 
-	scope := bundleScope{labels: sessionLabels(all)}
+	scope := bundleScope{labels: sessionLabels(all), omitDaemonLog: !caller.privileged()}
 	for _, ss := range all {
 		if ss == target {
 			continue

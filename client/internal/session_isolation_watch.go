@@ -33,6 +33,9 @@ type isolationWatch struct {
 	// lost says the isolation could not be put back. The sessions are on their way down, and what
 	// is left of the rules has to go before another session can start.
 	lost bool
+	// removals holds the interfaces of sessions that left and could not be taken out of the isolation.
+	// They count as members until that works: a restore brings them back, and their overlays stay taken.
+	removals map[string]struct{}
 }
 
 // SetIsolationCheckInterval changes how often the isolation is checked, from the next session that
@@ -44,24 +47,31 @@ func (d *DaemonHost) SetIsolationCheckInterval(interval time.Duration) {
 }
 
 // watchSessionLocked adds the session to those the check answers for, and returns where it hears
-// about a lost isolation. The first session starts the check. The caller holds attachMu.
+// about a lost isolation. The caller holds attachMu.
 func (d *DaemonHost) watchSessionLocked(h *SessionHost) <-chan error {
 	lost := make(chan error, 1)
 	d.watch.sessions[h] = lost
-
-	if d.watch.cancel == nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		d.watch.cancel = cancel
-		go d.runIsolationCheck(ctx, d.watch.interval)
-	}
+	d.syncIsolationCheckLocked()
 	return lost
 }
 
-// unwatchSessionLocked stops answering for the session, and the last one ends the check. The goroutine
-// is not waited for: it needs attachMu, which the caller holds.
+// unwatchSessionLocked stops answering for the session.
 func (d *DaemonHost) unwatchSessionLocked(h *SessionHost) {
 	delete(d.watch.sessions, h)
-	if len(d.watch.sessions) == 0 && d.watch.cancel != nil {
+	d.syncIsolationCheckLocked()
+}
+
+// syncIsolationCheckLocked keeps the check running as long as it has something to do: a session to
+// answer for, or a removal to repeat, which after a lost isolation falls to the next session. The
+// goroutine is not waited for: it needs attachMu, which the caller holds.
+func (d *DaemonHost) syncIsolationCheckLocked() {
+	needed := len(d.watch.sessions) > 0 || (len(d.watch.removals) > 0 && !d.watch.lost)
+	switch {
+	case needed && d.watch.cancel == nil:
+		ctx, cancel := context.WithCancel(context.Background())
+		d.watch.cancel = cancel
+		go d.runIsolationCheck(ctx, d.watch.interval)
+	case !needed && d.watch.cancel != nil:
 		d.watch.cancel()
 		d.watch.cancel = nil
 	}
@@ -81,14 +91,21 @@ func (d *DaemonHost) runIsolationCheck(ctx context.Context, interval time.Durati
 	}
 }
 
-// checkIsolation puts a changed isolation back. When that fails no session may keep running (I6). The
-// ones that run are told so, and leave through their usual way down.
+// checkIsolation repeats the removals that failed and puts a changed isolation back, in that order so
+// that a session that left does not come back with it. When that fails no session may keep running
+// (I6). The ones that run are told so, and leave through their usual way down.
 func (d *DaemonHost) checkIsolation(ctx context.Context) {
 	d.attachMu.Lock()
 	defer d.attachMu.Unlock()
 
 	// The last session can have left between the tick and the lock.
 	if ctx.Err() != nil || d.watch.lost {
+		return
+	}
+
+	d.repeatIsolationRemovalsLocked()
+	if len(d.watch.sessions) == 0 {
+		d.syncIsolationCheckLocked()
 		return
 	}
 
@@ -115,6 +132,19 @@ func (d *DaemonHost) checkIsolation(ctx context.Context) {
 	}
 }
 
+// repeatIsolationRemovalsLocked tries again to take out the sessions that left. One that still fails
+// stays for the next round: the sessions that run are isolated from it all the same.
+func (d *DaemonHost) repeatIsolationRemovalsLocked() {
+	for name := range d.watch.removals {
+		if err := d.isolation.Remove(name); err != nil {
+			log.Debugf("failed to remove session on %s from the isolation: %v", name, err)
+			continue
+		}
+		delete(d.watch.removals, name)
+		log.Infof("removed session on %s from the isolation after an earlier failure", name)
+	}
+}
+
 func (d *DaemonHost) restoreIsolationLocked() error {
 	if err := d.isolation.Restore(); err != nil {
 		return err
@@ -134,6 +164,7 @@ func (d *DaemonHost) recoverIsolationLocked() error {
 	if err := d.isolation.RemoveAll(); err != nil {
 		return fmt.Errorf("remove what is left of the lost isolation: %w", err)
 	}
+	clear(d.watch.removals)
 	d.watch.lost = false
 	return nil
 }
