@@ -211,7 +211,7 @@ func TestDebugBundle_DescribesTheRunWhileAnotherProfileIsSelected(t *testing.T) 
 	require.NoError(t, os.WriteFile(r.f.statePath(r.selectedKey), []byte(`{"marker_of_the_selection":{}}`), 0o600))
 	require.NoError(t, os.WriteFile(r.f.statePath(r.runKey)+".corrupted.1", []byte(`damaged`), 0o600))
 
-	path, managementURL, err := r.s.generateDebugBundle(&proto.DebugBundleRequest{}, nil)
+	path, managementURL, err := r.s.generateDebugBundle(r.s.focusedSession(), &proto.DebugBundleRequest{}, nil, bundleScope{})
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, os.Remove(path)) })
 
@@ -232,7 +232,7 @@ func TestDebugBundle_WithoutSwitchKeepsTheActiveState(t *testing.T) {
 	f.s.focusedSession().beginRun(f.active, config)
 	require.NoError(t, os.WriteFile(f.statePath(f.active), []byte(`{"marker_of_the_active":{}}`), 0o600))
 
-	path, managementURL, err := f.s.generateDebugBundle(&proto.DebugBundleRequest{}, nil)
+	path, managementURL, err := f.s.generateDebugBundle(f.s.focusedSession(), &proto.DebugBundleRequest{}, nil, bundleScope{})
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, os.Remove(path)) })
 

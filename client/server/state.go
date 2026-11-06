@@ -15,12 +15,13 @@ import (
 )
 
 // ListStates returns a list of all saved states
-func (s *Server) ListStates(_ context.Context, req *proto.ListStatesRequest) (*proto.ListStatesResponse, error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+func (s *Server) ListStates(ctx context.Context, req *proto.ListStatesRequest) (*proto.ListStatesResponse, error) {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
-	mgr := statemanager.New(s.profileManager.GetStatePath())
+	mgr := statemanager.New(s.statePathOf(ss))
 
 	stateNames, err := mgr.GetSavedStateNames()
 	if err != nil {
@@ -41,21 +42,23 @@ func (s *Server) ListStates(_ context.Context, req *proto.ListStatesRequest) (*p
 
 // CleanState handles cleaning of states (performing cleanup operations)
 func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (*proto.CleanStateResponse, error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
-	if s.focusedSession().clientConnectingOrConnected() {
-		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
-	}
-
-	release, err := s.claimHostAlone(ctx, s.focusedSession())
+	release, err := s.claimHostAlone(ctx, ss)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 
-	statePath := s.profileManager.GetStatePath()
+	// Under the claim: a run that started while waiting for it holds the state by now.
+	if ss.clientConnectingOrConnected() {
+		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
+	}
+
+	statePath := s.statePathOf(ss)
 
 	if req.All {
 		// Reuse existing cleanup logic for all states
@@ -94,18 +97,18 @@ func (s *Server) CleanState(ctx context.Context, req *proto.CleanStateRequest) (
 
 // DeleteState handles deletion of states without cleanup
 func (s *Server) DeleteState(ctx context.Context, req *proto.DeleteStateRequest) (*proto.DeleteStateResponse, error) {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+	ss, err := s.checkSessionSelector(ctx, req.GetSession())
+	if err != nil {
 		return nil, err
 	}
 
-	if s.focusedSession().clientConnectingOrConnected() {
+	if ss.clientConnectingOrConnected() {
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot clean state while connecting or connected, run 'netbird down' first.")
 	}
 
-	mgr := statemanager.New(s.profileManager.GetStatePath())
+	mgr := statemanager.New(s.statePathOf(ss))
 
 	var count int
-	var err error
 
 	if req.All {
 		count, err = mgr.DeleteAllStates()

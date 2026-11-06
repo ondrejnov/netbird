@@ -420,6 +420,51 @@ func (i *Isolation) teardown() error {
 	return err
 }
 
+// Restore installs the chains and sets again with all sessions, on top of whatever else the chains
+// of the host hold by now. It is for an isolation something else on the host removed or changed,
+// see Verify. Unlike the nftables one it takes several steps, and a session can get past the rules
+// until the last one, which it could before as well. Leftovers of failed updates go with the sets.
+func (i *Isolation) Restore() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	if len(i.members) == 0 {
+		return nil
+	}
+
+	if err := i.plane4.install(); err != nil {
+		return fmt.Errorf("restore isolation: %w", err)
+	}
+	for name, member := range i.members {
+		if err := i.plane4.addMember(name, member.overlay); err != nil {
+			return fmt.Errorf("restore isolation of %s: %w", name, err)
+		}
+		member.stale = netip.Prefix{}
+		i.members[name] = member
+	}
+	return i.restorePlane6()
+}
+
+func (i *Isolation) restorePlane6() error {
+	if i.plane6 == nil || !i.plane6.installed {
+		return nil
+	}
+	if err := i.plane6.install(); err != nil {
+		return fmt.Errorf("restore IPv6 isolation: %w", err)
+	}
+	for name, member := range i.members {
+		member.stale6 = netip.Prefix{}
+		i.members[name] = member
+		if member.no6 {
+			continue
+		}
+		if err := i.plane6.addMember(name, member.overlay6); err != nil {
+			return fmt.Errorf("restore IPv6 isolation of %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // Verify compares the kernel state with what the isolation should be and reports any
 // difference, including additions and rules moved above the chains. Sessions must not keep
 // running when it fails.

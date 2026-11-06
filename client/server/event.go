@@ -9,11 +9,11 @@ import (
 )
 
 func (s *Server) SubscribeEvents(req *proto.SubscribeRequest, stream proto.DaemonService_SubscribeEventsServer) error {
-	if err := s.checkSessionSelector(req.GetSession()); err != nil {
+	ss, err := s.checkSessionSelector(stream.Context(), req.GetSession())
+	if err != nil {
 		return err
 	}
 
-	ss := s.focusedSession()
 	subscription := ss.statusRecorder.SubscribeToEvents()
 	defer func() {
 		ss.statusRecorder.UnsubscribeFromEvents(subscription)
@@ -21,7 +21,7 @@ func (s *Server) SubscribeEvents(req *proto.SubscribeRequest, stream proto.Daemo
 	}()
 
 	log.Debug("client subscribed to events")
-	s.startUpdateManagerForGUI()
+	s.startUpdateManagerForGUI(ss)
 
 	// Replay the current log level to this subscriber so a freshly-connected UI
 	// learns it even when the daemon was already started with --log-level debug
@@ -35,9 +35,18 @@ func (s *Server) SubscribeEvents(req *proto.SubscribeRequest, stream proto.Daemo
 	for {
 		select {
 		case event := <-subscription.Events():
+			next, err := s.eventSessionAfter(stream.Context(), ss, req.GetSession())
+			if err != nil {
+				return err
+			}
 			if err := stream.Send(event); err != nil {
 				log.Warnf("error sending event to %v: %v", req, err)
 				return err
+			}
+			if next != ss {
+				ss.statusRecorder.UnsubscribeFromEvents(subscription)
+				ss = next
+				subscription = ss.statusRecorder.SubscribeToEvents()
 			}
 		case <-stream.Context().Done():
 			return nil

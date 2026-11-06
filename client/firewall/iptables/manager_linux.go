@@ -14,6 +14,7 @@ import (
 	"github.com/netbirdio/netbird/client/firewall/firewalld"
 	firewall "github.com/netbirdio/netbird/client/firewall/manager"
 	"github.com/netbirdio/netbird/client/iface/wgaddr"
+	"github.com/netbirdio/netbird/client/internal/routemanager/ipfwdstate"
 	"github.com/netbirdio/netbird/client/internal/statemanager"
 )
 
@@ -24,8 +25,12 @@ type Manager struct {
 	mutex sync.Mutex
 
 	wgIface iFaceMapper
+	// trustCtx aborts the firewalld call of Init, see SetTrustContext.
+	trustCtx context.Context
 	// slot selects the suffix of the chains and ipsets this manager owns.
 	slot uint
+	// sharedFwd says the IP forwarding state outlives the manager, see WithHostForwarding.
+	sharedFwd bool
 
 	ipv4Client *iptables.IPTables
 	family4    *family
@@ -49,15 +54,23 @@ func Create(wgIface iFaceMapper, mtu uint16, opts ...Option) (*Manager, error) {
 		return nil, fmt.Errorf("init iptables: %w", err)
 	}
 
+	cfg := newConfig(opts...)
 	m := &Manager{
 		wgIface:    wgIface,
-		slot:       newConfig(opts...).slot,
+		trustCtx:   context.Background(),
+		slot:       cfg.slot,
+		sharedFwd:  cfg.forwarding != nil,
 		ipv4Client: iptablesClient,
 	}
 
 	m.family4, err = newFamily(iptablesClient, wgIface, mtu, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create family: %w", err)
+	}
+
+	// Ahead of the IPv6 family, which follows the IPv4 one.
+	if cfg.forwarding != nil {
+		m.family4.ipFwdState = ipfwdstate.NewIPForwardingState(wgIface.Name(), ipfwdstate.WithHostState(cfg.forwarding))
 	}
 
 	if wgIface.Address().HasIPv6() {
@@ -67,6 +80,12 @@ func Create(wgIface iFaceMapper, mtu uint16, opts ...Option) (*Manager, error) {
 	}
 
 	return m, nil
+}
+
+// SetTrustContext sets what aborts the firewalld call of Init. A firewalld that does not
+// answer must not hold up the stop of the engine this manager belongs to.
+func (m *Manager) SetTrustContext(ctx context.Context) {
+	m.trustCtx = ctx
 }
 
 func (m *Manager) createIPv6Components(wgIface iFaceMapper, mtu uint16, opts ...Option) error {
@@ -114,7 +133,7 @@ func (m *Manager) Init(stateManager *statemanager.Manager) error {
 
 	// Trust after all fatal init steps so a later failure doesn't leave the
 	// interface in firewalld's trusted zone without a corresponding Close.
-	if err := firewalld.TrustInterface(m.wgIface.Name()); err != nil {
+	if err := firewalld.TrustInterface(m.trustCtx, m.wgIface.Name()); err != nil {
 		log.Warnf("failed to trust interface in firewalld: %v", err)
 	}
 
@@ -297,6 +316,12 @@ func (m *Manager) Close(stateManager *statemanager.Manager) error {
 
 	if err := m.family4.Reset(); err != nil {
 		merr = multierror.Append(merr, fmt.Errorf("reset family: %w", err))
+	}
+
+	if m.sharedFwd {
+		if err := m.family4.ipFwdState.Close(); err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("close shared forwarding: %w", err))
+		}
 	}
 
 	// Appending to merr intentionally blocks DeleteState below so ShutdownState

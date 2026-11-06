@@ -45,6 +45,7 @@ var exposeCmd = &cobra.Command{
 }
 
 func init() {
+	exposeCmd.Flags().StringVar(&sessionProfile, sessionProfileFlag, "", sessionProfileDesc)
 	exposeCmd.Flags().StringVar(&exposePin, "with-pin", "", "Protect the exposed service with a 6-digit PIN (e.g. --with-pin 123456)")
 	exposeCmd.Flags().StringVar(&exposePassword, "with-password", "", "Protect the exposed service with a password (e.g. --with-password my-secret)")
 	exposeCmd.Flags().StringSliceVar(&exposeUserGroups, "with-user-groups", nil, "Restrict access to specific user groups with SSO (e.g. --with-user-groups devops,Backend)")
@@ -187,7 +188,13 @@ func exposeFn(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	session, err := sessionFromFlag(ctx, client)
+	if err != nil {
+		return err
+	}
+
 	req := &proto.ExposeServiceRequest{
+		Session:    session,
 		Port:       uint32(port),
 		Protocol:   protocol,
 		Pin:        exposePin,

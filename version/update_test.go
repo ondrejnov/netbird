@@ -1,3 +1,5 @@
+//go:build !multiprofile
+
 package version
 
 import (

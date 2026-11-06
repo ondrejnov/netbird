@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
 
@@ -24,8 +26,7 @@ import (
 
 // gateFixture is a daemon with the feature gate on and three profiles. A run is a stand-in that
 // connects at once and ends with its context, so the tests see what the daemon decides about
-// its sessions without real engines. The host resources are not wired yet, which makes a run
-// next to another one possible only with wired, the way the next step will make it.
+// its sessions without real engines.
 type gateFixture struct {
 	s        *Server
 	ctx      context.Context
@@ -38,10 +39,6 @@ type gateFixture struct {
 }
 
 type gateOption func(*gateFixture)
-
-func wired() gateOption {
-	return func(f *gateFixture) { f.s.hostIsolationWired = true }
-}
 
 func newGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 	t.Helper()
@@ -63,6 +60,7 @@ func prepareGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)
+	s.localMetrics = s.newLocalMetrics(rootCtx)
 
 	f := &gateFixture{
 		s:        s,
@@ -74,6 +72,9 @@ func prepareGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 		failRuns: make(map[profilemanager.SessionKey]error),
 	}
 	s.flushRoutesFn = func() error { return nil }
+	// These tests run without a harness, next to whatever interfaces the host has.
+	s.removeLinksFn = func([]hostcoord.SlotRecord) error { return nil }
+	s.verifyLinksFn = func([]hostcoord.SlotRecord) error { return nil }
 	s.advancedRoutingFn = func() bool { return true }
 	s.connectFn = f.connect
 
@@ -221,7 +222,7 @@ func TestGetFeatures_ReportsTheGateAndTheLimit(t *testing.T) {
 // The scenario the gate exists for: an Up of another profile adds a session, and the session
 // that ran stays exactly as it was.
 func TestGate_UpStartsAnotherSessionAndLeavesTheOthers(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	firstClient := f.session(f.first).client()
 	_, firstGiveUp := f.session(f.first).runChans()
@@ -254,10 +255,9 @@ func TestGate_UpStartsAnotherSessionAndLeavesTheOthers(t *testing.T) {
 	assert.Equal(t, 1, f.runCount(f.first), "an Up of a running session joins its run")
 }
 
-// Until the host resources are wired, a session next to another would use the names of the
-// first one and run with no isolation. It has to be refused, with nothing done on its behalf.
-func TestGate_SecondSessionIsRefusedUntilTheHostIsWired(t *testing.T) {
-	f := newGateFixture(t)
+// A session the limit refuses has nothing done on its behalf.
+func TestGate_RefusedSessionLeavesEverythingAlone(t *testing.T) {
+	f := newGateFixture(t, func(f *gateFixture) { f.s.maxSessions = 1 })
 	require.NoError(t, f.up(f.first))
 	firstClient := f.session(f.first).client()
 
@@ -271,8 +271,7 @@ func TestGate_SecondSessionIsRefusedUntilTheHostIsWired(t *testing.T) {
 
 	err := f.up(f.second)
 
-	requireCode(t, codes.Unimplemented, err)
-	assert.Contains(t, gstatus.Convert(err).Message(), "isolation", "the message should say what is missing")
+	requireCode(t, codes.ResourceExhausted, err)
 	assert.Zero(t, f.runCount(f.second), "the second session must not run")
 	assert.NotContains(t, f.stored(t), f.second, "a refused session must not come back after a restart")
 	assert.Zero(t, flushes, "a refused session must not touch the host")
@@ -288,9 +287,26 @@ func TestGate_SecondSessionIsRefusedUntilTheHostIsWired(t *testing.T) {
 	assert.NoError(t, f.up(f.second), "with nothing running the session is the only one")
 }
 
+// Management can drive the updater, which acts on the whole machine, only through the focused session.
+func TestGate_OnlyTheFocusedSessionControlsUpdates(t *testing.T) {
+	f := newGateFixture(t)
+	require.NoError(t, f.up(f.first))
+	require.NoError(t, f.up(f.second))
+
+	assert.True(t, f.s.controlsUpdates(f.session(f.first)), "the focused session controls the updates")
+	assert.False(t, f.s.controlsUpdates(f.session(f.second)), "another session gets no update manager")
+
+	f.focus(t, f.second)
+	assert.True(t, f.s.controlsUpdates(f.session(f.second)), "the next run of the new focus controls them")
+	assert.False(t, f.s.controlsUpdates(f.session(f.first)))
+
+	f.s.sessionSet = newSessionSet(false)
+	assert.True(t, f.s.controlsUpdates(f.s.focusedSession()), "without the gate nothing changes")
+}
+
 func TestGate_SessionLimit(t *testing.T) {
 	t.Run("the limit refuses the next session", func(t *testing.T) {
-		f := newGateFixture(t, wired(), func(f *gateFixture) { f.s.maxSessions = 2 })
+		f := newGateFixture(t, func(f *gateFixture) { f.s.maxSessions = 2 })
 		require.NoError(t, f.up(f.first))
 		require.NoError(t, f.up(f.second))
 
@@ -309,7 +325,7 @@ func TestGate_SessionLimit(t *testing.T) {
 	})
 
 	t.Run("a limit of 0 means no limit", func(t *testing.T) {
-		f := newGateFixture(t, wired(), func(f *gateFixture) { f.s.maxSessions = 0 })
+		f := newGateFixture(t, func(f *gateFixture) { f.s.maxSessions = 0 })
 		require.NoError(t, f.up(f.first))
 		require.NoError(t, f.up(f.second))
 		require.NoError(t, f.up(f.third))
@@ -320,7 +336,7 @@ func TestGate_SessionLimit(t *testing.T) {
 // A session in teardown still has its interface and rules on the host. It has to count, or the
 // next session would come up on the same names.
 func TestGate_SessionInTeardownStillHoldsTheHost(t *testing.T) {
-	f := newGateFixture(t)
+	f := newGateFixture(t, func(f *gateFixture) { f.s.maxSessions = 1 })
 	require.NoError(t, f.up(f.first))
 
 	ss := f.session(f.first)
@@ -328,7 +344,7 @@ func TestGate_SessionInTeardownStillHoldsTheHost(t *testing.T) {
 	assert.True(t, ss.holdsHost())
 	ss.markClientDown()
 	assert.True(t, ss.holdsHost(), "the goroutine is alive, whatever the intent says")
-	requireCode(t, codes.Unimplemented, f.up(f.second))
+	requireCode(t, codes.ResourceExhausted, f.up(f.second))
 
 	close(giveUp)
 	assert.False(t, ss.holdsHost(), "with the goroutine gone nothing is left")
@@ -405,7 +421,7 @@ func TestGate_SwitchProfileHonoursTheKillSwitch(t *testing.T) {
 }
 
 func TestGate_DownTargetsTheFocusedSession(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 	second := f.session(f.second)
@@ -425,7 +441,7 @@ func TestGate_DownTargetsTheFocusedSession(t *testing.T) {
 }
 
 func TestGate_DownAllTakesEverySessionDown(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 
@@ -455,7 +471,7 @@ func TestDown_RefusesASelectorWithAll(t *testing.T) {
 
 // A service stop is no request to stay down: the sessions come back with the service.
 func TestGate_StopSessionsKeepsTheDesiredState(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 
@@ -468,7 +484,7 @@ func TestGate_StopSessionsKeepsTheDesiredState(t *testing.T) {
 }
 
 func TestGate_StatusListsTheSessions(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 	f.focus(t, f.third)
@@ -497,16 +513,30 @@ func TestGate_StatusListsTheSessions(t *testing.T) {
 	}
 }
 
-// Every RPC with a selector, called with one naming a session other than the focused one. A
-// handler that forgets the check would answer about the wrong session without saying so.
+// fakeServerStream carries the context of a caller into a streaming handler and takes what it sends.
+type fakeServerStream[T any] struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (f fakeServerStream[T]) Context() context.Context { return f.ctx }
+
+func (f fakeServerStream[T]) Send(*T) error { return nil }
+
+// Every RPC with a selector. A handler that forgets the check would answer about the wrong session
+// without saying so.
 func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelector) map[string]func() error {
 	return map[string]func() error{
 		"Status": func() error {
 			_, err := s.Status(ctx, &proto.StatusRequest{Session: selector})
 			return err
 		},
-		"SubscribeStatus": func() error { return s.SubscribeStatus(&proto.StatusRequest{Session: selector}, nil) },
-		"SubscribeEvents": func() error { return s.SubscribeEvents(&proto.SubscribeRequest{Session: selector}, nil) },
+		"SubscribeStatus": func() error {
+			return s.SubscribeStatus(&proto.StatusRequest{Session: selector}, fakeServerStream[proto.StatusResponse]{ctx: ctx})
+		},
+		"SubscribeEvents": func() error {
+			return s.SubscribeEvents(&proto.SubscribeRequest{Session: selector}, fakeServerStream[proto.SystemEvent]{ctx: ctx})
+		},
 		"Down": func() error {
 			_, err := s.Down(ctx, &proto.DownRequest{Session: selector})
 			return err
@@ -531,7 +561,9 @@ func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelecto
 			_, err := s.TracePacket(ctx, &proto.TracePacketRequest{Session: selector})
 			return err
 		},
-		"StartCapture": func() error { return s.StartCapture(&proto.StartCaptureRequest{Session: selector}, nil) },
+		"StartCapture": func() error {
+			return s.StartCapture(&proto.StartCaptureRequest{Session: selector}, fakeServerStream[proto.CapturePacket]{ctx: ctx})
+		},
 		"GetPeerSSHHostKey": func() error {
 			_, err := s.GetPeerSSHHostKey(ctx, &proto.GetPeerSSHHostKeyRequest{Session: selector})
 			return err
@@ -556,7 +588,9 @@ func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelecto
 			_, err := s.DismissSessionWarning(ctx, &proto.DismissSessionWarningRequest{Session: selector})
 			return err
 		},
-		"ExposeService": func() error { return s.ExposeService(&proto.ExposeServiceRequest{Session: selector}, nil) },
+		"ExposeService": func() error {
+			return s.ExposeService(&proto.ExposeServiceRequest{Session: selector}, fakeServerStream[proto.ExposeServiceEvent]{ctx: ctx})
+		},
 		"ListStates": func() error {
 			_, err := s.ListStates(ctx, &proto.ListStatesRequest{Session: selector})
 			return err
@@ -588,45 +622,39 @@ func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelecto
 	}
 }
 
-func TestSessionSelector_OtherThanFocusedIsRefused(t *testing.T) {
-	for name, gate := range map[string]bool{"with the gate": true, "without the gate": false} {
-		t.Run(name, func(t *testing.T) {
-			var s *Server
-			var ctx context.Context
-			var username string
-			if gate {
-				f := newGateFixture(t)
-				s, ctx, username = f.s, f.ctx, f.first.Username
-			} else {
-				f := newResidualFixture(t)
-				s, ctx, username = f.s, f.ctx, f.active.Username
-			}
+// Without the gate there is one session, and a selector can only name what it runs.
+func TestSessionSelector_OtherThanFocusedIsRefusedWithoutTheGate(t *testing.T) {
+	f := newResidualFixture(t)
 
-			selectors := map[string]*proto.SessionSelector{
-				"a profile that does not exist": {Profile: "no-such-profile", Username: username},
-				"an empty selector":             {},
-				"a profile that is not focused": {Profile: "default", Username: username},
-			}
-			for selectorName, selector := range selectors {
-				for rpc, call := range selectorRPCs(s, ctx, selector) {
-					requireCode(t, codes.FailedPrecondition, call())
-					assert.Contains(t, call().Error(), errSelectorNotFocused, "%s of %s: every failure gets one answer", rpc, selectorName)
-				}
-			}
-		})
+	selectors := map[string]*proto.SessionSelector{
+		"a profile that does not exist": {Profile: "no-such-profile", Username: f.active.Username},
+		"an empty selector":             {},
+		"a profile that is not focused": {Profile: "default", Username: f.active.Username},
+	}
+	for selectorName, selector := range selectors {
+		calls := selectorRPCs(f.s, f.ctx, selector)
+		require.Len(t, calls, selectorRPCCount)
+		for rpc, call := range calls {
+			err := call()
+			requireCode(t, codes.FailedPrecondition, err)
+			assert.Contains(t, err.Error(), errSelectorNotFocused, "%s of %s: every failure gets one answer", rpc, selectorName)
+		}
 	}
 }
 
-func TestSessionSelector_NamingTheFocusedSessionPasses(t *testing.T) {
-	f := newGateFixture(t)
-	selector := &proto.SessionSelector{Profile: string(f.first.Profile), Username: f.first.Username}
+// The gate must not change who may do what without it: nothing asks for the identity.
+func TestSessionSelector_WithoutTheGateIgnoresTheIdentity(t *testing.T) {
+	f := newResidualFixture(t)
+	selector := &proto.SessionSelector{Profile: string(f.active.Profile), Username: f.active.Username}
 
-	_, err := f.s.Status(f.ctx, &proto.StatusRequest{Session: selector})
-	assert.NoError(t, err)
-
-	f.focus(t, f.second)
-	_, err = f.s.Status(f.ctx, &proto.StatusRequest{Session: selector})
-	requireCode(t, codes.FailedPrecondition, err)
+	for name, ctx := range map[string]context.Context{"another user": userCtx(), "an unknown caller": context.Background()} {
+		for _, session := range []*proto.SessionSelector{nil, selector} {
+			_, err := f.s.Status(ctx, &proto.StatusRequest{Session: session})
+			assert.NoError(t, err, name)
+			_, err = f.s.ListStates(ctx, &proto.ListStatesRequest{Session: session})
+			assert.NoError(t, err, name)
+		}
+	}
 }
 
 func TestGate_UpIsRefusedInAnUnsupportedRuntime(t *testing.T) {
@@ -659,7 +687,7 @@ func TestGate_UpIsRefusedInAnUnsupportedRuntime(t *testing.T) {
 }
 
 func TestGate_LoginTouchesOnlyTheFocusedSession(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	firstClient := f.session(f.first).client()
 	f.s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) { return false, nil }
@@ -672,18 +700,12 @@ func TestGate_LoginTouchesOnlyTheFocusedSession(t *testing.T) {
 	assert.Same(t, firstClient, f.session(f.first).client(), "a login of another session must not end this one")
 	assert.Equal(t, internal.StatusConnected, f.session(f.first).state.CurrentStatus())
 	assert.Equal(t, 1, f.runCount(f.first))
-
-	// A login cannot reach a session other than the focused one yet.
-	name, username = string(f.third.Profile), f.third.Username
-	_, err = f.s.Login(f.ctx, &proto.LoginRequest{ProfileName: &name, Username: &username})
-	requireCode(t, codes.FailedPrecondition, err)
-	assert.Equal(t, f.second, f.s.focusedSession().key)
 }
 
-// The state of a profile records host names, the default ones until the host is wired. Cleaning
+// The state of a profile can record the names of another slot, from a run before the slots. Cleaning
 // it next to a running session could take the interface or the rules of that session.
 func TestGate_ResidualStaysWhileAnotherSessionRuns(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	f.s.isLoginRequiredFn = func(context.Context, *profilemanager.Config) (bool, error) { return false, nil }
 	statePath := f.s.profileManager.GetStatePathFor(f.second)
 	residual := func() bool {
@@ -706,13 +728,9 @@ func TestGate_ResidualStaysWhileAnotherSessionRuns(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, residual(), "a login next to a running session must leave the state")
 
-	require.NoError(t, f.up(f.second))
+	requireCode(t, codes.FailedPrecondition, f.up(f.second))
 	assert.True(t, residual(), "an Up next to a running session must leave the state")
 
-	_, err = f.s.CleanState(f.ctx, &proto.CleanStateRequest{All: true})
-	requireCode(t, codes.FailedPrecondition, err)
-	_, err = f.s.Down(f.ctx, &proto.DownRequest{})
-	require.NoError(t, err)
 	_, err = f.s.CleanState(f.ctx, &proto.CleanStateRequest{All: true})
 	requireCode(t, codes.FailedPrecondition, err)
 	assert.True(t, residual(), "a state cleanup next to a running session must be refused")
@@ -743,7 +761,7 @@ func TestGate_LogoutOfARunningSessionIsRefused(t *testing.T) {
 }
 
 func TestGate_RemoveProfile(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 
@@ -780,7 +798,7 @@ func TestGate_RemoveProfile(t *testing.T) {
 
 // One session failing is that session's business.
 func TestGate_ErrorOfASessionLeavesTheOthers(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	firstClient := f.session(f.first).client()
 
@@ -798,7 +816,7 @@ func TestGate_ErrorOfASessionLeavesTheOthers(t *testing.T) {
 }
 
 func TestGate_SleepCoversEverySession(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 	agent := &serverAgent{s: f.s}
@@ -831,7 +849,7 @@ func TestGate_SleepCoversEverySession(t *testing.T) {
 }
 
 func TestGate_MDMRestartCoversEverySession(t *testing.T) {
-	f := newGateFixture(t, wired())
+	f := newGateFixture(t)
 	require.NoError(t, f.up(f.first))
 	require.NoError(t, f.up(f.second))
 	f.focus(t, f.third)
@@ -847,8 +865,8 @@ func TestGate_MDMRestartCoversEverySession(t *testing.T) {
 
 // A run that gave up does not hold the host, so another session can be in its place by the time
 // a policy changes. Bringing the old run back would put the two side by side with no isolation.
-func TestGate_MDMRestartDoesNotReviveARunNextToAnother(t *testing.T) {
-	f := newGateFixture(t)
+func TestGate_MDMRestartDoesNotReviveARunPastTheLimit(t *testing.T) {
+	f := newGateFixture(t, func(f *gateFixture) { f.s.maxSessions = 1 })
 	require.NoError(t, f.up(f.first))
 	first := f.session(f.first)
 	first.cancelAct()
@@ -866,14 +884,14 @@ func TestGate_MDMRestartDoesNotReviveARunNextToAnother(t *testing.T) {
 
 	err := f.s.onMDMPolicyChange(nil, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "isolation", "the refusal should reach the caller")
+	assert.Contains(t, err.Error(), "limit", "the refusal should reach the caller")
 	assert.Equal(t, 1, f.runCount(f.first), "the run that gave up must stay ended")
 	assert.False(t, first.isClientRunning())
 }
 
 func TestGate_RestartBringsBackTheDesiredSessions(t *testing.T) {
 	t.Run("every session that was up", func(t *testing.T) {
-		f := prepareGateFixture(t, wired())
+		f := prepareGateFixture(t)
 		writeDesiredSessions(t, map[profilemanager.SessionKey]hostcoord.DesiredState{
 			f.first:  hostcoord.DesiredUp,
 			f.second: hostcoord.DesiredUp,
@@ -890,7 +908,7 @@ func TestGate_RestartBringsBackTheDesiredSessions(t *testing.T) {
 	})
 
 	t.Run("the focused session that was down stays down", func(t *testing.T) {
-		f := prepareGateFixture(t, wired())
+		f := prepareGateFixture(t)
 		writeDesiredSessions(t, map[profilemanager.SessionKey]hostcoord.DesiredState{
 			f.first:  hostcoord.DesiredDown,
 			f.second: hostcoord.DesiredUp,
@@ -912,8 +930,8 @@ func TestGate_RestartBringsBackTheDesiredSessions(t *testing.T) {
 		assert.Equal(t, hostcoord.DesiredUp, f.stored(t)[f.first])
 	})
 
-	t.Run("until the host is wired only the first one comes back", func(t *testing.T) {
-		f := prepareGateFixture(t)
+	t.Run("past the limit a session stays down and keeps wanting to come back", func(t *testing.T) {
+		f := prepareGateFixture(t, func(f *gateFixture) { f.s.maxSessions = 1 })
 		writeDesiredSessions(t, map[profilemanager.SessionKey]hostcoord.DesiredState{
 			f.first:  hostcoord.DesiredUp,
 			f.second: hostcoord.DesiredUp,
@@ -922,12 +940,12 @@ func TestGate_RestartBringsBackTheDesiredSessions(t *testing.T) {
 		require.NoError(t, f.s.Start())
 
 		require.Eventually(t, func() bool { return f.runCount(f.first) == 1 }, 5*time.Second, 10*time.Millisecond)
-		assert.Zero(t, f.runCount(f.second), "it would run with no isolation")
-		assert.Equal(t, hostcoord.DesiredUp, f.stored(t)[f.second], "it still wants to come back once it can")
+		assert.Zero(t, f.runCount(f.second))
+		assert.Equal(t, hostcoord.DesiredUp, f.stored(t)[f.second])
 	})
 
 	t.Run("a profile that is gone does not come back", func(t *testing.T) {
-		f := prepareGateFixture(t, wired())
+		f := prepareGateFixture(t)
 		gone := profilemanager.SessionKey{Profile: "gone-profile", Username: f.first.Username}
 		writeDesiredSessions(t, map[profilemanager.SessionKey]hostcoord.DesiredState{
 			f.first: hostcoord.DesiredUp,
@@ -1022,4 +1040,43 @@ func TestGate_StartRefusesACorruptSessionsFile(t *testing.T) {
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "not json", string(content), "a corrupt file stays for the operator")
+}
+
+// A Down gives up on the end of a run after 5 s, and the run can take much longer: stopping an engine
+// has its own timeouts. The next Up must not start a second run next to it, as the end of the first
+// takes the isolation of the session along.
+func TestGate_UpDoesNotOverlapARunStillStopping(t *testing.T) {
+	f := newGateFixture(t)
+
+	stopped := make(chan struct{})
+	release := sync.OnceFunc(func() { close(stopped) })
+	t.Cleanup(release)
+	var active, overlapped atomic.Int32
+	connect := f.s.connectFn
+	f.s.connectFn = func(ctx context.Context, ss *session, key profilemanager.SessionKey, config *profilemanager.Config, runningChan chan struct{}) error {
+		if active.Add(1) > 1 {
+			overlapped.Add(1)
+		}
+		defer active.Add(-1)
+		err := connect(ctx, ss, key, config, runningChan)
+		<-stopped
+		return err
+	}
+
+	require.NoError(t, f.up(f.first))
+	_, err := f.s.Down(f.ctx, &proto.DownRequest{})
+	require.NoError(t, err, "a Down gives up waiting for the run")
+
+	name, username := string(f.first.Profile), f.first.Username
+	ctx, cancel := context.WithTimeout(f.ctx, 200*time.Millisecond)
+	defer cancel()
+	_, err = f.s.Up(ctx, &proto.UpRequest{ProfileName: &name, Username: &username})
+	assert.Equal(t, codes.FailedPrecondition, gstatus.Code(err), "the Up should not start next to the stopping run: %v", err)
+	assert.Zero(t, overlapped.Load(), "two runs of one session must not overlap")
+	assert.Equal(t, 1, f.runCount(f.first), "the second run should not have started")
+
+	release()
+	require.NoError(t, f.up(f.first), "once the run has ended the Up goes through")
+	assert.Zero(t, overlapped.Load(), "two runs of one session must not overlap")
+	assert.Equal(t, 2, f.runCount(f.first), "the second run should start after the first ended")
 }
