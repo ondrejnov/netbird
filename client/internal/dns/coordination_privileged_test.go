@@ -756,10 +756,13 @@ func TestNetworkManager_ReleasedCatchAllTakenWithSameConfig(t *testing.T) {
 	assert.Equal(t, sessionKeyB, owner, "session B must own the catch-all")
 }
 
-// The container has neither resolved nor NetworkManager, so the real probe of the host
-// picks the file backend. A coordinator must change what that choice is wrapped in, and
-// no coordinator must leave the manager as it is today.
+// A system bus without resolved and NetworkManager and a resolv.conf no manager claims make
+// the real probe pick the file backend, also on a host that has them. A coordinator must
+// change what that choice is wrapped in, and no coordinator must leave the manager as it is
+// today.
 func TestInitialize_OnlyCoordinatorWrapsTheManager(t *testing.T) {
+	startPrivateBus(t)
+	useUnmanagedResolvConf(t)
 	owners := hostcoord.NewDNSOwners()
 
 	coordinated, err := dns.InitializedHostManagerType(dns.NewTestConfiguredServer(t, "wt0", owners.Session(sessionKeyA, nil, nil)))
@@ -769,6 +772,17 @@ func TestInitialize_OnlyCoordinatorWrapsTheManager(t *testing.T) {
 	plain, err := dns.InitializedHostManagerType(dns.NewTestConfiguredServer(t, "wt0", nil))
 	require.NoError(t, err)
 	assert.Equal(t, "*dns.fileConfigurator", plain, "without a coordinator the manager must be the plain backend")
+}
+
+// useUnmanagedResolvConf gives the test a resolv.conf without the header of a manager and puts
+// the original back at the end.
+func useUnmanagedResolvConf(t *testing.T) {
+	t.Helper()
+	const resolvConf = "/etc/resolv.conf"
+	original, err := os.ReadFile(resolvConf)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, os.WriteFile(resolvConf, original, 0o644)) })
+	require.NoError(t, os.WriteFile(resolvConf, []byte("nameserver 192.0.2.53\n"), 0o644))
 }
 
 // The file backend has one resolv.conf: it runs against the container's own file.

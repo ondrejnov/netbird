@@ -13,6 +13,7 @@ import (
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
+	"github.com/netbirdio/netbird/client/testutil/mgmtmeta"
 )
 
 // The daemon takes guardedConfigMu before s.mutex. authorizeAndPrepareLogin
@@ -331,7 +332,14 @@ func TestUp_WaitsForTheLifecycleWithoutServerMutex(t *testing.T) {
 }
 
 func TestLogout_WaitsForTheLifecycleWithoutServerMutex(t *testing.T) {
-	s, ctx, _, _, _ := setupServerWithProfile(t)
+	s, ctx, _, _, cfgPath := setupServerWithProfile(t)
+	// The deregistration goes to a Management of the test, not to a host that needs a network.
+	management := mgmtmeta.Start(t)
+	_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
+		ConfigPath:    cfgPath,
+		ManagementURL: management.URL(),
+	})
+	require.NoError(t, err)
 	requireWaitsOnLifecycle(t, s, func() error {
 		_, err := s.Logout(ctx, &proto.LogoutRequest{})
 		return err
