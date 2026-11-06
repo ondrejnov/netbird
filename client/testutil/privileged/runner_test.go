@@ -28,6 +28,18 @@ const (
 	containerTag   = "1.26.10-alpine"
 )
 
+// envDockerSuite runs an e2e suite instead: its test process stays in the container
+// and starts the containers of the suite next to it, through the Docker of the host.
+const envDockerSuite = "PRIV_E2E_DOCKER"
+
+const (
+	dockerSocket   = "/var/run/docker.sock"
+	dockerPackages = "docker-cli docker-cli-buildx"
+	// dockerWorkDir has the same path in the container and on the host, because the
+	// daemon resolves the bind mounts the suite asks for on the host.
+	dockerWorkDir = "/tmp/nb-e2e-work"
+)
+
 const (
 	containerWorkdir    = "/app"
 	containerGoCache    = "/root/.cache/go-build"
@@ -78,22 +90,32 @@ func TestRunPrivilegedSuiteInDocker(t *testing.T) {
 
 	// Keep the container alive so the suite runs via Exec, which yields a clean
 	// exit code (the v4 Resource API exposes no container wait/exit-code).
+	mounts := []string{
+		repoRoot + ":" + containerWorkdir,
+		goCache + ":" + containerGoCache,
+		goModCache + ":" + containerGoModCache,
+	}
+	env := []string{
+		"CGO_ENABLED=1",
+		"CI=true",
+		"DOCKER_CI=true",
+		"CONTAINER=true",
+		"GOCACHE=" + containerGoCache,
+		"GOMODCACHE=" + containerGoModCache,
+	}
+	if os.Getenv(envDockerSuite) != "" {
+		if err := os.MkdirAll(dockerWorkDir, 0o700); err != nil {
+			t.Fatalf("create the work dir of the suite: %v", err)
+		}
+		mounts = append(mounts, dockerSocket+":"+dockerSocket, dockerWorkDir+":"+dockerWorkDir)
+		env = append(env, "NB_E2E_WORK_DIR="+dockerWorkDir)
+	}
+
 	resource := pool.RunT(t, containerImage,
 		dockertest.WithTag(containerTag),
 		dockertest.WithWorkingDir(containerWorkdir),
-		dockertest.WithMounts([]string{
-			repoRoot + ":" + containerWorkdir,
-			goCache + ":" + containerGoCache,
-			goModCache + ":" + containerGoModCache,
-		}),
-		dockertest.WithEnv([]string{
-			"CGO_ENABLED=1",
-			"CI=true",
-			"DOCKER_CI=true",
-			"CONTAINER=true",
-			"GOCACHE=" + containerGoCache,
-			"GOMODCACHE=" + containerGoModCache,
-		}),
+		dockertest.WithMounts(mounts),
+		dockertest.WithEnv(env),
 		dockertest.WithCmd([]string{"sleep", "infinity"}),
 		dockertest.WithHostConfig(func(hc *container.HostConfig) {
 			hc.Privileged = true
@@ -189,8 +211,13 @@ func buildTestScript() string {
 		runFilter = "-run '" + r + "' "
 	}
 
+	packages, tags := alpinePackages, "devcert privileged"
+	if os.Getenv(envDockerSuite) != "" {
+		packages, tags = packages+" "+dockerPackages, tags+" e2e"
+	}
+
 	return fmt.Sprintf(
-		"apk update >/dev/null && apk add --no-cache %s >/dev/null && %s go test -buildvcs=false -tags 'devcert privileged' %s-v -timeout 20m -p 1",
-		alpinePackages, pkgs, runFilter,
+		"apk update >/dev/null && apk add --no-cache %s >/dev/null && %s go test -buildvcs=false -tags '%s' %s-v -timeout 20m -p 1",
+		packages, pkgs, tags, runFilter,
 	)
 }

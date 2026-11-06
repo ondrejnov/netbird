@@ -29,6 +29,32 @@ func validateJSONSocketFlags() error {
 	return nil
 }
 
+// checkConcurrentProfilesSockets refuses the gate on a socket whose callers carry no identity. The
+// sessions of the users are told apart by who asks, and on such a socket nobody can tell.
+func checkConcurrentProfilesSockets() error {
+	if !concurrentProfiles {
+		return nil
+	}
+	if err := refuseSocketWithoutIdentity(daemonAddr, "--daemon-addr", "unix:///var/run/netbird.sock"); err != nil {
+		return err
+	}
+	if !enableJSONSocket {
+		return nil
+	}
+	return refuseSocketWithoutIdentity(jsonSocket, "--json-socket", defaultJSONSocket)
+}
+
+func refuseSocketWithoutIdentity(addr, flag, suggested string) error {
+	network, _, err := parseListenAddress(addr)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", flag, err)
+	}
+	if network == "tcp" {
+		return fmt.Errorf("concurrent profiles need a unix socket to tell the callers apart, not %s: reinstall the service with %s %s", addr, flag, suggested)
+	}
+	return nil
+}
+
 // daemonServerOptions installs the transport credentials that expose each
 // caller's kernel-authenticated identity to the handlers, which is what lets
 // the daemon require root/administrator for privileged operations.
@@ -78,6 +104,9 @@ func (p *program) Start(svc service.Service) error {
 	network, _, err := parseListenAddress(daemonAddr)
 	if err != nil {
 		return fmt.Errorf("parse daemon address: %w", err)
+	}
+	if err := checkConcurrentProfilesSockets(); err != nil {
+		return err
 	}
 
 	// in any case, even if configuration does not exists we run daemon to serve CLI gRPC API.

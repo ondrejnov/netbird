@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"testing"
@@ -55,20 +56,20 @@ func TestNewSessionFirewallRefusesWhatWouldNotIsolate(t *testing.T) {
 	iface := sessionTestIface{name: "wt1"}
 
 	t.Run("no isolation", func(t *testing.T) {
-		_, err := NewSessionFirewall(iface, nil, nil, false, 1280, SessionConfig{Source: noOtherSessions{}})
+		_, err := NewSessionFirewall(context.Background(), iface, nil, nil, false, 1280, SessionConfig{Source: noOtherSessions{}})
 		assert.ErrorIs(t, err, ErrSessionNotIsolated)
 	})
 
 	t.Run("no isolation source", func(t *testing.T) {
 		isolation := isolationWithBackend(t, UNKNOWN)
-		_, err := NewSessionFirewall(iface, nil, nil, false, 1280, SessionConfig{Isolation: isolation})
+		_, err := NewSessionFirewall(context.Background(), iface, nil, nil, false, 1280, SessionConfig{Isolation: isolation})
 		assert.ErrorIs(t, err, ErrSessionNotIsolated)
 	})
 
 	for _, backend := range []FWType{NFTABLES, IPTABLES} {
 		t.Run("native backend without the session in the kernel isolation", func(t *testing.T) {
 			isolation := isolationWithBackend(t, backend)
-			_, err := NewSessionFirewall(iface, nil, nil, false, 1280, SessionConfig{Isolation: isolation, Source: noOtherSessions{}})
+			_, err := NewSessionFirewall(context.Background(), iface, nil, nil, false, 1280, SessionConfig{Isolation: isolation, Source: noOtherSessions{}})
 			assert.ErrorIs(t, err, ErrSessionNotIsolated, "a native backend makes the kernel isolation mandatory, also with a userspace bind")
 		})
 	}

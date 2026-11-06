@@ -38,6 +38,21 @@ list; both are optional and default to the full privileged suite.
    client packages.
 3. Streams the container's output to the test log and fails if the suite fails.
 
+## Running an e2e suite in the same container
+
+An e2e suite under `e2e/` drives Docker through its test process. `PRIV_E2E_DOCKER=1`
+runs that process in the privileged container too, with the `e2e` build tag, the Docker
+socket of the host and `docker-cli` with buildx:
+
+```bash
+PRIV_E2E_DOCKER=1 PRIV_PKGS="-count=1 -race -timeout=28m ./e2e/concurrentprofiles/" make test-privileged
+```
+
+The containers of the suite run next to it on the Docker of the host, each in its own
+network namespace. The socket gives the container control of that Docker, which is why
+the option is off unless asked for. Bind-mounted work dirs go to `/tmp/nb-e2e-work`,
+which has the same path on both sides.
+
 ## Adding a privileged test
 
 A test is privileged if it does any of:

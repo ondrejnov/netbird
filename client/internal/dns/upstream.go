@@ -40,7 +40,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -55,17 +54,6 @@ import (
 	"github.com/netbirdio/netbird/route"
 	"github.com/netbirdio/netbird/shared/management/domain"
 )
-
-// currentMTU is one value for the process, so sessions with different MTUs share the last one set.
-var currentMTU = func() *atomic.Uint32 {
-	mtu := &atomic.Uint32{}
-	mtu.Store(uint32(iface.DefaultMTU))
-	return mtu
-}()
-
-func tunnelMTU() uint16 {
-	return uint16(currentMTU.Load())
-}
 
 // nonRetryableEDECodes lists EDE info codes (RFC 8914) for which a SERVFAIL
 // from one upstream means another upstream would return the same answer:
@@ -92,10 +80,6 @@ var nonRetryableEDECodes = map[uint16]struct{}{
 type privateClientIface interface {
 	Name() string
 	Address() wgaddr.Address
-}
-
-func SetCurrentMTU(mtu uint16) {
-	currentMTU.Store(uint32(mtu))
 }
 
 const (
@@ -167,6 +151,8 @@ type upstreamResolverBase struct {
 	health   map[netip.AddrPort]*UpstreamHealth
 
 	statusRecorder *peer.Status
+	// mtu is the tunnel MTU of the session this resolver serves. Zero means iface.DefaultMTU.
+	mtu uint16
 	// selectedRoutes returns the current set of client routes the admin
 	// has enabled. Called lazily from the query hot path when an upstream
 	// might need a tunnel-bound client (iOS) and from health projection.
@@ -429,7 +415,7 @@ func (u *upstreamResolverBase) queryUpstream(parentCtx context.Context, r *dns.M
 	// controls whether we strip the OPT from the response.
 	hadEdns := r.IsEdns0() != nil
 	if !hadEdns {
-		r.SetEdns0(upstreamUDPSize(), false)
+		r.SetEdns0(upstreamUDPSize(u.tunnelMTU()), false)
 	}
 
 	startTime := time.Now()
@@ -526,11 +512,18 @@ func (u *upstreamResolverBase) UpstreamHealth() map[netip.AddrPort]UpstreamHealt
 
 // upstreamUDPSize returns the EDNS0 UDP buffer size we advertise to upstreams,
 // derived from the tunnel MTU and bounded against underflow.
-func upstreamUDPSize() uint16 {
-	if mtu := tunnelMTU(); mtu > ipUDPHeaderSize {
+func upstreamUDPSize(mtu uint16) uint16 {
+	if mtu > ipUDPHeaderSize {
 		return mtu - ipUDPHeaderSize
 	}
 	return dns.MinMsgSize
+}
+
+func (u *upstreamResolverBase) tunnelMTU() uint16 {
+	if u.mtu == 0 {
+		return iface.DefaultMTU
+	}
+	return u.mtu
 }
 
 func (u *upstreamResolverBase) handleUpstreamError(err error, upstream netip.AddrPort, startTime time.Time) *upstreamFailure {
@@ -652,7 +645,7 @@ func clientUDPMaxSize(r *dns.Msg) int {
 // ExchangeWithFallback exchanges a DNS message with the upstream server.
 // It first tries to use UDP, and if it is truncated, it falls back to TCP.
 // If the inbound request came over TCP (via context), it skips the UDP attempt.
-func ExchangeWithFallback(ctx context.Context, client *dns.Client, r *dns.Msg, upstream string) (*dns.Msg, time.Duration, error) {
+func ExchangeWithFallback(ctx context.Context, client *dns.Client, r *dns.Msg, upstream string, mtu uint16) (*dns.Msg, time.Duration, error) {
 	// If the request came in over TCP, go straight to TCP upstream.
 	if dnsProtocolFromContext(ctx) == protoTCP {
 		rm, t, err := toTCPClient(client).ExchangeContext(ctx, r, upstream)
@@ -669,7 +662,7 @@ func ExchangeWithFallback(ctx context.Context, client *dns.Client, r *dns.Msg, u
 	// response larger than our read buffer.
 	// Note: the query could be sent out on an interface that is not ours,
 	// but higher MTU settings could break truncation handling.
-	maxUDPPayload := tunnelMTU() - ipUDPHeaderSize
+	maxUDPPayload := upstreamUDPSize(mtu)
 	client.UDPSize = maxUDPPayload
 	if opt := r.IsEdns0(); opt != nil && opt.UDPSize() > maxUDPPayload {
 		opt.SetUDPSize(maxUDPPayload)
@@ -724,10 +717,10 @@ func toTCPClient(c *dns.Client) *dns.Client {
 
 // ExchangeWithNetstack performs a DNS exchange using netstack for dialing.
 // This is needed when netstack is enabled to reach peer IPs through the tunnel.
-func ExchangeWithNetstack(ctx context.Context, nsNet *wgbackend.NetstackNet, r *dns.Msg, upstream string) (*dns.Msg, error) {
+func ExchangeWithNetstack(ctx context.Context, nsNet *wgbackend.NetstackNet, r *dns.Msg, upstream string, mtu uint16) (*dns.Msg, error) {
 	// If request came in over TCP, go straight to TCP upstream
 	if dnsProtocolFromContext(ctx) == protoTCP {
-		rm, err := netstackExchange(ctx, nsNet, r, upstream, protoTCP)
+		rm, err := netstackExchange(ctx, nsNet, r, upstream, protoTCP, mtu)
 		if err != nil {
 			return nil, err
 		}
@@ -739,18 +732,18 @@ func ExchangeWithNetstack(ctx context.Context, nsNet *wgbackend.NetstackNet, r *
 
 	// Cap EDNS0 to our tunnel MTU so the upstream doesn't send a
 	// response larger than what we can read over UDP.
-	maxUDPPayload := tunnelMTU() - ipUDPHeaderSize
+	maxUDPPayload := upstreamUDPSize(mtu)
 	if opt := r.IsEdns0(); opt != nil && opt.UDPSize() > maxUDPPayload {
 		opt.SetUDPSize(maxUDPPayload)
 	}
 
-	reply, err := netstackExchange(ctx, nsNet, r, upstream, protoUDP)
+	reply, err := netstackExchange(ctx, nsNet, r, upstream, protoUDP, mtu)
 	if err != nil {
 		return nil, err
 	}
 
 	if reply != nil && reply.MsgHdr.Truncated {
-		rm, err := netstackExchange(ctx, nsNet, r, upstream, protoTCP)
+		rm, err := netstackExchange(ctx, nsNet, r, upstream, protoTCP, mtu)
 		if err != nil {
 			return nil, err
 		}
@@ -768,7 +761,7 @@ func ExchangeWithNetstack(ctx context.Context, nsNet *wgbackend.NetstackNet, r *
 	return reply, nil
 }
 
-func netstackExchange(ctx context.Context, nsNet *wgbackend.NetstackNet, r *dns.Msg, upstream, network string) (*dns.Msg, error) {
+func netstackExchange(ctx context.Context, nsNet *wgbackend.NetstackNet, r *dns.Msg, upstream, network string, mtu uint16) (*dns.Msg, error) {
 	conn, err := nsNet.DialContext(ctx, network, upstream)
 	if err != nil {
 		return nil, fmt.Errorf("with %s: %w", network, err)
@@ -785,7 +778,7 @@ func netstackExchange(ctx context.Context, nsNet *wgbackend.NetstackNet, r *dns.
 		}
 	}
 
-	dnsConn := &dns.Conn{Conn: conn, UDPSize: tunnelMTU() - ipUDPHeaderSize}
+	dnsConn := &dns.Conn{Conn: conn, UDPSize: upstreamUDPSize(mtu)}
 
 	if err := dnsConn.WriteMsg(r); err != nil {
 		return nil, fmt.Errorf("write %s message: %w", network, err)

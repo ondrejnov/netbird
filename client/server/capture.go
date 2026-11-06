@@ -298,15 +298,17 @@ func (s *Server) stopBundleCaptureLocked(ss *session) {
 		stats.Packets, stats.Bytes, stats.Dropped)
 }
 
-// bundleCapturePath returns the temp file path if a capture has been taken for ss, stops any
-// running capture, and returns "". Called from DebugBundle. Must hold s.mutex.
-func (s *Server) bundleCapturePath(ss *session) string {
-	if ss.bundleCapture == nil {
-		return ""
+// takeBundleCaptureLocked stops any running capture of ss and hands it to the caller, who owns its
+// file from then on: the bundle that takes it reads the file without s.mutex, so the file must not
+// go away under it. Nil when ss has no capture. Must hold s.mutex.
+func (s *Server) takeBundleCaptureLocked(ss *session) *bundleCapture {
+	bc := ss.bundleCapture
+	if bc == nil {
+		return nil
 	}
-
-	ss.bundleCapture.stop()
-	return ss.bundleCapture.path()
+	bc.stop()
+	ss.bundleCapture = nil
+	return bc
 }
 
 // cleanupBundleCapture removes the temp file of ss and clears its state. Must hold s.mutex.
