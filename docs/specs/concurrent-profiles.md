@@ -292,6 +292,22 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 
 ### 2.5 Poznatky z implementace F3
 
+**Rozhodnutí vlastníka 2026-11-06** (podle doporučení, `f3/owner-decisions`):
+
+- **Odmítnutý `up --profile X` vrací focus.** S gate se po neúspěšném `up` vrátí focus na session, která ho měla
+  před příkazem, a místní zrcadlo aktivního profilu na předchozí hodnotu. Úspěšný `up --profile X` focus na X přesouvá
+  dál. Řeší to CLI (`client/cmd/up_focus.go`), ne daemon: přepnutí a `Up` jsou dvě RPC a daemon nerozliší
+  `up --profile X` od `profile select X` a následného `up`, kde má focus zůstat. Atomicky v daemonu by to šlo jen
+  s novým polem v `UpRequest` (změna proto), nebo přesunem přepnutí do `Up`, který by změnil `Up` pro všechny volající.
+  CLI si před přepnutím přečte focus (`GetActiveProfile`). Po chybě ho vrátí, jen když je focus stále na X a session X
+  neběží: session, která po vypršení čekání dál navazuje spojení, focus drží, aby ji prosté `down` ukončilo. Kontrola
+  a přepnutí zpět jsou dvě RPC, takže přepnutí jiným klientem mezi nimi se může přepsat. Cizí focus, který CLI
+  nepřečte, se nevrací. Bez gate se nic nečte ani nevrací (I1). Test `TestCLI_RefusedUpGivesTheFocusBack` na
+  skutečném daemonu odmítne překryvem overlay třetí profil téže sítě a ověří focus i to, že prosté `down` ukončí
+  původní session. Bez opravy selže na `expected: "prace"`, `actual: "treti"`. Testy s falešným daemonem pokrývají
+  limit, session, která po chybě běží, a gate vypnutou i starý daemon. Mutace vynechání kontroly stavu a kontroly
+  gate je shodí.
+
 **PR 12, `f3/proto`:**
 
 - Proto podle 5.6, handlery se nemění. Nová pole existujících zpráv jsou od 1000, `SessionSelector` a `SessionStatus` jsou
@@ -597,7 +613,7 @@ Userspace WireGuard, nftables (iptables se liší jen ve stejném rozsahu jako v
 
 **Otázky k bráně v1:**
 
-- `up --profile X` při odmítnutí přesto přesune focus na X, protože přepnutí běží před `Up`. Prosté `netbird down` pak míří na odmítnutou session a `prace` běží dál mimo focus. Má odmítnutý `up` focus vracet? Souvisí s otázkou k PR 16, jestli se má focus při `up --profile` měnit vůbec.
+- `up --profile X` při odmítnutí přesto přesune focus na X, protože přepnutí běží před `Up`. Prosté `netbird down` pak míří na odmítnutou session a `prace` běží dál mimo focus. Má odmítnutý `up` focus vracet? Souvisí s otázkou k PR 16, jestli se má focus při `up --profile` měnit vůbec. **Rozhodnuto 2026-11-06:** vrací, úspěšný `up --profile X` focus přesouvá dál. Viz začátek 2.5.
 - Otevření `PRIV_E2E_DOCKER` dává privilegovanému kontejneru socket Dockeru hostitele, a tím root na hostiteli. Testovací proces ho používá jen na spuštění kontejnerů sady. Vyhovuje to, nebo má sada běžet v izolovaném stroji a na hostiteli nikdy?
 
 **Otázky k PR 17:**
@@ -611,7 +627,7 @@ Userspace WireGuard, nftables (iptables se liší jen ve stejném rozsahu jako v
 
 **Otázky k PR 16:**
 
-- `up --profile X` s gate přesouvá focus na X (zdědil to z dnešního přepnutí před `Up`). Má se focus měnit, nebo má `up --profile` session jen přidat?
+- `up --profile X` s gate přesouvá focus na X (zdědil to z dnešního přepnutí před `Up`). Má se focus měnit, nebo má `up --profile` session jen přidat? **Rozhodnuto 2026-11-06:** úspěšný přesouvá, odmítnutý vrací, viz začátek 2.5.
 - `login --profile X` (`switchProfileOnDaemon`) volá `Down`, když je po přepnutí Connected. S gate to míří na X, ne na ostatní, 5.7 ho nezmiňuje a nechal jsem ho beze změny.
 - `trace`, `capture` a `state` mají selektor v proto, ale 5.7 u nich `--profile` nezná. Nepřidal jsem ho.
 - `ssh-proxy` (ProxyCommand nativního klienta) selektor nepředává, jde vždy na focused. Patří sem, nebo do PR 17 s generovaným SSH configem?
@@ -909,7 +925,7 @@ novým bezpečnostním povrchem, proto ho schvaluje člověk. Výklad a poznatky
 
 | Příkaz | Chování při zapnuté gate |
 |---|---|
-| `netbird up --profile X` | Přidá session X, ostatních se nedotkne (`cmd/up.go:340` přeskočí `Down`) |
+| `netbird up --profile X` | Přidá session X a přesune na ni focus, ostatních se nedotkne (`cmd/up.go:340` přeskočí `Down`). Při odmítnutí vrátí focus předchozí session (2.5) |
 | `netbird down [--profile X \| --all]` | Bez parametru jen `focused` a vypíše, co dál běží |
 | `netbird status [--profile X]` | Souhrn všech session; JSON přidá `sessions`, stávající pole beze změny |
 | `netbird profile select X` | Změní `focused`, nevolá `Down` (`cmd/profile.go:296`) |

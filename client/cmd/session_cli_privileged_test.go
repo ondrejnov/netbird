@@ -280,3 +280,24 @@ func TestCLI_TwoSessionsOnARealDaemon(t *testing.T) {
 	require.NoError(t, res.err, res.out)
 	assert.Equal(t, "Idle", cliStatus(t, addr).DaemonStatus)
 }
+
+// A refused `up --profile` gives the focus back on a real daemon: the second profile of the same
+// network overlaps the first, and a plain down that follows ends the session that runs.
+func TestCLI_RefusedUpGivesTheFocusBack(t *testing.T) {
+	addr, workMgmt, _ := startGateDaemon(t)
+
+	res := runCLIAt(t, addr, "up", "--profile", "prace", "--management-url", "http://"+workMgmt, "--setup-key", cliSetupKey)
+	require.NoError(t, res.err, res.out)
+
+	res = runCLIAt(t, addr, "up", "--profile", "treti", "--management-url", "http://"+workMgmt, "--setup-key", cliSetupKey)
+	require.Error(t, res.err, res.out)
+	require.Contains(t, res.err.Error(), "overlaps", "the up is refused for the overlay")
+
+	st := cliStatus(t, addr)
+	assert.Equal(t, "prace", st.ProfileName, "the focus is back on the session that had it")
+	assert.Equal(t, "Connected", st.DaemonStatus)
+
+	res = runCLIAt(t, addr, "down")
+	require.NoError(t, res.err, res.out)
+	assert.Equal(t, "Idle", cliStatus(t, addr, "--profile", "prace").DaemonStatus, "a plain down ends the session that had the focus")
+}

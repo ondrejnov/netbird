@@ -15,6 +15,7 @@ import (
 	gstatus "google.golang.org/grpc/status"
 	gproto "google.golang.org/protobuf/proto"
 
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
@@ -98,6 +99,76 @@ func TestUp_UnreadableFeaturesTakeNothingDown(t *testing.T) {
 
 	require.Error(t, res.err)
 	requireNoCall(t, d, "Down", "Login", "Up")
+}
+
+// switchesOf are the profiles the command switched the daemon to, in order.
+func switchesOf(t *testing.T, d *fakeDaemon) []string {
+	t.Helper()
+	var ids []string
+	for _, req := range requestsOf[proto.SwitchProfileRequest](t, d, "SwitchProfile") {
+		ids = append(ids, req.GetProfileName())
+	}
+	return ids
+}
+
+// A refused up gives the focus back to the session that had it, so that a plain down still ends
+// that session and not the one that never came up.
+func TestUp_RefusedProfileWithTheGateGivesTheFocusBack(t *testing.T) {
+	for name, refusal := range map[string]error{
+		"overlay": gstatus.Error(codes.FailedPrecondition, "the overlay 100.64.0.0/16 overlaps the session of prace"),
+		"limit":   gstatus.Error(codes.ResourceExhausted, "the limit of 4 concurrent sessions is reached, bring a session down first"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newGateDaemon(t)
+			d.status[profileWork.Id] = "Connected"
+			d.failures = map[string]error{"Up": refusal}
+
+			res := runCLI(t, d, "up", "--profile", profileHome.Name)
+			require.Error(t, res.err, res.out)
+
+			require.Equal(t, []string{profileHome.Name, profileWork.Id}, switchesOf(t, d), "the focus goes back to the session that had it")
+			back := requestsOf[proto.SwitchProfileRequest](t, d, "SwitchProfile")[1]
+			assert.Equal(t, currentUsername(t), back.GetUsername(), "the focus goes back to the session of its user")
+			mirror, err := profilemanager.NewProfileManager().GetActiveProfile()
+			require.NoError(t, err)
+			assert.Equal(t, profilemanager.ID("default"), mirror.ID, "the local active profile is the one before the command")
+			requireNoCall(t, d, "Down")
+		})
+	}
+}
+
+// A session that runs after its up failed, such as one that is still connecting when the wait for
+// it ends, keeps the focus: a plain down is then to end it.
+func TestUp_FailedProfileThatRunsKeepsTheFocus(t *testing.T) {
+	d := newGateDaemon(t)
+	d.status[profileWork.Id] = "Connected"
+	d.status[profileHome.Id] = "Connecting"
+	d.failures = map[string]error{"Up": gstatus.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+
+	res := runCLI(t, d, "up", "--profile", profileHome.Name)
+	require.Error(t, res.err, res.out)
+
+	assert.Equal(t, []string{profileHome.Name}, switchesOf(t, d), "the focus stays on the session that runs")
+}
+
+// Without the gate the switch is the point of `up --profile`, and a failed up leaves it as today.
+func TestUp_FailedProfileWithoutTheGateKeepsTheSwitch(t *testing.T) {
+	for name, features := range map[string]*proto.GetFeaturesResponse{
+		"gate off":   {},
+		"old daemon": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := newGateDaemon(t)
+			d.features = features
+			d.failures = map[string]error{"Up": gstatus.Error(codes.FailedPrecondition, "up refused")}
+
+			res := runCLI(t, d, "up", "--profile", profileHome.Name)
+			require.Error(t, res.err, res.out)
+
+			assert.Equal(t, []string{profileHome.Name}, switchesOf(t, d), "the switch stays")
+			requireNoCall(t, d, "GetActiveProfile")
+		})
+	}
 }
 
 func TestDown_WithTheGateTakesDownTheFocusedAndNamesWhatRuns(t *testing.T) {
