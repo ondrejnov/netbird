@@ -869,6 +869,35 @@ předání bez staré routy, opakované přidání, stop session, odmítnutí ov
 `hostcoord` a čeká na běh ve VM. Linuxové privilegované testy `systemops` bez cgo nejdou přeložit (`pcap`), stejně
 na základním commitu.
 
+**W4 (2026-11-07, DNS):** s gate jde Windows přes `newCoordinatedHostManager` (`host_coordination_windows.go`).
+`nrptHostManager` obaluje `registryConfigurator` slotu. **Vlastník domény:** NRPT nemá přepad (WQ2), proto
+`DNSOwners` dostal claimy domén (`ClaimDomains`, `ReleaseDomains`, `DomainOwner`) se stejnou sémantikou jako
+catch-all: první claim vyhrává, nic se nepředává, další session doménu dostane při dalším claimu. Pravidlo domény
+i catch-all (`.` a `ExemptLocal`) zapisuje jen vlastník. Session, která doménu nedostala, ji vynechá, dostane
+jednou `dns_domain_held` (`SystemEvent` DNS se jmény domén) a `InConflict` ji hlásí, dokud o doménu žádá. Stejně
+catch-all: `dns_catch_all_held`, session bez něj vynechá i `RouteAll`, tedy i `NameServer` adapteru. `ServeDomains`
+a `dns_domain_shared` Windows nepoužívá, sdílená doména tu není možná. **Uvolnění až po zápisu:** claim se vzdá
+až po úspěšném použití configu bez něj. Apply s gate je striktní, selhání smazání předchozích pravidel ho shodí
+místo logu, protože jinak by se doména uvolnila, i když její pravidlo zůstalo. Neúspěšný apply nic neuvolní,
+`hostClaimPending` pak vynutí další pokus. Stop session (`restoreHostDNS`) uvolní vše i při chybě, jinak by doména
+zůstala blokovaná navždy. Opakování odmítnutého claimu jde stávající cestou `retryClaim` při každé aktualizaci
+síťové mapy. **Klíče:** `nrptKeyPrefix(slot)`, slot 0 `NetBird-` beze změny, slot N `NetBirdS<N>-` (2.6).
+Úklid jde podle prefixu slotu a prázdný prefix se odmítne, protože by smazal i cizí pravidla. `ShutdownState`
+nese `Slot` (`omitempty`, stav slotu 0 je bajtově stejný jako dřív), úklid po pádu přes state soubory v
+`restoreResidualAtStart` tak smaže jen klíče svého slotu. Klíče jsou volatilní, restart je smaže vždy. Původní
+nameservery vynechají adaptery ostatních session (jméno → LUID → GUID), stejně jako `hostInterfaceSet` na Linuxu.
+Slot do DNS serveru jde přes `DefaultServerConfig.Slot` z `EngineConfig.WgSlot`. Debug bundle označí jako
+NetBird i klíče `NetBirdS`. **Testy:** `coordination_windows_test.go` se skutečným `DNSOwners`, pravidla buď
+zaznamenaná (jeden vlastník domény, catch-all, neúspěšný apply drží claim), nebo zapsaná do místního úložiště NRPT
+se jmény TEST-NET (`.test`): sloty 0 a 71 mají vlastní klíče, stop jednoho nechá klíče druhého, úklid po pádu
+podle `ShutdownState` jen svůj slot. Mutace prefix vždy slotu 0, bez vynechání domén, uvolnění všeho po apply a
+uvolnění při chybě testy shodí. Při psaní testy našly chybu: uvolnění po apply rušilo i odmítnutí cizí domény,
+konflikt tak ze stavu zmizel. Stávající testy Windows DNS (slot 0) procházejí beze změny. **Limity:** GPO úložiště
+NRPT se slotem netestováno. `removeEmptyGPOPolicyStore` při stopu jedné session může smazat prázdné úložiště, do
+kterého druhá session s `gpo=true` zapisuje, ta ho při dalším zápisu vytvoří znovu. S `NB_DNS_STATE_FILE`
+sdílí profily jeden state soubor, po pádu se tak uklidí jen slot posledního zápisu, ostatní klíče zmizí s
+restartem. Search list je per adapter, sdílenou search doménu proto Windows zkusí přes obě session.
+
 **Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
 I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
 abecedně první klíč, bez přepadu na druhé pravidlo. WQ4: nižší metrika, při shodě dřív přidaná routa. WQ5: adapter
@@ -1313,7 +1342,7 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 | W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu podle WQ5. **Hotovo v `win/hostcoord`:** zámek, GUID a `RefuseForeignLink` pro Windows. Úklid po pádu podle W0 odpadá | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
 | W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne. **Hotovo v `win/hostcoord`** |
 | W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu. **Hotovo v `win/hostcoord` (W3a, W3b)** |
-| W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník |
+| W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník. **Hotovo v `win/hostcoord`, navíc vlastník každé domény** |
 | W5 | Gate povolí Windows, testy gate a CLI, ruční akceptační scénář ve VM | Akceptační scénář z 1 projde na Windows ve VM |
 
 ### Po v1 (vyžaduje nové rozhodnutí)
