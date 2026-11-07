@@ -981,6 +981,9 @@ daemonu s gate dál vidí jen `focused` podle 5.7.
   session je jen v okně, v tray přes focus a Disconnect.
 - Okno: dropdown profilů ukazuje stav, interface a konflikt a má tlačítko Odpojit u běžící session. V Settings →
   Profiles je stav jako odznak a smazání ani deregistrace běžící session nejde, daemon by je odmítl.
+- Ukončení UI bez „Keep connected on quit" posílá s gate `Down{all}`, ne prosté `Down`, které by odpojilo jen
+  `focused`. Daemon `all` u neprivilegovaného volajícího omezí na jeho session a sdílenou `default` (5.6), cizí
+  session běží dál. Když `GetFeatures` selže, odpojí se jen `focused` jako bez gate.
 - Advanced: název interface s gate nejde upravit. Pole ukazuje skutečný interface session ze slotu, config totiž
   nese u každého profilu `wt0` (5.1). Profil s jiným uloženým názvem (`conflict=interface`) dostane nápovědu a
   uložení ho vrátí na `wt0`.

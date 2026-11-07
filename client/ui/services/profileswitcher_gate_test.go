@@ -96,3 +96,27 @@ func TestConnection_DownSessionNamesTheProfile(t *testing.T) {
 		"an empty profile would aim at the focused session")
 	assert.Len(t, daemon.down, 1, "the refused request must not reach the daemon")
 }
+
+// Quitting the UI disconnects; with concurrent profiles a plain Down would end the focused session
+// only and leave the others running with no UI left to show them.
+func TestDisconnectOnQuit(t *testing.T) {
+	quit := func(t *testing.T, gate bool) *proto.DownRequest {
+		t.Helper()
+		daemon := &switchDaemon{gate: gate}
+		conn := stubConn{client: daemon}
+		require.NoError(t, DisconnectOnQuit(context.Background(), NewProfiles(conn), NewConnection(conn, nil, nil)))
+		require.Len(t, daemon.down, 1, "quitting should send one Down")
+		return daemon.down[0]
+	}
+
+	t.Run("with the gate every session the caller reaches", func(t *testing.T) {
+		req := quit(t, true)
+		assert.True(t, req.GetAll(), "the Down should ask for all sessions")
+		assert.Nil(t, req.GetSession(), "all and a selector together are refused by the daemon")
+	})
+
+	t.Run("without the gate the one connection", func(t *testing.T) {
+		req := quit(t, false)
+		assert.False(t, req.GetAll(), "a daemon without the gate has one connection and no all")
+	})
+}
