@@ -784,6 +784,28 @@ linuxový, akceptační scénář na Windows se ověřuje ručně ve VM a výsle
   správně, když `vpnInterfaceName` nahradí množina interfaces všech session?
 - **WQ4:** Stejný prefix na dvou adapterech s různou metrikou: rozhoduje jen metrika, nebo i pořadí vložení?
 
+**Poznatky z W1 (`win/hostcoord`, 2026-11-07):**
+
+- **Zámek:** `store_lock_windows.go` drží `LockFileEx` (exkluzivní, bez čekání) na `sessions.lock`. Soubor se otevírá
+  s `FILE_FLAG_OPEN_REPARSE_POINT` a odmítne se, když je to reparse point nebo adresář, tedy obdoba `O_NOFOLLOW`.
+  Sdílené testy zámku běží i na Windows (`store_lock_test.go`), práva 0600 jen na unixu. Junction je na Windows
+  odmítnutá už otevřením adresáře, kontrolu reparse pointu u souborového symlinku tak pokrývá jen
+  `TestStoreLock_FollowsNoSymlink`, který bez oprávnění na symlink skončí jako skip (lokálně, v CI ne).
+  Mutace bez zámku shodí `TestStoreLock_SecondInstanceIsRefused`.
+- **GUID:** `device.SlotGUID(slot)`, slot 0 vrací dnešní `getGUID()` beze změny. Slot jde z `SessionHost.attach`
+  přes `EngineConfig.WgSlot` a `WGIFaceOpts.Slot` do `NewSlotTunDevice`, nikdy ze jména interfacu: ruční `WgIface:
+  wt1` bez gate tak GUID nemění (I1). Hodnota slotu 1 je v testu pevná a spočtená mimo Go (Python `uuid5`).
+- **Úklid adapterů po pádu (`links_windows.go`) ve W1 není.** Wintun vytváří adapter v DLL, ze zdrojáků Go nejde
+  zjistit, zda adapter zanikne s procesem, ani co udělá `CreateAdapter` se stejným GUID nebo jménem cizího adapteru.
+  Doplněno jako **WQ5** pro W0. `links_other.go` zatím platí i pro Windows.
+- **Neověřeno:** `golangci-lint`, `make` a `gcc` na stanici nejsou, lint a `go test -race` neproběhly. Cross `go vet`
+  prošel pro windows, linux a darwin, `go build` pro android, js/wasm a windows/arm64. FreeBSD a iOS bez cgo nejdou
+  přeložit, stejně na `main`. Privilegované testy (`TestAttachGivesTheSessionItsSlot`) jsou jen linuxové a lokálně
+  neběžely.
+
+- **WQ5:** Zanikne wintun adapter, když daemon spadne? Co udělá `CreateAdapter` s GUID nebo jménem existujícího
+  adapteru? Podle odpovědi vznikne `links_windows.go`, nebo zůstane `links_other.go`.
+
 ## 3. Architektura: proč jeden daemon
 
 Komunita v #446 navrhuje N samostatných daemonů, protože to vyžaduje méně změn v RPC a
@@ -1218,8 +1240,8 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 
 | PR | Obsah | Hotovo, když |
 |---|---|---|
-| W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ4 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte |
-| W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu (`links_windows.go`) | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
+| W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ5 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte |
+| W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu podle WQ5. **Zámek a GUID hotové v `win/hostcoord`, úklid čeká na W0** | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
 | W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne |
 | W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu |
 | W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník |
