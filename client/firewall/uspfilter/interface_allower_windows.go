@@ -3,6 +3,7 @@ package uspfilter
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"syscall"
 
 	"github.com/hashicorp/go-multierror"
@@ -25,11 +26,37 @@ const (
 // firewall on Windows.
 type WindowsInterfaceAllower struct {
 	iface Iface
+	// ruleName names the IPv4 rule; the IPv6 rule has the suffix -v6.
+	ruleName string
+	// replaceStale makes Apply replace a rule of that name instead of keeping it. A rule of a
+	// session can be left by a crash with the address the slot had then.
+	replaceStale bool
 }
 
 // NewWindowsInterfaceAllower builds the Windows netsh-based interface allower.
 func NewWindowsInterfaceAllower(iface Iface) *WindowsInterfaceAllower {
-	return &WindowsInterfaceAllower{iface: iface}
+	return &WindowsInterfaceAllower{iface: iface, ruleName: firewallRuleName}
+}
+
+// NewWindowsInterfaceAllowerForSlot builds the allower of the session on slot. Slot 0 keeps the
+// rules of a client without sessions; any other slot owns rules with the suffix -N.
+func NewWindowsInterfaceAllowerForSlot(iface Iface, slot uint32) *WindowsInterfaceAllower {
+	if slot == 0 {
+		return NewWindowsInterfaceAllower(iface)
+	}
+	return &WindowsInterfaceAllower{
+		iface:        iface,
+		ruleName:     SlotFirewallRuleName(slot),
+		replaceStale: true,
+	}
+}
+
+// SlotFirewallRuleName returns the name of the IPv4 rule of slot.
+func SlotFirewallRuleName(slot uint32) string {
+	if slot == 0 {
+		return firewallRuleName
+	}
+	return firewallRuleName + "-" + strconv.FormatUint(uint64(slot), 10)
 }
 
 // Apply adds inbound-allow netsh rules for the interface's addresses.
@@ -38,33 +65,34 @@ func (a *WindowsInterfaceAllower) Apply() error {
 		return nil
 	}
 
-	if !isFirewallRuleActive(firewallRuleName) {
-		if err := manageFirewallRule(firewallRuleName,
-			addRule,
-			"dir=in",
-			"enable=yes",
-			"action=allow",
-			"profile=any",
-			"localip="+a.iface.Address().IP.String(),
-		); err != nil {
+	if err := a.applyRule(a.ruleName, a.iface.Address().IP.String()); err != nil {
+		return err
+	}
+	if v6 := a.iface.Address().IPv6; v6.IsValid() {
+		if err := a.applyRule(a.ruleName+"-v6", v6.String()); err != nil {
 			return err
 		}
 	}
-
-	if v6 := a.iface.Address().IPv6; v6.IsValid() && !isFirewallRuleActive(firewallRuleName+"-v6") {
-		if err := manageFirewallRule(firewallRuleName+"-v6",
-			addRule,
-			"dir=in",
-			"enable=yes",
-			"action=allow",
-			"profile=any",
-			"localip="+v6.String(),
-		); err != nil {
-			return err
-		}
-	}
-
 	return nil
+}
+
+func (a *WindowsInterfaceAllower) applyRule(name, localIP string) error {
+	if isFirewallRuleActive(name) {
+		if !a.replaceStale {
+			return nil
+		}
+		if err := manageFirewallRule(name, deleteRule); err != nil {
+			return fmt.Errorf("remove stale windows firewall rule %s: %w", name, err)
+		}
+	}
+	return manageFirewallRule(name,
+		addRule,
+		"dir=in",
+		"enable=yes",
+		"action=allow",
+		"profile=any",
+		"localip="+localIP,
+	)
 }
 
 // Close removes the netsh rules added by Apply.
@@ -74,13 +102,13 @@ func (a *WindowsInterfaceAllower) Close() error {
 	}
 
 	var merr *multierror.Error
-	if isFirewallRuleActive(firewallRuleName) {
-		if err := manageFirewallRule(firewallRuleName, deleteRule); err != nil {
+	if isFirewallRuleActive(a.ruleName) {
+		if err := manageFirewallRule(a.ruleName, deleteRule); err != nil {
 			merr = multierror.Append(merr, fmt.Errorf("remove windows firewall rule: %w", err))
 		}
 	}
-	if isFirewallRuleActive(firewallRuleName + "-v6") {
-		if err := manageFirewallRule(firewallRuleName+"-v6", deleteRule); err != nil {
+	if isFirewallRuleActive(a.ruleName + "-v6") {
+		if err := manageFirewallRule(a.ruleName+"-v6", deleteRule); err != nil {
 			merr = multierror.Append(merr, fmt.Errorf("remove windows v6 firewall rule: %w", err))
 		}
 	}
