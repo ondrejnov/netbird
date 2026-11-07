@@ -952,6 +952,43 @@ abecedně první klíč, bez přepadu na druhé pravidlo. WQ4: nižší metrika,
 po pádu sám zanikne, kolize GUID selže, kolize jména přejmenuje existující adapter. WQ3 zbývá ve VM. Otevřená
 otázka pro vlastníka k W2 je ve zprávě.
 
+### 2.7 Desktop UI (rozhodnutí vlastníka 2026-11-07)
+
+Rozšíření za v1 podle 8 „Po v1", mění W1 a omezení UI v 5.7. Bez gate se UI chová jako dnes (I1), starší UI proti
+daemonu s gate dál vidí jen `focused` podle 5.7.
+
+| # | Otázka | Rozhodnutí |
+|---|---|---|
+| U1 | Stav ostatních session | **Push z daemonu.** `SubscribeStatus` s gate sleduje recorder každé session, na kterou volající dosáhne, a pošle snapshot při změně kterékoli. Proto se nemění, `StatusResponse.sessions` už existuje |
+| U2 | Model UI | **Podle focusu.** Hlavní okno, Peers, Networks a Exit nodes ukazují `focused`, RPC bez selektoru na něj míří už dnes. Výběr profilu jen přesune focus a session bez spojení připojí, nic neodpojí. Odpojit jde každá běžící session zvlášť |
+| U3 | Platformy | **Linux a Windows**, všude, kde daemon gate povolí. macOS gate nehlásí, jeho UI se nemění |
+| U4 | Větev | `ui/concurrent-profiles` z `win/hostcoord` |
+
+**Implementace (`ui/concurrent-profiles`):**
+
+- Daemon: `client/server/status_stream_sessions.go`. `sessionSetNotifier` budí streamy při vzniku a odebrání
+  session (`sessionOfLocked`, `RemoveProfile`), `sessionWatch` slučuje změny recorderů do jednoho kanálu. Stream
+  bez selektoru dál následuje focus. Session, na kterou volající nedosáhne, stream nesleduje, snapshot ji i tak
+  vynechá.
+- Gate zjišťuje UI z `GetFeatures.concurrent_profiles_enabled`, ne z neprázdného `sessions`: cizí `focused` se
+  v `sessions` volajícímu neukáže a UI by pak poslalo prosté `Down` na session jiného uživatele.
+- `ProfileSwitcher` s gate (`switchFocus`): `SwitchProfile`, a jen když cílová session neběží, `Up`. Nikdy `Down`.
+  Když `Up` selže (limit, konflikt), vrátí focus předchozí session jako `up --profile` v CLI (2.5).
+  `Connection.DownSession` posílá `Down` se selektorem a prázdný profil odmítne, protože by mířil na `focused`.
+- Stav profilu bere UI ze `Status.sessions`, chybějící záznam je `Idle`. `Profile.connection_status` daemon
+  neplní, CLI `profile list` bere stav stejně.
+- Tray: řádek profilu nese stav session a konflikt, mění se podle otisku `sessions`. Odpojení jiné než `focused`
+  session je jen v okně, v tray přes focus a Disconnect.
+- Okno: dropdown profilů ukazuje stav, interface a konflikt a má tlačítko Odpojit u běžící session. V Settings →
+  Profiles je stav jako odznak a smazání ani deregistrace běžící session nejde, daemon by je odmítl.
+
+**Ověřeno:** `TestGate_StatusStreamHearsEverySession` (session před i po přihlášení streamu, bez opravy selže),
+`TestProfileSwitcher_Gate*` a `TestConnection_DownSessionNamesTheProfile` (bez větve `switchFocus` selžou),
+golangci-lint na dotčených balíčcích pro Windows i Linux, `tsc`, eslint, kontrola překladů. **Neověřeno:**
+`go test -race` (na stanici chybí cgo), skutečné UI ve VM na Linuxu a Windows, test přepínače UI mimo harness
+(PR 16) platí dál. `TestCleanState_NilConnectClient` a `TestDeleteState_NilConnectClient` padají na Windows i na
+základním `win/hostcoord`.
+
 ## 3. Architektura: proč jeden daemon
 
 Komunita v #446 navrhuje N samostatných daemonů, protože to vyžaduje méně změn v RPC a
@@ -1232,7 +1269,7 @@ novým bezpečnostním povrchem, proto ho schvaluje člověk. Výklad a poznatky
 | `netbird profile remove`, `logout` | Pro běžící session vrátí chybu, dokud ji uživatel neodpojí |
 | `networks`, `debug`, `ssh`, `expose` | Přidají `--profile`, výchozí je `focused` |
 
-**Desktop UI (známé omezení v1):** UI zůstává beze změny a vidí jen `focused`. Přepínač profilů
+**Desktop UI (známé omezení v1, pro nové UI nahrazuje 2.7):** UI zůstává beze změny a vidí jen `focused`. Přepínač profilů
 v UI (`client/ui/services/profileswitcher.go`) přepne a zavolá `Down`, který při zapnuté gate cílí
 na nový `focused`. **Původní session tak poběží dál a v UI nebude vidět**, ukáže ji jen
 `netbird status`. Chování pokryj testem a uveď v dokumentaci.
@@ -1396,7 +1433,8 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 ### Po v1 (vyžaduje nové rozhodnutí)
 
 - **Zrušení limitu:** podle kritéria v 5.8.
-- **Desktop UI:** tray a stránky pro více session, stav indexovaný podle `profile_id`, fronta SSO dialogů.
+- **Desktop UI:** rozhodnuto 2026-11-07 podle focusu, viz 2.7. Zbývá: stránky pro jinou než `focused` session,
+  stav indexovaný podle `profile_id`, fronta SSO dialogů.
   Go: `client/ui/tray*.go`, `client/ui/services/{daemon_feed,profileswitcher,connection}.go`.
   Frontend: `contexts/{Profile,Status,Networks}Context.tsx`, `lib/connection.ts`.
 - **macOS:** názvy `utun`, scutil se slotem, `flushScopedDefaults`, `boundIface` refcount, split `/1`.

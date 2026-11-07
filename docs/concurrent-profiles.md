@@ -128,8 +128,13 @@ Změnou domény se změní FQDN všech peerů té sítě.
 
 ### Desktop UI
 
-UI se nemění a vidí jen `focused`. Přepínač profilů v UI přepne a zavolá `Down`, který s gate míří na nový `focused`.
-**Původní session proto běží dál a v UI není vidět**, ukáže ji jen `netbird status`.
+UI ze sestavení forku od větve `ui/concurrent-profiles` gate pozná. Výběr profilu jen přesune focus a profil bez
+spojení připojí, ostatní session běží dál. Dropdown profilů a tray ukazují stav každé session a konflikt, dropdown
+umí odpojit každou běžící session zvlášť. Hlavní okno a stránky Peers a Networks ukazují `focused`. Podrobnosti
+jsou v sekci 2.7 specifikace.
+
+Starší UI gate nezná a vidí jen `focused`. Přepínač profilů přepne a zavolá `Down`, který s gate míří na nový
+`focused`. **Původní session proto běží dál a v UI není vidět**, ukáže ji jen `netbird status`.
 
 ### SSH config dalších session
 
