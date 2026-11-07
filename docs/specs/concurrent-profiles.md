@@ -28,7 +28,7 @@ netbird down --profile doma     # routy, firewall i DNS profilu "prace" zůstano
 ### Mimo rozsah v1
 
 - NetBird Cloud: fork se používá jen se self-hosted Managementem (D7).
-- macOS, Windows, FreeBSD: musí se dál kompilovat a chovat jako dnes (kromě auto-updatu, viz 2.1), funkci hlásí jako nedostupnou.
+- macOS, Windows, FreeBSD: musí se dál kompilovat a chovat jako dnes (kromě auto-updatu, viz 2.1), funkci hlásí jako nedostupnou. Windows doplňuje fáze W (2.6) ve větvi `win/hostcoord`.
 - Desktop UI: beze změny, omezení popisuje 5.7.
 - Android a iOS (jeden TUN od hostitelského OS), WASM. `client/embed` zůstává beze změny.
 - Foreground režim (`netbird up --foreground-mode`) zůstává jednoprofilový.
@@ -894,10 +894,57 @@ podle `ShutdownState` jen svůj slot. Mutace prefix vždy slotu 0, bez vynechán
 uvolnění při chybě testy shodí. Při psaní testy našly chybu: uvolnění po apply rušilo i odmítnutí cizí domény,
 konflikt tak ze stavu zmizel. Stávající testy Windows DNS (slot 0) procházejí beze změny. **Limity:** GPO úložiště
 NRPT se slotem netestováno. `removeEmptyGPOPolicyStore` při stopu jedné session může smazat prázdné úložiště, do
-kterého druhá session s `gpo=true` zapisuje, ta ho při dalším zápisu vytvoří znovu. S `NB_DNS_STATE_FILE`
-sdílí profily jeden state soubor, po pádu se tak uklidí jen slot posledního zápisu, ostatní klíče zmizí s
-restartem. Session bez domény ji vynechá i ze search listu svého adapteru, krátké jméno se tak doplní jen
+kterého druhá session s `gpo=true` zapisuje, ta ho při dalším zápisu vytvoří znovu. `NB_DNS_STATE_FILE`, se kterým by
+profily sdílely jeden state soubor, gate odmítá (W5). Session bez domény ji vynechá i ze search listu svého adapteru, krátké jméno se tak doplní jen
 přípony vlastníka.
+
+**W5 (2026-11-07, gate a vlastník session):** `checkConcurrentProfilesPlatform` povolí `linux` a `windows`
+(`concurrentProfilesOSes`), hláška zmiňuje obě platformy, nápověda `--enable-concurrent-profiles` také. Testy gate
+na Windows dřív skončily skipem, teď běží celý balíček `client/server` (260 testů prošlo, skip jen
+`TestGate_StartIsRefusedOnUnsupportedOS`). Na Windows platí stávající `refuseUnsupportedRuntime`: netstack,
+legacy routing (`NB_USE_LEGACY_ROUTING`, R2) i `NB_DNS_STATE_FILE` gate odmítne. **Vlastník session na Windows (rozhodnutí vlastníka 2026-11-07, podle SID):**
+`holdsAccount` uměl jen UID, Windows volající tak bez elevace dosáhl jen na `default`. Nově
+`holdsWindowsAccount`: jméno, na které se přeloží SID volajícího z named pipe (`LookupAccountSid`, tvar
+`DOMÉNA\jméno`), se bez ohledu na velikost písmen shoduje se jménem v požadavku. Jméno se na SID nepřekládá,
+holé jméno by se hledalo podle pořadí domén. Adresář profilů je sanitizované `DOMÉNAjméno`, proto
+`aloneInWindowsDirectory`: jméno musí mít tvar `DOMÉNA\jméno`, žádný jiný místní účet (`NetUserEnum`, každé jméno
+přeložené v rámci počítače) nesmí mít stejný sanitizovaný adresář. Doménové účty vyjmenovat nejde, doménový účet
+proto dosáhne na adresář jen se jménem, které kromě zpětného lomítka nic neztratí. Každá chyba vyhledání odepře
+(I6). Elevovaný volající dosáhne na vše jako dřív, `default` je sdílený jako dřív. Bez gate se nic nemění (I1).
+Testy: `session_access_winaccounts_test.go` (multiplatformní, falešná databáze účtů: vlastní účet, cizí místní i
+doménový účet, jméno bez domény, neznámý SID, kolize adresáře, nečitelné účty, doménové jméno se ztrátou znaků,
+místní jméno se ztrátou znaků, `default`) a `session_access_lookup_windows_test.go` proti skutečné databázi
+(jméno ze SID je to, co posílá CLI, výpis místních účtů). Mutace bez porovnání jména, bez kontroly kolize, bez
+kontroly ztráty znaků a s ignorovanou chybou výpisu testy shodí. První verze testu mutaci bez porovnání jména
+nezachytila, cizí místní účet odmítala jen kolize adresářů, doplněn cizí doménový účet. **Limit:** kolizi přes
+hranici domény (`A\Bc` a `AB\c` dávají `ABc`) s doménovým účtem nejde vyloučit, protože domény nejdou
+vyjmenovat. Testy CLI (`client/cmd`) bez cgo nejdou přeložit (sqlite přes testovací Management), stejně na
+základním commitu, gate v CLI je proto na Windows ověřený jen v `client/server` a ručně.
+
+### Akceptační scénář (Windows, CLI, ve VM)
+
+Ruční build podle W3, ve VM s Windows 11, `wintun.dll` vedle binárky. Nikdy na pracovní stanici.
+
+```powershell
+cd client; go build -tags multiprofile -o netbird.exe .      # wintun.dll do stejného adresáře
+# elevovaný terminál
+.\netbird.exe service install --enable-concurrent-profiles; .\netbird.exe service start
+# neelevovaný terminál běžného uživatele
+.\netbird.exe profile add prace; .\netbird.exe profile add doma
+.\netbird.exe up --profile prace --management-url https://mgmt-a.example
+.\netbird.exe up --profile doma  --management-url https://mgmt-b.example
+.\netbird.exe status                                # obě session Connected, wt0 a wt1, každá se svou IP
+ping <peer-v-praci>; ping <peer-doma>               # projde přes wt0, resp. wt1
+Get-NetAdapter wt*                                  # wt0 a wt1, GUID podle 2.6
+Get-DnsClientNrptPolicy | ft Namespace,NameServers  # NetBird-* a NetBirdS1-*, sdílená doména jen jednou
+netsh advfirewall firewall show rule name=all | sls Netbird   # Netbird a Netbird-1
+.\netbird.exe down --profile doma                   # routy, pravidlo Netbird a NRPT profilu prace beze změny
+```
+
+Navíc: uživatel B bez elevace na session uživatele A nedosáhne (`PermissionDenied`). Shodná doména v obou sítích
+dá `dns_domain_held` druhé session. `Stop-Process -Force` na službě, start: žádný `NetBirdS*` klíč, `wt1` ani
+`Netbird-1` po úklidu nezůstane a session se vrátí podle `desired`. Exit node v jedné síti a konkrétní routa v
+druhé, předání exit nodu a WQ3 (spike `w0spike` bez `-workstation`). Výsledek se zapíše sem.
 
 **Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
 I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
@@ -1344,7 +1391,7 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 | W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne. **Hotovo v `win/hostcoord`** |
 | W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu. **Hotovo v `win/hostcoord` (W3a, W3b)** |
 | W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník. **Hotovo v `win/hostcoord`, navíc vlastník každé domény** |
-| W5 | Gate povolí Windows, testy gate a CLI, ruční akceptační scénář ve VM | Akceptační scénář z 1 projde na Windows ve VM |
+| W5 | Gate povolí Windows, testy gate a CLI, ruční akceptační scénář ve VM | Akceptační scénář z 1 projde na Windows ve VM. **Kód hotový v `win/hostcoord` včetně vlastníka podle SID. Zbývá akceptační scénář ve VM** |
 
 ### Po v1 (vyžaduje nové rozhodnutí)
 
