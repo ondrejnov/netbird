@@ -28,7 +28,8 @@ import (
 // defaultMaxSessions is the limit of sessions running at once, see WithMaxSessions.
 const defaultMaxSessions uint32 = 4
 
-const concurrentProfilesOS = "linux"
+// concurrentProfilesOSes are the platforms whose host resources know about sessions.
+var concurrentProfilesOSes = []string{"linux", "windows"}
 
 const errSelectorNotFocused = "the session selector does not name the focused session"
 
@@ -131,8 +132,8 @@ func (s *Server) claimUpdates(ss *session) (*updater.Manager, func()) {
 // checkConcurrentProfilesPlatform refuses the gate on a platform whose host resources do not
 // know about sessions.
 func checkConcurrentProfilesPlatform(goos string) error {
-	if goos != concurrentProfilesOS {
-		return fmt.Errorf("concurrent profiles are supported only on Linux, not on %s: reinstall the service without --enable-concurrent-profiles", goos)
+	if !slices.Contains(concurrentProfilesOSes, goos) {
+		return fmt.Errorf("concurrent profiles are supported only on Linux and Windows, not on %s: reinstall the service without --enable-concurrent-profiles", goos)
 	}
 	return nil
 }

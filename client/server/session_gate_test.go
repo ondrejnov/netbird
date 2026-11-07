@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,10 +55,10 @@ func newGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 // prepareGateFixture stops short of the start, for a test that lays out the disk first.
 func prepareGateFixture(t *testing.T, opts ...gateOption) *gateFixture {
 	t.Helper()
-	if runtime.GOOS != concurrentProfilesOS {
-		// The gate refuses to start off Linux (5.5), so nothing below it can run there.
-		// TestGate_StartIsRefusedOffLinux checks the refusal on those platforms.
-		t.Skipf("concurrent profiles run only on %s", concurrentProfilesOS)
+	if !slices.Contains(concurrentProfilesOSes, runtime.GOOS) {
+		// The gate refuses to start elsewhere (5.5), so nothing below it can run there.
+		// TestGate_StartIsRefusedOnUnsupportedOS checks the refusal on those platforms.
+		t.Skipf("concurrent profiles run only on %v", concurrentProfilesOSes)
 	}
 	return prepareGateServer(t, opts...)
 }
@@ -203,28 +204,29 @@ func requireCode(t *testing.T, want codes.Code, err error) {
 
 func TestConcurrentProfilesPlatform(t *testing.T) {
 	assert.NoError(t, checkConcurrentProfilesPlatform("linux"))
+	assert.NoError(t, checkConcurrentProfilesPlatform("windows"))
 
-	for _, goos := range []string{"darwin", "windows", "freebsd"} {
+	for _, goos := range []string{"darwin", "freebsd", "android", "ios"} {
 		err := checkConcurrentProfilesPlatform(goos)
 		require.Error(t, err, "the gate must refuse %s", goos)
-		assert.Contains(t, err.Error(), "only on Linux", "the operator should be told why")
+		assert.Contains(t, err.Error(), "only on Linux and Windows", "the operator should be told why")
 		assert.Contains(t, err.Error(), goos)
 		assert.Contains(t, err.Error(), "--enable-concurrent-profiles", "the operator should be told what to change")
 	}
 }
 
-// Off Linux the service with the gate does not start, and the refusal leaves the disk and the host
+// Off Linux and Windows the service with the gate does not start, and the refusal leaves the disk and the host
 // as they were: no sessions file, no slots, no session.
-func TestGate_StartIsRefusedOffLinux(t *testing.T) {
-	if runtime.GOOS == concurrentProfilesOS {
-		t.Skip("on Linux the gate starts, which every other gate test covers")
+func TestGate_StartIsRefusedOnUnsupportedOS(t *testing.T) {
+	if slices.Contains(concurrentProfilesOSes, runtime.GOOS) {
+		t.Skip("here the gate starts, which every other gate test covers")
 	}
 	f := prepareGateServer(t)
 	dir := profilemanager.DefaultConfigPathDir
 
 	err := f.s.Start()
 	require.Error(t, err, "the gate must refuse %s", runtime.GOOS)
-	assert.Contains(t, err.Error(), "only on Linux", "the operator should be told why")
+	assert.Contains(t, err.Error(), "only on Linux and Windows", "the operator should be told why")
 	assert.Contains(t, err.Error(), "--enable-concurrent-profiles", "the operator should be told what to change")
 
 	_, statErr := os.Stat(filepath.Join(dir, "sessions.json"))
