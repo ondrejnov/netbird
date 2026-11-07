@@ -508,7 +508,7 @@ func (t *Tray) handleQuit() {
 	if t.svc.Preferences == nil || !t.svc.Preferences.Get().KeepConnectedOnQuit {
 		ctx, cancel := context.WithTimeout(context.Background(), quitDownTimeout)
 		defer cancel()
-		if err := t.svc.Connection.Down(ctx); err != nil {
+		if err := services.DisconnectOnQuit(ctx, t.svc.Profiles, t.svc.Connection); err != nil {
 			log.Errorf("disconnect on quit: %v", err)
 		}
 	}

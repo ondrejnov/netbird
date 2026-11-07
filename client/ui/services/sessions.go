@@ -136,6 +136,31 @@ func (s *Connection) DownSession(ctx context.Context, p SessionParams) error {
 	return nil
 }
 
+// DisconnectOnQuit ends what quitting the UI ends. Without the gate that is the one connection.
+// With it the UI shows every session, so it brings all of them down; the daemon limits that to the
+// sessions the caller may reach and leaves those of other users running.
+func DisconnectOnQuit(ctx context.Context, profiles *Profiles, conn *Connection) error {
+	gate, err := profiles.ConcurrentProfiles(ctx)
+	if err != nil {
+		log.Warnf("read the concurrent profiles gate, disconnecting the focused session only: %v", err)
+	}
+	if !gate.Enabled {
+		return conn.Down(ctx)
+	}
+	return conn.downAll(ctx)
+}
+
+func (s *Connection) downAll(ctx context.Context) error {
+	cli, err := s.conn.Client()
+	if err != nil {
+		return err
+	}
+	if _, err := cli.Down(ctx, &proto.DownRequest{All: true}); err != nil {
+		return s.classifyDaemonError(err)
+	}
+	return nil
+}
+
 // switchFocus is the switch on a daemon with concurrent profiles. SwitchProfile then moves only
 // the focus and every session keeps running, so nothing is brought down. With connect the session
 // of p is brought up unless it runs already, and when that fails the focus goes back to where it
