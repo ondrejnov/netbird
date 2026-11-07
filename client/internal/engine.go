@@ -2329,6 +2329,7 @@ func (e *Engine) newDnsServer() (dns.Server, error) {
 			StateManager:   e.stateManager,
 			DisableSys:     e.config.DisableDNS,
 			HostDNS:        e.config.Session.hostDNS(),
+			Slot:           uint32(e.config.WgSlot),
 		})
 		if err != nil {
 			return nil, err

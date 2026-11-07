@@ -194,3 +194,57 @@ func TestDNSOwners_SharedDomainWarnsBothSessionsOnce(t *testing.T) {
 	owners.ForgetSession(dnsSessionB)
 	assert.False(t, owners.InConflict(dnsSessionA), "a stopped session shares nothing")
 }
+
+func TestDNSOwners_DomainsHaveOneOwner(t *testing.T) {
+	owners := NewDNSOwners()
+
+	assert.Empty(t, owners.ClaimDomains(dnsSessionA, []string{"a.test", "shared.test"}), "free domains go to the first claimer")
+	held := owners.ClaimDomains(dnsSessionB, []string{"shared.test", "b.test", "shared.test"})
+	assert.Equal(t, []string{"shared.test"}, held, "a domain another session owns is reported once")
+	owner, ok := owners.DomainOwner("shared.test")
+	require.True(t, ok, "the shared domain must have an owner")
+	assert.Equal(t, dnsSessionA, owner, "the first claim must stick")
+	assert.Empty(t, owners.ClaimDomains(dnsSessionA, []string{"shared.test"}), "the owner may claim again")
+
+	assert.True(t, owners.InConflict(dnsSessionB), "a refused domain is a conflict")
+	assert.False(t, owners.InConflict(dnsSessionA), "the owner is in no conflict")
+
+	// The owner applied a configuration without the domain, so it gives it up.
+	owners.ReleaseDomains(dnsSessionA, []string{"a.test"})
+	_, ok = owners.DomainOwner("shared.test")
+	assert.False(t, ok, "a released domain goes to nobody until it is claimed")
+	owner, ok = owners.DomainOwner("a.test")
+	assert.True(t, ok && owner == dnsSessionA, "a kept domain stays with its owner")
+	assert.True(t, owners.InConflict(dnsSessionB), "the refused session has not claimed the free domain yet")
+
+	assert.Empty(t, owners.ClaimDomains(dnsSessionB, []string{"shared.test", "b.test"}))
+	assert.False(t, owners.InConflict(dnsSessionB), "the claim went through")
+
+	// A session that stopped asking for a domain is in no conflict over it.
+	require.Equal(t, []string{"a.test"}, owners.ClaimDomains(dnsSessionB, []string{"a.test"}))
+	owners.ReleaseDomains(dnsSessionB, []string{"shared.test", "b.test"})
+	assert.False(t, owners.InConflict(dnsSessionB), "a session that stopped asking is in no conflict")
+	owner, _ = owners.DomainOwner("a.test")
+	assert.Equal(t, dnsSessionA, owner, "a release by another session must not free the domain")
+
+	require.Equal(t, []string{"a.test"}, owners.ClaimDomains(dnsSessionB, []string{"a.test"}))
+	owners.ForgetSession(dnsSessionB)
+	assert.False(t, owners.InConflict(dnsSessionB), "a stopped session is in no conflict")
+	owner, ok = owners.DomainOwner("shared.test")
+	assert.True(t, ok && owner == dnsSessionB, "forgetting a session must not free what it holds")
+
+	owners.ReleaseDomains(dnsSessionA, nil)
+	owners.ReleaseDomains(dnsSessionB, nil)
+	assert.Empty(t, owners.domains, "domains nobody holds or asks for are dropped")
+}
+
+func TestDNSSession_ForwardsDomainClaims(t *testing.T) {
+	owners := NewDNSOwners()
+	sessionA := owners.Session(dnsSessionA, nil, nil)
+	sessionB := owners.Session(dnsSessionB, nil, nil)
+
+	assert.Empty(t, sessionA.ClaimDomains([]string{"shared.test"}))
+	assert.Equal(t, []string{"shared.test"}, sessionB.ClaimDomains([]string{"shared.test"}))
+	sessionA.ReleaseDomains(nil)
+	assert.Empty(t, sessionB.ClaimDomains([]string{"shared.test"}), "the domain must be free after the owner's release")
+}

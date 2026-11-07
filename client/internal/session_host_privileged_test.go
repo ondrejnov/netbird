@@ -178,15 +178,18 @@ func TestDNSWarningsAreEventsOfTheirSession(t *testing.T) {
 	coordinator.WarnHostDNS(dns.HostDNSWarning{Kind: dns.HostDNSHeld})
 	coordinator.WarnHostDNS(dns.HostDNSWarning{Kind: dns.HostDNSCatchAllHeld})
 	coordinator.WarnHostDNS(dns.HostDNSWarning{Kind: dns.HostDNSDomainShared, Domains: []string{"netbird.selfhosted"}})
+	coordinator.WarnHostDNS(dns.HostDNSWarning{Kind: dns.HostDNSDomainHeld, Domains: []string{"a.test", "b.test"}})
 
 	events := recorder.GetEventHistory()
-	require.Len(t, events, 3)
+	require.Len(t, events, 4)
 	for _, event := range events {
 		assert.Equal(t, "home", event.GetProfileId())
 		assert.Equal(t, cProto.SystemEvent_DNS, event.GetCategory())
 		assert.Equal(t, cProto.SystemEvent_WARNING, event.GetSeverity())
 	}
 	assert.Equal(t, "netbird.selfhosted", events[2].GetMetadata()[cProto.MetadataDomainsKey])
+	assert.Equal(t, "a.test, b.test", events[3].GetMetadata()[cProto.MetadataDomainsKey])
+	assert.Equal(t, string(dns.HostDNSDomainHeld), events[3].GetMetadata()[cProto.MetadataKindKey])
 }
 
 // The handover a failed attempt left waiting runs when an interface is back.

@@ -63,11 +63,17 @@ type DNSOwners struct {
 	catchAll dnsClaim
 	hostDNS  dnsClaim
 	served   map[SessionKey]*sessionDomains
+	// domains holds the domain claims of backends where one rule per domain serves the
+	// whole host.
+	domains map[string]*dnsClaim
 }
 
 // NewDNSOwners returns a DNSOwners with nothing claimed.
 func NewDNSOwners() *DNSOwners {
-	return &DNSOwners{served: make(map[SessionKey]*sessionDomains)}
+	return &DNSOwners{
+		served:  make(map[SessionKey]*sessionDomains),
+		domains: make(map[string]*dnsClaim),
+	}
 }
 
 // ClaimCatchAll makes key the owner of the catch-all DNS route on backends with
@@ -112,6 +118,68 @@ func (o *DNSOwners) HostDNSOwner() (SessionKey, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.hostDNS.owner, o.hostDNS.held
+}
+
+// ClaimDomains makes key the owner of every domain in domains no other session owns, on
+// backends where one rule per domain serves the whole host. It returns the domains another
+// session owns, sorted. A claim stays until ReleaseDomains leaves it out.
+func (o *DNSOwners) ClaimDomains(key SessionKey, domains []string) []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	var held []string
+	for _, domain := range domains {
+		claim := o.domains[domain]
+		if claim == nil {
+			claim = &dnsClaim{}
+			o.domains[domain] = claim
+		}
+		if err := claim.claim(key); err != nil {
+			held = append(held, domain)
+		}
+	}
+	slices.Sort(held)
+	return slices.Compact(held)
+}
+
+// ReleaseDomains frees every domain key owns or asked for, except those in keep.
+func (o *DNSOwners) ReleaseDomains(key SessionKey, keep []string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	for domain, claim := range o.domains {
+		if slices.Contains(keep, domain) {
+			continue
+		}
+		claim.release(key)
+		o.dropIdleDomainLocked(domain, claim)
+	}
+}
+
+// DomainOwner returns the owner of a domain, if there is one.
+func (o *DNSOwners) DomainOwner(domain string) (SessionKey, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	claim := o.domains[domain]
+	if claim == nil {
+		return SessionKey{}, false
+	}
+	return claim.owner, claim.held
+}
+
+func (o *DNSOwners) dropIdleDomainLocked(domain string, claim *dnsClaim) {
+	if !claim.held && len(claim.refused) == 0 {
+		delete(o.domains, domain)
+	}
+}
+
+func (o *DNSOwners) domainRefusedLocked(key SessionKey) bool {
+	for _, claim := range o.domains {
+		if claim.refusedTo(key) {
+			return true
+		}
+	}
+	return false
 }
 
 // ServeDomains records the domains key serves on its link and warns every session that shares one
@@ -184,7 +252,8 @@ func (o *DNSOwners) sharedDomainsLocked(key SessionKey) []string {
 func (o *DNSOwners) InConflict(key SessionKey) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.catchAll.refusedTo(key) || o.hostDNS.refusedTo(key) || len(o.sharedDomainsLocked(key)) > 0
+	return o.catchAll.refusedTo(key) || o.hostDNS.refusedTo(key) || o.domainRefusedLocked(key) ||
+		len(o.sharedDomainsLocked(key)) > 0
 }
 
 // ForgetSession drops what a stopped session asked for. A claim it still holds stays: only the
@@ -195,6 +264,10 @@ func (o *DNSOwners) ForgetSession(key SessionKey) {
 	delete(o.catchAll.refused, key)
 	delete(o.hostDNS.refused, key)
 	delete(o.served, key)
+	for domain, claim := range o.domains {
+		delete(claim.refused, key)
+		o.dropIdleDomainLocked(domain, claim)
+	}
 }
 
 // Session returns the view of o for one session, to be passed as
@@ -241,6 +314,16 @@ func (s *DNSSession) ClaimHostDNS() error {
 // ReleaseHostDNS releases the host DNS if this session owns it.
 func (s *DNSSession) ReleaseHostDNS() {
 	s.owners.ReleaseHostDNS(s.key)
+}
+
+// ClaimDomains claims the domains for this session and returns those another session owns.
+func (s *DNSSession) ClaimDomains(domains []string) []string {
+	return s.owners.ClaimDomains(s.key, domains)
+}
+
+// ReleaseDomains frees the domains of this session that are not in keep.
+func (s *DNSSession) ReleaseDomains(keep []string) {
+	s.owners.ReleaseDomains(s.key, keep)
 }
 
 // ServeDomains records the domains this session serves on its link.

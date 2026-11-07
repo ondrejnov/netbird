@@ -5,13 +5,10 @@ package dns
 import (
 	"fmt"
 	"net/netip"
-	"slices"
-	"strings"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/netbirdio/netbird/client/internal/statemanager"
-	nbdns "github.com/netbirdio/netbird/dns"
 )
 
 // hostInterfaceSet holds interface names to leave out when capturing the original
@@ -151,40 +148,6 @@ func (m *perLinkHostManager) restoreHostDNS() error {
 	m.coordinator.ServeDomains(nil)
 	m.holds = false
 	return err
-}
-
-// linkDomains returns the domains the link answers for, in one spelling. The root domain is the
-// catch-all, which has its own claim.
-func linkDomains(config HostDNSConfig) []string {
-	var domains []string
-	for _, d := range config.Domains {
-		if d.Disabled || isRootDomain(d) {
-			continue
-		}
-		name := strings.ToLower(strings.TrimSuffix(d.Domain, "."))
-		if !slices.Contains(domains, name) {
-			domains = append(domains, name)
-		}
-	}
-	return domains
-}
-
-func requestsCatchAll(config HostDNSConfig) bool {
-	return config.RouteAll || slices.ContainsFunc(config.Domains, func(d DomainConfig) bool {
-		return !d.Disabled && isRootDomain(d)
-	})
-}
-
-// withoutCatchAll also drops a root domain, which on a per-link backend routes all
-// names the same way RouteAll does. It clones because the caller's config shares the slice.
-func withoutCatchAll(config HostDNSConfig) HostDNSConfig {
-	config.RouteAll = false
-	config.Domains = slices.DeleteFunc(slices.Clone(config.Domains), isRootDomain)
-	return config
-}
-
-func isRootDomain(d DomainConfig) bool {
-	return d.Domain == nbdns.RootZone
 }
 
 // exclusiveHostManager shares a backend that holds one configuration for the whole

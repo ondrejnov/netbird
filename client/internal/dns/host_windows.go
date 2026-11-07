@@ -42,10 +42,17 @@ const (
 	// code as long as its key starts here.
 	NRPTKeyPrefix = "NetBird-"
 
+	// NRPTSlotKeyPrefix starts the rule keys of a session on slot N > 0, followed by N and a
+	// dash. It must not start with NRPTKeyPrefix, so the cleanup of slot 0 leaves those keys.
+	NRPTSlotKeyPrefix = "NetBirdS"
+
 	// nrptMatchKeyName names the match-domain rules. Older versions used
 	// different layouts under the same name: a single unsuffixed key, then one
 	// key per domain, now one key per batch of domains.
-	nrptMatchKeyName = NRPTKeyPrefix + "Match"
+	nrptMatchKeyName = NRPTKeyPrefix + nrptMatchKeySuffix
+
+	nrptMatchKeySuffix       = "Match"
+	nrptExemptLocalKeySuffix = "ExemptLocal"
 
 	// DNSPolicyConfigRoot holds the NRPT rules of the local policy store.
 	DNSPolicyConfigRoot = `SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig`
@@ -61,11 +68,8 @@ const (
 )
 
 const (
-	dnsPolicyConfigMatchPath    = DNSPolicyConfigRoot + `\` + nrptMatchKeyName
-	gpoDnsPolicyConfigMatchPath = GPODNSPolicyConfigRoot + `\` + nrptMatchKeyName
-
-	dnsPolicyConfigExemptLocalPath    = DNSPolicyConfigRoot + `\` + NRPTKeyPrefix + `ExemptLocal`
-	gpoDnsPolicyConfigExemptLocalPath = GPODNSPolicyConfigRoot + `\` + NRPTKeyPrefix + `ExemptLocal`
+	dnsPolicyConfigMatchPath       = DNSPolicyConfigRoot + `\` + nrptMatchKeyName
+	dnsPolicyConfigExemptLocalPath = DNSPolicyConfigRoot + `\` + NRPTKeyPrefix + nrptExemptLocalKeySuffix
 
 	nrptCatchAllNamespace = "."
 	// nrptLocalNamespace is reserved for multicast DNS by RFC 6762: a unicast
@@ -112,10 +116,30 @@ const (
 )
 
 type registryConfigurator struct {
-	guid            string
+	guid string
+	// slot names the rule keys, see nrptKeyPrefix.
+	slot uint32
+	// otherGUIDs are the adapters of the other sessions, whose nameservers are NetBird's own.
+	otherGUIDs []string
+	// strict makes a failed removal of the previous rules fail the apply, for a caller that
+	// gives up a domain once it is applied.
+	strict          bool
 	routingAll      bool
 	gpo             bool
 	origNameservers []netip.Addr
+}
+
+// nrptKeyPrefix starts the names of the rule keys of slot. Slot 0 keeps the names a client
+// without concurrent sessions uses.
+func nrptKeyPrefix(slot uint32) string {
+	if slot == 0 {
+		return NRPTKeyPrefix
+	}
+	return NRPTSlotKeyPrefix + strconv.FormatUint(uint64(slot), 10) + "-"
+}
+
+func (r *registryConfigurator) ruleKeyPath(root, suffix string) string {
+	return root + `\` + nrptKeyPrefix(r.slot) + suffix
 }
 
 func newHostManager(wgInterface WGIface) (*registryConfigurator, error) {
@@ -123,11 +147,12 @@ func newHostManager(wgInterface WGIface) (*registryConfigurator, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newRegistryConfigurator(&registryConfigurator{guid: guid})
+}
 
-	configurator := &registryConfigurator{
-		guid: guid,
-		gpo:  useGPOPolicyStore(),
-	}
+// newRegistryConfigurator finishes a configurator whose identity fields are set.
+func newRegistryConfigurator(configurator *registryConfigurator) (*registryConfigurator, error) {
+	configurator.gpo = useGPOPolicyStore()
 
 	origNameservers, err := configurator.captureOriginalNameservers()
 	switch {
@@ -185,12 +210,18 @@ func (r *registryConfigurator) captureFromTcpipRoot(rootPath string) ([]netip.Ad
 
 	var out []netip.Addr
 	for _, guid := range guids {
-		if strings.EqualFold(guid, r.guid) {
+		if r.isNetbirdAdapter(guid) {
 			continue
 		}
 		out = append(out, readInterfaceNameservers(rootPath, guid)...)
 	}
 	return out, nil
+}
+
+func (r *registryConfigurator) isNetbirdAdapter(guid string) bool {
+	return strings.EqualFold(guid, r.guid) || slices.ContainsFunc(r.otherGUIDs, func(other string) bool {
+		return strings.EqualFold(guid, other)
+	})
 }
 
 func readInterfaceNameservers(rootPath, guid string) []netip.Addr {
@@ -311,6 +342,9 @@ func (r *registryConfigurator) applyDNSConfig(config HostDNSConfig, stateManager
 	// one, including a leftover catch-all: removal is unconditional so a rule
 	// from an earlier run cannot survive into a config that no longer wants it.
 	if err := r.removeDNSMatchPolicies(); err != nil {
+		if r.strict {
+			return fmt.Errorf("remove previous dns match policies: %w", err)
+		}
 		log.Errorf("cleanup old dns match policies: %s", err)
 	}
 
@@ -378,6 +412,7 @@ func (r *registryConfigurator) updateState(stateManager *statemanager.Manager) {
 	if err := stateManager.UpdateState(&ShutdownState{
 		Guid: r.guid,
 		GPO:  r.gpo,
+		Slot: r.slot,
 	}); err != nil {
 		log.Errorf("failed to update shutdown state: %s", err)
 	}
@@ -405,8 +440,8 @@ func (r *registryConfigurator) addDNSMatchPolicy(domains []string, ip netip.Addr
 		}
 		batchDomains := domains[i:end]
 
-		localPath := fmt.Sprintf("%s-%d", dnsPolicyConfigMatchPath, ruleIndex)
-		gpoPath := fmt.Sprintf("%s-%d", gpoDnsPolicyConfigMatchPath, ruleIndex)
+		localPath := fmt.Sprintf("%s-%d", r.ruleKeyPath(DNSPolicyConfigRoot, nrptMatchKeySuffix), ruleIndex)
+		gpoPath := fmt.Sprintf("%s-%d", r.ruleKeyPath(GPODNSPolicyConfigRoot, nrptMatchKeySuffix), ruleIndex)
 
 		if err := r.configureDNSPolicy(localPath, batchDomains, ip); err != nil {
 			return fmt.Errorf("configure DNS Local policy for rule %d: %w", ruleIndex, err)
@@ -442,12 +477,14 @@ func (r *registryConfigurator) addDNSMatchPolicy(domains []string, ip netip.Addr
 func (r *registryConfigurator) addDNSExemptLocalPolicy() error {
 	var noServers netip.Addr
 
-	if err := r.configureDNSPolicy(dnsPolicyConfigExemptLocalPath, []string{nrptLocalNamespace}, noServers); err != nil {
+	localPath := r.ruleKeyPath(DNSPolicyConfigRoot, nrptExemptLocalKeySuffix)
+	if err := r.configureDNSPolicy(localPath, []string{nrptLocalNamespace}, noServers); err != nil {
 		return fmt.Errorf("configure exempt policy for %s: %w", nrptLocalNamespace, err)
 	}
 
 	if r.gpo {
-		if err := r.configureDNSPolicy(gpoDnsPolicyConfigExemptLocalPath, []string{nrptLocalNamespace}, noServers); err != nil {
+		gpoPath := r.ruleKeyPath(GPODNSPolicyConfigRoot, nrptExemptLocalKeySuffix)
+		if err := r.configureDNSPolicy(gpoPath, []string{nrptLocalNamespace}, noServers); err != nil {
 			return fmt.Errorf("configure gpo exempt policy for %s: %w", nrptLocalNamespace, err)
 		}
 		if err := refreshGroupPolicy(); err != nil {
@@ -629,7 +666,7 @@ func (r *registryConfigurator) removeDNSMatchPolicies() error {
 	var merr *multierror.Error
 
 	for _, root := range []string{DNSPolicyConfigRoot, GPODNSPolicyConfigRoot} {
-		names, err := listNRPTRuleKeys(root)
+		names, err := listNRPTRuleKeys(root, nrptKeyPrefix(r.slot))
 		if err != nil {
 			merr = multierror.Append(merr, fmt.Errorf("list rule keys under %s: %w", root, err))
 			continue
@@ -721,10 +758,14 @@ func removeEmptyGPOPolicyStore() error {
 	return nil
 }
 
-// listNRPTRuleKeys returns the names of our NRPT rule keys under a policy store
-// root. An absent root holds nothing to clean up, which is the normal state of
-// the GPO store on a machine without DNS Client policy.
-func listNRPTRuleKeys(root string) ([]string, error) {
+// listNRPTRuleKeys returns the names of the NRPT rule keys starting with prefix under
+// a policy store root. An absent root holds nothing to clean up, which is the normal
+// state of the GPO store on a machine without DNS Client policy.
+func listNRPTRuleKeys(root, prefix string) ([]string, error) {
+	if prefix == "" {
+		// every key would match, including the rules of other software
+		return nil, errors.New("empty rule key prefix")
+	}
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, root, registry.ENUMERATE_SUB_KEYS)
 	switch {
 	case errors.Is(err, registry.ErrNotExist), errors.Is(err, syscall.ERROR_PATH_NOT_FOUND):
@@ -746,7 +787,7 @@ func listNRPTRuleKeys(root string) ([]string, error) {
 	var ruleKeys []string
 	for _, name := range names {
 		// registry key names are case insensitive
-		if strings.HasPrefix(strings.ToLower(name), strings.ToLower(NRPTKeyPrefix)) {
+		if strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
 			ruleKeys = append(ruleKeys, name)
 		}
 	}

@@ -129,6 +129,10 @@ func (h *SessionHost) dnsWarning(warning dns.HostDNSWarning) {
 		domains := strings.Join(warning.Domains, ", ")
 		message = fmt.Sprintf("Another session serves the same DNS domain %s, a name in both networks is answered by either one", domains)
 		metadata[cProto.MetadataDomainsKey] = domains
+	case dns.HostDNSDomainHeld:
+		domains := strings.Join(warning.Domains, ", ")
+		message = fmt.Sprintf("Another session serves the DNS domain %s on this host, names in it resolve through that session only", domains)
+		metadata[cProto.MetadataDomainsKey] = domains
 	default:
 		message = string(warning.Kind)
 	}

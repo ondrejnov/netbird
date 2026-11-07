@@ -299,7 +299,7 @@ func TestNRPTCleanupWithoutRuleCount(t *testing.T) {
 func countNRPTRuleKeys(t *testing.T) int {
 	t.Helper()
 
-	names, err := listNRPTRuleKeys(DNSPolicyConfigRoot)
+	names, err := listNRPTRuleKeys(DNSPolicyConfigRoot, NRPTKeyPrefix)
 	require.NoError(t, err, "Should list NRPT rule keys")
 	return len(names)
 }
@@ -425,7 +425,7 @@ func TestRemoveEmptyGPOPolicyStore(t *testing.T) {
 
 	// a store holding a rule of ours is kept, because the rule is still applied
 	require.NoError(t, cfg.addDNSMatchPolicy([]string{".example.com"}, testIP))
-	exists, err := registryKeyExists(gpoDnsPolicyConfigMatchPath + "-0")
+	exists, err := registryKeyExists(GPODNSPolicyConfigRoot + `\` + nrptMatchKeyName + "-0")
 	require.NoError(t, err)
 	require.True(t, exists, "Should write the rule to the GPO policy store")
 

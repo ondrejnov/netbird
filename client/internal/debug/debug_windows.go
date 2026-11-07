@@ -102,7 +102,9 @@ func (g *BundleGenerator) writeNRPTRules(sb *strings.Builder, title, root string
 
 	for _, name := range names {
 		owner := ""
-		if strings.HasPrefix(strings.ToLower(name), strings.ToLower(nbdns.NRPTKeyPrefix)) {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, strings.ToLower(nbdns.NRPTKeyPrefix)) ||
+			strings.HasPrefix(lower, strings.ToLower(nbdns.NRPTSlotKeyPrefix)) {
 			owner = "  (netbird)"
 		}
 		fmt.Fprintf(sb, "%s%s\n", name, owner)

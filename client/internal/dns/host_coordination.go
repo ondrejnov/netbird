@@ -1,5 +1,12 @@
 package dns
 
+import (
+	"slices"
+	"strings"
+
+	nbdns "github.com/netbirdio/netbird/dns"
+)
+
 // HostDNSWarningKind names a host DNS limit a session should warn its user about.
 type HostDNSWarningKind string
 
@@ -13,13 +20,16 @@ const (
 	// HostDNSDomainShared means another session serves the same domain on its link. A name
 	// in the domain is answered by whichever link answers first, see section 5.3 of the spec.
 	HostDNSDomainShared HostDNSWarningKind = "dns_domain_shared"
+	// HostDNSDomainHeld means another session owns a domain on a backend that keeps one rule
+	// per domain for the whole host. Names in it resolve through that session only.
+	HostDNSDomainHeld HostDNSWarningKind = "dns_domain_held"
 )
 
 // HostDNSWarning is a warning for one session.
 type HostDNSWarning struct {
 	Kind HostDNSWarningKind
 	Err  error
-	// Domains lists the domains of HostDNSDomainShared.
+	// Domains lists the domains of HostDNSDomainShared and HostDNSDomainHeld.
 	Domains []string
 }
 
@@ -39,6 +49,11 @@ type HostDNSCoordinator interface {
 	ClaimHostDNS() error
 	// ReleaseHostDNS releases the host DNS if this session owns it.
 	ReleaseHostDNS()
+	// ClaimDomains claims the domains on a backend that keeps one rule per domain for the
+	// whole host, and returns those another session owns. The owner may claim repeatedly.
+	ClaimDomains(domains []string) []string
+	// ReleaseDomains releases the domains of this session that are not in keep.
+	ReleaseDomains(keep []string)
 	// ServeDomains records the domains this session serves on its link, replacing the earlier
 	// ones. A domain shared with another session is reported through its warning.
 	ServeDomains(domains []string)
@@ -63,4 +78,42 @@ type claimingHostManager interface {
 func hostClaimPending(manager hostManager) bool {
 	claiming, ok := manager.(claimingHostManager)
 	return ok && claiming.hostClaimPending()
+}
+
+// linkDomains returns the domains the link answers for, in one spelling. The root domain is the
+// catch-all, which has its own claim.
+func linkDomains(config HostDNSConfig) []string {
+	var domains []string
+	for _, d := range config.Domains {
+		if d.Disabled || isRootDomain(d) {
+			continue
+		}
+		name := normalizeLinkDomain(d.Domain)
+		if !slices.Contains(domains, name) {
+			domains = append(domains, name)
+		}
+	}
+	return domains
+}
+
+func normalizeLinkDomain(domain string) string {
+	return strings.ToLower(strings.TrimSuffix(domain, "."))
+}
+
+func requestsCatchAll(config HostDNSConfig) bool {
+	return config.RouteAll || slices.ContainsFunc(config.Domains, func(d DomainConfig) bool {
+		return !d.Disabled && isRootDomain(d)
+	})
+}
+
+// withoutCatchAll also drops a root domain, which on a per-link backend routes all
+// names the same way RouteAll does. It clones because the caller's config shares the slice.
+func withoutCatchAll(config HostDNSConfig) HostDNSConfig {
+	config.RouteAll = false
+	config.Domains = slices.DeleteFunc(slices.Clone(config.Domains), isRootDomain)
+	return config
+}
+
+func isRootDomain(d DomainConfig) bool {
+	return d.Domain == nbdns.RootZone
 }

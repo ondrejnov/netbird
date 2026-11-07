@@ -166,6 +166,10 @@ type DefaultServer struct {
 	// instance instead of leaking its context.
 	fallbackHandler handlerWithStop
 
+	// hostSlot is DefaultServerConfig.Slot.
+	//nolint:unused // only used on Windows
+	hostSlot uint32
+
 	// make sense on mobile only
 	searchDomainNotifier *notifier
 	iosDnsManager        IosDnsManager
@@ -214,9 +218,12 @@ type DefaultServerConfig struct {
 	StatusRecorder *peer.Status
 	StateManager   *statemanager.Manager
 	DisableSys     bool
-	// HostDNS shares the host DNS with other sessions on Linux and FreeBSD. Nil means
-	// this server is the only one on the host.
+	// HostDNS shares the host DNS with other sessions on Linux, FreeBSD and Windows. Nil
+	// means this server is the only one on the host.
 	HostDNS HostDNSCoordinator
+	// Slot names the host DNS entries of a session sharing the host, so they differ from those
+	// of the other sessions. Only Windows uses it, and only with HostDNS.
+	Slot uint32
 }
 
 // NewDefaultServer returns a new dns server
@@ -239,6 +246,7 @@ func NewDefaultServer(ctx context.Context, config DefaultServerConfig) (*Default
 
 	server := newDefaultServer(ctx, config.WgInterface, dnsService, config.StatusRecorder, config.StateManager, config.DisableSys)
 	server.hostDNS = config.HostDNS
+	server.hostSlot = config.Slot
 	return server, nil
 }
 
