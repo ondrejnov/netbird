@@ -815,6 +815,16 @@ linuxový, akceptační scénář na Windows se ověřuje ručně ve VM a výsle
 - **WQ5:** Zanikne wintun adapter, když daemon spadne? Co udělá `CreateAdapter` s GUID nebo jménem existujícího
   adapteru? Podle odpovědi vznikne `links_windows.go`, nebo zůstane `links_other.go`.
 
+**Dokončení W1 (2026-11-07):** `links_windows.go`. `RemoveSessionLinks` a `VerifyNoSessionLinks` nic nedělají, protože
+wintun adapter po pádu zanikne sám (W0, WQ5). `RefuseForeignLink(ctx, name, slot)` dostává nově i slot, protože na
+Windows jméno neříká, čí adapter je. Odmítne přítomný adapter se jménem slotu a cizím GUID hned, bez čekání (jinak by
+ho vytvoření adapteru slotu přejmenovalo). Na adapter s GUID slotu, ať se jmenuje jakkoli, čeká nejvýš 5 s jako
+`closingTunWait`. Přítomnost se bere z `net.Interfaces`, ne z tabulky interfaců, která drží i zaniklé adaptery.
+Adapter, který zmizí mezi výpisem a dotazem na GUID, se přeskočí. Linux slot ignoruje. Testy:
+`TestJudgeAdapters` (unit) a `links_privileged_windows_test.go` se skutečnými adaptery na slotech 61 a 62. Ty
+s vlastníkovým souhlasem proběhly na pracovní stanici (jen adaptery, bez rout a DNS). Mutace bez čekání je shodí
+na `ERROR_ALREADY_EXISTS` při vytváření adapteru. Lint a `-race` stále neproběhly (chybí `golangci-lint` a `gcc`).
+
 **Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
 I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
 abecedně první klíč, bez přepadu na druhé pravidlo. WQ4: nižší metrika, při shodě dřív přidaná routa. WQ5: adapter
@@ -1256,7 +1266,7 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 | PR | Obsah | Hotovo, když |
 |---|---|---|
 | W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ5 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte. **2026-11-07 proběhl na pracovní stanici bez WQ3, viz [concurrent-profiles-w0.md](concurrent-profiles-w0.md). Zbývá WQ3 ve VM** |
-| W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu podle WQ5. **Zámek a GUID hotové v `win/hostcoord`, úklid čeká na W0** | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
+| W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu podle WQ5. **Hotovo v `win/hostcoord`:** zámek, GUID a `RefuseForeignLink` pro Windows. Úklid po pádu podle W0 odpadá | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
 | W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne |
 | W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu |
 | W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník |
