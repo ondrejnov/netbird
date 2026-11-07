@@ -853,6 +853,22 @@ Oprava: `GetBestInterface(dest, exclude ...string)` přeskakuje množinu a `nbne
 zdroj nikdo nenastaví. **Známé omezení:** přeskakuje se podle jména. Adapter session, který cizí program
 přejmenuje (WQ5), se nepřeskočí. `go vet` hlásí `unsafe.Pointer` v `systemops_windows.go` stejně na základním commitu.
 
+**W3b (2026-11-07, vlastnictví rout):** Windows `SysOps` s `WithSharedRoutes` claimuje prefixy v `hostcoord.Routes`
+jako Linux, včetně exit nodu (R4 beze změny, výchozí prefixy se nepředávají). Install rozdělí výchozí prefixy na
+poloviny jako `genericAddVPNRoute` a je idempotentní: routa, kterou interface už má, je jeho vlastní. Remove
+toleruje chybějící routu. **Nové pole `RouteClaim.RemoveOnHandover`:** Linux routu ve sdílené tabulce nahrazuje, na
+Windows by stará routa zůstala na adapteru předchozího vlastníka a při shodné metrice (všechny VPN routy mají metriku
+1) by dál vyhrávala (W0, WQ4). S příznakem `releaseOwner` po úspěšném `Install` dalšího vlastníka zavolá i `Remove`
+předchozího. Pořadí nejdřív instalace, potom odebrání zabrání mezeře, kdy by prefix padl na fyzickou výchozí routu.
+Selhání odebrání se vrátí volajícímu, claim přejde i tak. Linux příznak nenastavuje. `CleanupRouting` uvolní claimy
+session. Legacy routing gate odmítá (R2), na Windows to zajistí W5. Varování o routě do overlay jiné session
+(`warnOverlayRouteRefused`) je sdílené mezi Linuxem a Windows. Testy: `routes_handover_test.go` (unit, mutace bez
+odebrání ho shodí) a `sharedroutes_privileged_windows_test.go` se dvěma adaptery a prefixem TEST-NET-3: jeden vlastník,
+předání bez staré routy, opakované přidání, stop session, odmítnutí overlay jiné session. Mutace bez
+`RemoveOnHandover` ho shodí. Exit node se na stanici netestuje, protože by ji odpojil. Pokrývají ho unit testy
+`hostcoord` a čeká na běh ve VM. Linuxové privilegované testy `systemops` bez cgo nejdou přeložit (`pcap`), stejně
+na základním commitu.
+
 **Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
 I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
 abecedně první klíč, bez přepadu na druhé pravidlo. WQ4: nižší metrika, při shodě dřív přidaná routa. WQ5: adapter
@@ -1296,7 +1312,7 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 | W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ5 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte. **2026-11-07 proběhl na pracovní stanici bez WQ3, viz [concurrent-profiles-w0.md](concurrent-profiles-w0.md). Zbývá WQ3 ve VM** |
 | W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu podle WQ5. **Hotovo v `win/hostcoord`:** zámek, GUID a `RefuseForeignLink` pro Windows. Úklid po pádu podle W0 odpadá | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
 | W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne. **Hotovo v `win/hostcoord`** |
-| W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu |
+| W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu. **Hotovo v `win/hostcoord` (W3a, W3b)** |
 | W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník |
 | W5 | Gate povolí Windows, testy gate a CLI, ruční akceptační scénář ve VM | Akceptační scénář z 1 projde na Windows ve VM |
 
