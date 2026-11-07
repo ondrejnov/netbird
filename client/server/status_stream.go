@@ -20,6 +20,9 @@ func (s *Server) SubscribeStatus(req *proto.StatusRequest, stream proto.DaemonSe
 	if err != nil {
 		return err
 	}
+	if s.concurrentProfiles {
+		return s.subscribeAllSessions(ss, req, stream)
+	}
 
 	subID, ch := ss.statusRecorder.SubscribeToStateChanges()
 	defer func() {

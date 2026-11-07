@@ -54,6 +54,9 @@ type sessionSet struct {
 	// Guarded by Server.mutex. A session stays until its profile is removed.
 	sessions map[profilemanager.SessionKey]*session
 
+	// sessionSetChanges tells the status streams that sessions joined or left.
+	sessionSetChanges *sessionSetNotifier
+
 	// updateHolder is the session whose run drives the updater, nil when none does.
 	updateHolder *atomic.Pointer[session]
 
@@ -85,6 +88,7 @@ func newSessionSet(concurrentProfiles bool) sessionSet {
 	set := sessionSet{concurrentProfiles: concurrentProfiles, maxSessions: defaultMaxSessions, updateHolder: &atomic.Pointer[session]{}}
 	if concurrentProfiles {
 		set.sessions = make(map[profilemanager.SessionKey]*session)
+		set.sessionSetChanges = newSessionSetNotifier()
 	}
 	return set
 }
@@ -193,6 +197,7 @@ func (s *Server) sessionOfLocked(key profilemanager.SessionKey) *session {
 	ss.bindKey(key)
 	ss.state.SetOnChange(ss.statusRecorder.NotifyStateChange)
 	s.sessions[key] = ss
+	s.sessionSetChanges.notify()
 	return ss
 }
 
@@ -413,6 +418,7 @@ func (s *Server) removeProfileConcurrent(ctx context.Context, msg *proto.RemoveP
 		return nil, fmt.Errorf("failed to remove profile: %w", err)
 	}
 	delete(s.sessions, key)
+	s.sessionSetChanges.notify()
 	s.stopBundleCaptureLocked(ss)
 	s.cleanupBundleCapture(ss)
 	if err := s.slots.Remove(key); err != nil {
