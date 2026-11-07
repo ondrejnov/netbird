@@ -66,7 +66,7 @@ func (t *Tray) applyStatus(st services.Status) {
 	}
 	// The daemon emits no active-profile event, so profile flips driven
 	// elsewhere (CLI, autoconnect) surface via status transitions.
-	if iconChanged {
+	if t.cacheSessions(st) || iconChanged {
 		go t.loadProfiles()
 	}
 	if sessionExpiredEnter {

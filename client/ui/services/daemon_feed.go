@@ -122,6 +122,9 @@ type Status struct {
 	// SessionExpiresAt is the absolute UTC instant the SSO session expires; nil
 	// when the peer is not SSO-tracked or login expiration is disabled.
 	SessionExpiresAt *time.Time `json:"sessionExpiresAt,omitempty"`
+	// Sessions lists the sessions of a daemon with concurrent profiles, empty
+	// without the gate. The fields above describe the focused session.
+	Sessions []SessionStatus `json:"sessions"`
 }
 
 // DaemonFeed fans the daemon's two long-running gRPC streams (SubscribeStatus,
@@ -553,6 +556,7 @@ func statusFromProto(resp *proto.StatusResponse) Status {
 		t := ts.AsTime().UTC()
 		st.SessionExpiresAt = &t
 	}
+	st.Sessions = sessionsFromProto(resp.GetSessions())
 	return st
 }
 

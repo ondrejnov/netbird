@@ -25,6 +25,10 @@ type ProfileContextValue = {
     activeProfile: string;
     activeProfileId: string;
     profiles: Profile[];
+    // concurrentProfiles reports the daemon's concurrent profiles gate. With
+    // it several profiles stay connected at once, and a switch only moves the
+    // focus the main window shows.
+    concurrentProfiles: boolean;
     loaded: boolean;
     refresh: () => Promise<void>;
     switchProfile: (id: string) => Promise<void>;
@@ -33,6 +37,7 @@ type ProfileContextValue = {
     removeProfile: (id: string) => Promise<void>;
     renameProfile: (id: string, newName: string) => Promise<void>;
     logoutProfile: (id: string) => Promise<void>;
+    disconnectProfile: (id: string) => Promise<void>;
 };
 
 const ProfileContext = createContext<ProfileContextValue | null>(null);
@@ -50,6 +55,7 @@ export const ProfileProvider = ({ children }: { children: ReactNode }) => {
     const [activeProfile, setActiveProfile] = useState("");
     const [activeProfileId, setActiveProfileId] = useState("");
     const [profiles, setProfiles] = useState<Profile[]>([]);
+    const [concurrentProfiles, setConcurrentProfiles] = useState(false);
     const [loaded, setLoaded] = useState(false);
     const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -60,11 +66,13 @@ export const ProfileProvider = ({ children }: { children: ReactNode }) => {
         }
         try {
             const u = await ProfilesSvc.Username();
-            const [active, list] = await Promise.all([
+            const [active, list, gate] = await Promise.all([
                 ProfilesSvc.GetActive(),
                 ProfilesSvc.List(u),
+                ProfilesSvc.ConcurrentProfiles(),
             ]);
             setUsername(u);
+            setConcurrentProfiles(gate.enabled);
             setActiveProfile(active.profileName || "default");
             setActiveProfileId(active.id || "default");
             setProfiles(list);
@@ -160,12 +168,23 @@ export const ProfileProvider = ({ children }: { children: ReactNode }) => {
         [username, refresh],
     );
 
+    // Ends the session of one profile and leaves the others running. Needs the
+    // concurrent profiles gate, without it the daemon refuses the selector.
+    const disconnectProfile = useCallback(
+        async (id: string) => {
+            await Connection.DownSession({ profileName: id, username });
+            await refresh();
+        },
+        [username, refresh],
+    );
+
     const value = useMemo<ProfileContextValue>(
         () => ({
             username,
             activeProfile,
             activeProfileId,
             profiles,
+            concurrentProfiles,
             loaded,
             refresh,
             switchProfile,
@@ -174,12 +193,14 @@ export const ProfileProvider = ({ children }: { children: ReactNode }) => {
             removeProfile,
             renameProfile,
             logoutProfile,
+            disconnectProfile,
         }),
         [
             username,
             activeProfile,
             activeProfileId,
             profiles,
+            concurrentProfiles,
             loaded,
             refresh,
             switchProfile,
@@ -188,6 +209,7 @@ export const ProfileProvider = ({ children }: { children: ReactNode }) => {
             removeProfile,
             renameProfile,
             logoutProfile,
+            disconnectProfile,
         ],
     );
 
