@@ -815,6 +815,12 @@ linuxový, akceptační scénář na Windows se ověřuje ručně ve VM a výsle
 - **WQ5:** Zanikne wintun adapter, když daemon spadne? Co udělá `CreateAdapter` s GUID nebo jménem existujícího
   adapteru? Podle odpovědi vznikne `links_windows.go`, nebo zůstane `links_other.go`.
 
+**Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
+I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
+abecedně první klíč, bez přepadu na druhé pravidlo. WQ4: nižší metrika, při shodě dřív přidaná routa. WQ5: adapter
+po pádu sám zanikne, kolize GUID selže, kolize jména přejmenuje existující adapter. WQ3 zbývá ve VM. Otevřená
+otázka pro vlastníka k W2 je ve zprávě.
+
 ## 3. Architektura: proč jeden daemon
 
 Komunita v #446 navrhuje N samostatných daemonů, protože to vyžaduje méně změn v RPC a
@@ -1249,7 +1255,7 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 
 | PR | Obsah | Hotovo, když |
 |---|---|---|
-| W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ5 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte |
+| W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ5 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte. **2026-11-07 proběhl na pracovní stanici bez WQ3, viz [concurrent-profiles-w0.md](concurrent-profiles-w0.md). Zbývá WQ3 ve VM** |
 | W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu podle WQ5. **Zámek a GUID hotové v `win/hostcoord`, úklid čeká na W0** | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
 | W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne |
 | W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu |
