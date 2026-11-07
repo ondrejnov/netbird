@@ -843,6 +843,16 @@ může nést starou adresu. Slot 0 se chová jako dnes. `RemoveResidualSessionIs
 vypnuté kontroly ho shodí. Android `go build ./client/firewall/...` padá na `nftables` a `iptables` stejně na základním
 commitu, balíčky klienta pro Android se staví.
 
+**W3a (2026-11-07, výběr bound interfacu):** WQ3 potvrzený na skutečné tabulce rout. Se specifičtější routou na
+adapteru session A vybere `GetBestInterface(dest, B)` adapter A (`TestGetBestInterface_SkipsTheInterfacesOfAllSessions`,
+prefix TEST-NET-2 místo exit nodu, aby test hostitele neodpojil). Druhá chyba: `routemanager` při stopu kterékoli
+session nastaví `vpnInterfaceName` na prázdný řetězec, takže ostatní session přestanou přeskakovat i vlastní interface.
+Oprava: `GetBestInterface(dest, exclude ...string)` přeskakuje množinu a `nbnet.SetSessionInterfacesSource`, který
+`NewDaemonHost` nastaví jednou na `Sessions.SessionInterfaces` koordinátoru, doplní interfaces všech session k
+`vpnInterfaceName`. Proměnná v `nbnet` drží jen odkaz na koordinátor, ne stav session. Bez gate se nic nemění,
+zdroj nikdo nenastaví. **Známé omezení:** přeskakuje se podle jména. Adapter session, který cizí program
+přejmenuje (WQ5), se nepřeskočí. `go vet` hlásí `unsafe.Pointer` v `systemops_windows.go` stejně na základním commitu.
+
 **Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
 I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
 abecedně první klíč, bez přepadu na druhé pravidlo. WQ4: nižší metrika, při shodě dřív přidaná routa. WQ5: adapter
