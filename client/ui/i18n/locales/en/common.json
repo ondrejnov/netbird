@@ -1023,6 +1023,18 @@
         "message": "Use 1-15 letters, digits, dots, hyphens, or underscores.",
         "description": "Validation message for the interface name (allowed characters)."
     },
+    "settings.advanced.interfaceName.slotPlaceholder": {
+        "message": "Assigned when connected",
+        "description": "Placeholder of the read-only interface name field when several profiles can be connected at once and this profile is not connected, so it has no interface yet."
+    },
+    "settings.advanced.interfaceName.slotHelp": {
+        "message": "Each connected profile gets its own interface, assigned automatically.",
+        "description": "Help text under the read-only interface name field when several profiles can be connected at once."
+    },
+    "settings.advanced.interfaceName.slotFixed": {
+        "message": "This profile has the fixed interface name {name}, which keeps it from connecting beside other profiles. Save to switch it to the automatic name.",
+        "description": "Help text under the read-only interface name field when the profile stores a custom interface name that the concurrent profiles feature refuses. {name} is that stored name; keep {name} unchanged."
+    },
     "settings.advanced.interfaceName.errorMac": {
         "message": "Must start with \"utun\" followed by a number (e.g. utun100).",
         "description": "Validation message specific to macOS, where the name must start with 'utun' followed by a number. Keep 'utun' and the example."
