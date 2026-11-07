@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
-
-	"github.com/netbirdio/netbird/client/internal/profilemanager"
 )
 
 // ProfileSwitcher holds the switch policy shared by the tray and React
@@ -21,6 +19,9 @@ import (
 //
 //	Connected/Connecting/NeedsLogin/LoginFailed/SessionExpired → Down first.
 //	Idle → no Down.
+//
+// On a daemon with concurrent profiles the switch only moves the focus and
+// never brings a session down, see switchFocus.
 type ProfileSwitcher struct {
 	profiles   *Profiles
 	connection *Connection
@@ -43,14 +44,23 @@ func (s *ProfileSwitcher) SwitchActiveNoConnect(ctx context.Context, p ProfileRe
 }
 
 func (s *ProfileSwitcher) switchActive(ctx context.Context, p ProfileRef, connect bool) error {
-	prevStatus := ""
+	gate, err := s.profiles.ConcurrentProfiles(ctx)
+	if err != nil {
+		return fmt.Errorf("read the concurrent profiles gate: %w", err)
+	}
+
+	var prev Status
 	if s.feed != nil {
 		if st, err := s.feed.Get(ctx); err == nil {
-			prevStatus = st.Status
+			prev = st
 		} else {
 			log.Warnf("profileswitcher: get status: %v", err)
 		}
 	}
+	if gate.Enabled {
+		return s.switchFocus(ctx, p, prev, connect)
+	}
+	prevStatus := prev.Status
 
 	needsDown := strings.EqualFold(prevStatus, StatusConnected) ||
 		strings.EqualFold(prevStatus, StatusConnecting) ||
@@ -73,15 +83,9 @@ func (s *ProfileSwitcher) switchActive(ctx context.Context, p ProfileRef, connec
 		return fmt.Errorf("switch profile %q: %w", p.ProfileName, err)
 	}
 
-	// Mirror into the user-side ProfileManager state: the CLI's `netbird up`
-	// reads this file and sends the ID back in the Up RPC, so if it diverges
-	// the daemon reverts the UI switch on the next CLI `up`. Best-effort — the
-	// daemon is authoritative; a failure only leaves the CLI's view stale.
 	// Use the daemon-resolved ID rather than the handle we sent, since the
 	// on-disk state is keyed by ID, not display name.
-	if err := profilemanager.NewProfileManager().SwitchProfile(profilemanager.ID(resolvedID)); err != nil {
-		log.Warnf("profileswitcher: mirror to user-side ProfileManager failed: %v", err)
-	}
+	mirrorActiveProfile(resolvedID)
 
 	if needsDown {
 		if err := s.connection.Down(ctx); err != nil {
@@ -95,11 +99,6 @@ func (s *ProfileSwitcher) switchActive(ctx context.Context, p ProfileRef, connec
 		}
 	}
 
-	// The daemon emits no profile event, so fan out ourselves or the React
-	// ProfileContext stays on the old profile after a tray-initiated switch.
-	if s.feed != nil && s.feed.emitter != nil {
-		s.feed.emitter.Emit(EventProfileChanged, p)
-	}
-
+	s.emitProfileChanged(p)
 	return nil
 }

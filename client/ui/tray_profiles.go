@@ -96,6 +96,7 @@ func (t *Tray) fillProfileSubmenu() {
 	t.profilesMu.Lock()
 	profiles := append([]services.Profile(nil), t.profiles...)
 	username := t.profilesUser
+	sessions := append([]services.SessionStatus(nil), t.sessions...)
 	t.profilesMu.Unlock()
 
 	sort.Slice(profiles, func(i, j int) bool {
@@ -119,9 +120,9 @@ func (t *Tray) fillProfileSubmenu() {
 		// Add, not AddCheckbox: Wails auto-toggles a checkbox on click before
 		// OnClick fires, so both old and new would briefly show checked during
 		// the switch. A plain item with a "✓ " prefix avoids the race.
-		label := display
+		label := t.profileRowLabel(display, id, sessions)
 		if active {
-			label = "✓ " + display
+			label = "✓ " + label
 		}
 		item := t.profileSubmenu.Add(label)
 		item.OnClick(func(*application.Context) {

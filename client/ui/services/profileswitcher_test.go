@@ -23,11 +23,20 @@ type switchDaemon struct {
 	calls  []string
 	down   []*proto.DownRequest
 	up     []*proto.UpRequest
+
+	// gate, sessions and upErr shape a daemon with concurrent profiles.
+	gate     bool
+	sessions []*proto.SessionStatus
+	upErr    error
+}
+
+func (d *switchDaemon) GetFeatures(context.Context, *proto.GetFeaturesRequest, ...grpc.CallOption) (*proto.GetFeaturesResponse, error) {
+	return &proto.GetFeaturesResponse{ConcurrentProfilesEnabled: d.gate}, nil
 }
 
 func (d *switchDaemon) Status(context.Context, *proto.StatusRequest, ...grpc.CallOption) (*proto.StatusResponse, error) {
 	d.calls = append(d.calls, "Status")
-	return &proto.StatusResponse{Status: d.status}, nil
+	return &proto.StatusResponse{Status: d.status, Sessions: d.sessions}, nil
 }
 
 func (d *switchDaemon) SwitchProfile(_ context.Context, req *proto.SwitchProfileRequest, _ ...grpc.CallOption) (*proto.SwitchProfileResponse, error) {
@@ -44,6 +53,9 @@ func (d *switchDaemon) Down(_ context.Context, req *proto.DownRequest, _ ...grpc
 func (d *switchDaemon) Up(_ context.Context, req *proto.UpRequest, _ ...grpc.CallOption) (*proto.UpResponse, error) {
 	d.calls = append(d.calls, "Up "+req.GetProfileName())
 	d.up = append(d.up, req)
+	if d.upErr != nil {
+		return nil, d.upErr
+	}
 	return &proto.UpResponse{}, nil
 }
 
@@ -69,11 +81,10 @@ func newSwitcher(t *testing.T, daemon *switchDaemon) *ProfileSwitcher {
 	return NewProfileSwitcher(NewProfiles(conn), NewConnection(conn, nil, nil), &DaemonFeed{conn: conn, emitter: nopEmitter{}})
 }
 
-// With concurrent profiles the daemon aims a Down without a selector at the focused session, which
-// after the switch is the new profile. The switcher must therefore send that plain Down and no
-// selector: it never names the profile it switches away from, whose session keeps running and is
-// not shown by the UI, see 5.7 of the specification. The daemon side of this is covered by
-// TestGate_UISwitchLeavesTheOriginalSessionRunning in client/server.
+// Without the concurrent profiles gate the switch keeps the upstream order: the focus moves before
+// the plain Down, so the Down ends the one connection the daemon has. The behavior of an older UI
+// against a daemon with the gate is covered by TestGate_UISwitchLeavesTheOriginalSessionRunning in
+// client/server; this switcher takes switchFocus there, see TestProfileSwitcher_Gate*.
 func TestProfileSwitcher_DownIsPlainSoItReachesTheNewFocus(t *testing.T) {
 	daemon := &switchDaemon{status: StatusConnected}
 	switcher := newSwitcher(t, daemon)

@@ -3,15 +3,16 @@ import { useTranslation } from "react-i18next";
 import * as Popover from "@radix-ui/react-popover";
 import * as ScrollArea from "@radix-ui/react-scroll-area";
 import { Command } from "cmdk";
-import { Check, ChevronDown, Settings2, UserCircle } from "lucide-react";
+import { Check, ChevronDown, Settings2, Unplug, UserCircle } from "lucide-react";
 import { pickProfileIcon } from "@/modules/profiles/ProfileAvatar";
-import type { Profile } from "@bindings/services/models.js";
+import type { Profile, SessionStatus } from "@bindings/services/models.js";
 import { Tooltip } from "@/components/Tooltip";
 import { useProfile } from "@/contexts/ProfileContext";
 import { useFocusVisible } from "@/hooks/useFocusVisible";
 import { cn } from "@/lib/cn";
 import { errorDialog, formatErrorMessage } from "@/lib/errors";
 import { useDirection } from "@/hooks/useDirection";
+import { sessionRuns, sessionStatusLabel, useProfileSessions } from "@/modules/profiles/sessions";
 
 type ProfileDropdownProps = {
     onManageProfiles?: () => void;
@@ -22,7 +23,16 @@ const MANAGE_VALUE = "__manage_profiles__";
 export const ProfileDropdown = ({ onManageProfiles }: ProfileDropdownProps) => {
     const dir = useDirection();
     const { t } = useTranslation();
-    const { activeProfile, activeProfileId, profiles, switchProfile, loaded } = useProfile();
+    const {
+        activeProfile,
+        activeProfileId,
+        profiles,
+        switchProfile,
+        disconnectProfile,
+        concurrentProfiles,
+        loaded,
+    } = useProfile();
+    const sessions = useProfileSessions();
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState(false);
     const listRef = useRef<HTMLDivElement>(null);
@@ -60,6 +70,10 @@ export const ProfileDropdown = ({ onManageProfiles }: ProfileDropdownProps) => {
         setOpen(false);
         if (id === activeProfileId) return;
         void guarded(t("profile.error.switchTitle"), () => switchProfile(id));
+    };
+
+    const handleDisconnect = (id: string) => {
+        void guarded(t("profile.session.disconnectError"), () => disconnectProfile(id));
     };
 
     const handleManage = () => {
@@ -133,6 +147,9 @@ export const ProfileDropdown = ({ onManageProfiles }: ProfileDropdownProps) => {
                                                     profile={profile}
                                                     isActive={profile.id === activeProfileId}
                                                     onSelect={handleSelect}
+                                                    concurrent={concurrentProfiles}
+                                                    session={sessions.get(profile.id)}
+                                                    onDisconnect={handleDisconnect}
                                                 />
                                             ))}
                                         </ScrollArea.Viewport>
@@ -250,10 +267,24 @@ type ProfileRowProps = {
     profile: Profile;
     isActive: boolean;
     onSelect: (id: string) => void;
+    // concurrent shows the session of the profile, which can run beside the
+    // others on a daemon with concurrent profiles.
+    concurrent: boolean;
+    session?: SessionStatus;
+    onDisconnect: (id: string) => void;
 };
 
-const ProfileRow = ({ profile, isActive, onSelect }: ProfileRowProps) => {
+const ProfileRow = ({
+    profile,
+    isActive,
+    onSelect,
+    concurrent,
+    session,
+    onDisconnect,
+}: ProfileRowProps) => {
+    const { t } = useTranslation();
     const showEmail = !!profile.email;
+    const running = concurrent && sessionRuns(session);
     return (
         <Command.Item
             value={profile.id}
@@ -262,21 +293,67 @@ const ProfileRow = ({ profile, isActive, onSelect }: ProfileRowProps) => {
                 "flex w-auto gap-2 px-2 py-2 pe-3 last:mb-1",
                 "cursor-default rounded-md text-sm outline-hidden",
                 "data-[selected=true]:bg-nb-gray-900",
-                showEmail ? "items-start" : "items-center",
+                showEmail || concurrent ? "items-start" : "items-center",
             )}
         >
             <div className={"flex min-w-0 flex-1 flex-col leading-tight"}>
                 <span className={"truncate"}>{profile.name}</span>
                 {showEmail && <TruncatedEmail email={profile.email} />}
+                {concurrent && <SessionLine session={session} />}
             </div>
+            {running && (
+                <Tooltip content={t("profile.session.disconnect")}>
+                    <button
+                        type={"button"}
+                        aria-label={t("profile.session.disconnectProfile", {
+                            name: profile.name,
+                        })}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onDisconnect(profile.id);
+                        }}
+                        className={cn(
+                            "shrink-0 rounded-md p-1 text-nb-gray-300",
+                            "hover:bg-nb-gray-800 hover:text-nb-gray-100",
+                            (showEmail || concurrent) && "-mt-0.5",
+                        )}
+                    >
+                        <Unplug size={14} aria-hidden={"true"} />
+                    </button>
+                </Tooltip>
+            )}
             {isActive && (
                 <Check
                     size={16}
                     aria-hidden={"true"}
-                    className={cn("shrink-0 text-netbird", showEmail && "mt-0.5")}
+                    className={cn("shrink-0 text-netbird", (showEmail || concurrent) && "mt-0.5")}
                 />
             )}
         </Command.Item>
+    );
+};
+
+const SessionLine = ({ session }: { session?: SessionStatus }) => {
+    const { t } = useTranslation();
+    const connected = session?.status === "Connected";
+    const details = [
+        sessionStatusLabel(t, session),
+        connected ? session?.interfaceName : "",
+        session?.conflict ? t("profile.session.conflict", { resource: session.conflict }) : "",
+    ].filter(Boolean);
+    return (
+        <span className={"mt-0.5 flex items-center gap-1.5 text-xs text-nb-gray-300"}>
+            <span
+                aria-hidden={"true"}
+                className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    connected ? "bg-green-500" : "bg-nb-gray-500",
+                    session?.conflict && "bg-yellow-500",
+                )}
+            />
+            <span className={"truncate"}>{details.join(" · ")}</span>
+        </span>
     );
 };
 

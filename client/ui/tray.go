@@ -139,6 +139,10 @@ type Tray struct {
 	profilesMu   sync.Mutex
 	profiles     []services.Profile
 	profilesUser string
+	// sessions is the last session list of a daemon with concurrent
+	// profiles, sessionsKey its fingerprint. Empty without the gate.
+	sessions    []services.SessionStatus
+	sessionsKey string
 
 	// menuMu serialises relayoutMenu (buildMenu + SetMenu) and guards the
 	// menu/item-pointer fields above. relayoutMenu is the only post-startup

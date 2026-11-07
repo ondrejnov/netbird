@@ -35,6 +35,7 @@ import { SectionGroup, SettingsBottomBar } from "@/modules/settings/SettingsSect
 import { cn } from "@/lib/cn";
 import { reconcileOrder } from "@/lib/sorting";
 import { errorDialog, formatErrorMessage } from "@/lib/errors";
+import { sessionRuns, sessionStatusLabel, useProfileSessions } from "@/modules/profiles/sessions";
 
 const DEFAULT_PROFILE_ID = "default";
 
@@ -398,6 +399,10 @@ const ProfileRow = ({
     const { t } = useTranslation();
     const Icon = pickProfileIcon(profile.name) ?? UserCircle;
     const showEmail = !!profile.email;
+    const { concurrentProfiles } = useProfile();
+    const session = useProfileSessions().get(profile.id);
+    // The daemon refuses to remove or deregister a profile whose session runs.
+    const isRunning = concurrentProfiles && sessionRuns(session);
 
     return (
         <tr
@@ -436,6 +441,9 @@ const ProfileRow = ({
                             {profile.name}
                         </span>
                         {isActive && <Badge>{t("settings.profiles.active")}</Badge>}
+                        {concurrentProfiles && session && (
+                            <Badge>{sessionStatusLabel(t, session)}</Badge>
+                        )}
                     </div>
                     {showEmail && <TruncatedEmail email={profile.email} />}
                 </div>
@@ -443,9 +451,10 @@ const ProfileRow = ({
             <td className={"shrink-0 text-end"}>
                 <RowActions
                     canSwitch={!isActive}
-                    canDeregister={!!profile.email}
+                    canDeregister={!!profile.email && !isRunning}
                     isDefault={profile.id === DEFAULT_PROFILE_ID}
                     isActive={isActive}
+                    isRunning={isRunning}
                     rowFocused={isFocused}
                     onSwitch={onSwitch}
                     onEdit={onEdit}
@@ -484,6 +493,7 @@ type RowActionsProps = {
     canDeregister: boolean;
     isDefault: boolean;
     isActive: boolean;
+    isRunning: boolean;
     rowFocused: boolean;
     onSwitch: () => void;
     onEdit: () => void;
@@ -496,6 +506,7 @@ const RowActions = ({
     canDeregister,
     isDefault,
     isActive,
+    isRunning,
     rowFocused,
     onSwitch,
     onEdit,
@@ -503,10 +514,11 @@ const RowActions = ({
     onDelete,
 }: RowActionsProps) => {
     const { t } = useTranslation();
-    const deleteDisabled = isDefault || isActive;
+    const deleteDisabled = isDefault || isActive || isRunning;
     let deleteDisabledReason: string | null = null;
     if (isDefault) deleteDisabledReason = t("profile.delete.disabledDefault");
     else if (isActive) deleteDisabledReason = t("profile.delete.disabledActive");
+    else if (isRunning) deleteDisabledReason = t("profile.delete.disabledRunning");
     return (
         <div className={"inline-flex items-center gap-1"}>
             <ActionIconButton

@@ -95,6 +95,10 @@
         "message": "Manage Profiles",
         "description": "Tray menu item that opens Settings → Profiles."
     },
+    "tray.profile.conflict": {
+        "message": "Conflict: {resource}",
+        "description": "Suffix of a profile row in the tray Profiles submenu when that profile's connection cannot run beside another connected profile. {resource} is a technical name such as overlay, dns, exit_node or interface; keep {resource} unchanged."
+    },
     "tray.menu.settings": {
         "message": "Settings...",
         "description": "Tray menu item that opens the Settings window. The trailing '...' signals that a window opens; keep it."
@@ -574,6 +578,26 @@
     "profile.delete.disabledDefault": {
         "message": "The default profile cannot be deleted.",
         "description": "Tooltip explaining the default profile can't be deleted."
+    },
+    "profile.delete.disabledRunning": {
+        "message": "Connected profiles cannot be deleted. Disconnect this profile before deleting it.",
+        "description": "Tooltip explaining a profile that is connected right now (several profiles can be connected at once) can't be deleted until it is disconnected."
+    },
+    "profile.session.disconnect": {
+        "message": "Disconnect",
+        "description": "Tooltip of the button in the profile picker that disconnects one profile while the other connected profiles stay connected."
+    },
+    "profile.session.disconnectProfile": {
+        "message": "Disconnect {name}",
+        "description": "Accessibility label of the per-profile disconnect button in the profile picker. {name} is the profile name; keep {name} unchanged."
+    },
+    "profile.session.disconnectError": {
+        "message": "Disconnect Profile Failed",
+        "description": "Error-dialog title when disconnecting one profile fails."
+    },
+    "profile.session.conflict": {
+        "message": "Conflict: {resource}",
+        "description": "Shown under a profile in the profile picker when its connection cannot run beside another connected profile. {resource} is a technical name such as overlay, dns, exit_node or interface; keep {resource} unchanged."
     },
     "profile.error.switchTitle": {
         "message": "Switch Profile Failed",
