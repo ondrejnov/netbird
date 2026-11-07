@@ -112,6 +112,9 @@ var ErrEngineAlreadyStarted = errors.New("engine already started")
 type EngineConfig struct {
 	WgPort      int
 	WgIfaceName string
+	// WgSlot is the slot of the session, which names its interface and on Windows picks the
+	// GUID of its adapter. Zero for a client that owns the host alone.
+	WgSlot hostcoord.Slot
 
 	// WgAddr is the Wireguard local address (Netbird Network IP).
 	// Contains both v4 and optional v6 overlay addresses.
@@ -2259,6 +2262,7 @@ func (e *Engine) newWgIface() (*iface.WGIface, error) {
 		MTU:          e.config.MTU,
 		TransportNet: transportNet,
 		DisableDNS:   e.config.DisableDNS,
+		Slot:         uint32(e.config.WgSlot),
 	}
 
 	switch runtime.GOOS {

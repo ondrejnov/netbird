@@ -62,6 +62,7 @@ func TestAttachGivesTheSessionItsSlot(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(detachFirst)
 	assert.Equal(t, "wt0", first.WgIfaceName)
+	assert.Equal(t, hostcoord.Slot(0), first.WgSlot, "the first session runs on slot 0")
 	assert.Equal(t, 51820, first.WgPort)
 	assert.NotNil(t, first.Sessions, "the engine should know the other sessions")
 
@@ -69,6 +70,7 @@ func TestAttachGivesTheSessionItsSlot(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(detachSecond)
 	assert.Equal(t, "wt1", second.WgIfaceName, "the default in the config means the name of the slot")
+	assert.Equal(t, hostcoord.Slot(1), second.WgSlot, "the engine gets the slot that picks its adapter")
 	assert.Equal(t, 51821, second.WgPort, "the default in the config means the port of the slot")
 
 	assert.NoError(t, host.Isolation().Verify())

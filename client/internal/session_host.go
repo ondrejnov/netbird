@@ -170,6 +170,7 @@ func (h *SessionHost) attach(ctx context.Context, config *profilemanager.Config,
 
 	h.slot = resources.Slot
 	engineConfig.WgIfaceName = resources.Interface
+	engineConfig.WgSlot = resources.Slot
 	engineConfig.WgPort = int(resources.Port)
 	if engineConfig.WgAddr.HasIPv6() && !addr.HasIPv6() {
 		log.Warnf("session on %s continues without its IPv6 overlay", resources.Interface)

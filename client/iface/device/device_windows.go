@@ -3,6 +3,9 @@ package device
 import (
 	"fmt"
 	"net/netip"
+	"strconv"
+
+	"github.com/google/uuid"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/windows"
@@ -19,6 +22,7 @@ const defaultWindowsGUIDSTring = "{f2f29e61-d91f-4d76-8151-119b20c4bdeb}"
 
 type TunDevice struct {
 	name    string
+	slot    uint32
 	address wgaddr.Address
 	port    int
 	key     string
@@ -33,8 +37,15 @@ type TunDevice struct {
 }
 
 func NewTunDevice(name string, address wgaddr.Address, port int, key string, mtu uint16, iceBind *bind.ICEBind) *TunDevice {
+	return NewSlotTunDevice(name, 0, address, port, key, mtu, iceBind)
+}
+
+// NewSlotTunDevice returns the device of the session on slot. The slot picks the GUID of the
+// adapter, see SlotGUID; slot 0 is the adapter of a client that owns the host alone.
+func NewSlotTunDevice(name string, slot uint32, address wgaddr.Address, port int, key string, mtu uint16, iceBind *bind.ICEBind) *TunDevice {
 	return &TunDevice{
 		name:    name,
+		slot:    slot,
 		address: address,
 		port:    port,
 		key:     key,
@@ -51,8 +62,27 @@ func getGUID() (windows.GUID, error) {
 	return windows.GUIDFromString(guidString)
 }
 
+// SlotGUID returns the GUID of the adapter of slot. Slot 0 keeps the GUID of a client without
+// sessions. Any other slot gets a name-based UUID in the namespace of that GUID, so the adapter
+// of a slot is the same on every start and tells which slot left it behind.
+func SlotGUID(slot uint32) (windows.GUID, error) {
+	base, err := getGUID()
+	if err != nil {
+		return windows.GUID{}, err
+	}
+	if slot == 0 {
+		return base, nil
+	}
+	namespace, err := uuid.Parse(base.String())
+	if err != nil {
+		return windows.GUID{}, fmt.Errorf("parse adapter GUID %s: %w", base, err)
+	}
+	derived := uuid.NewSHA1(namespace, []byte("slot-"+strconv.FormatUint(uint64(slot), 10)))
+	return windows.GUIDFromString("{" + derived.String() + "}")
+}
+
 func (t *TunDevice) Create() (WGConfigurer, error) {
-	guid, err := getGUID()
+	guid, err := SlotGUID(t.slot)
 	if err != nil {
 		log.Errorf("failed to get GUID: %s", err)
 		return nil, err

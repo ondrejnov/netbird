@@ -61,6 +61,9 @@ type WGIFaceOpts struct {
 	MobileArgs   *device.MobileIFaceArguments
 	TransportNet transport.Net
 	DisableDNS   bool
+	// Slot is the number of the session the interface belongs to, 0 for a client that owns the
+	// host alone. Windows derives the GUID of the adapter from it.
+	Slot uint32
 }
 
 // WGIface represents an interface instance
