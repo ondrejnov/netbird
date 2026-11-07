@@ -59,8 +59,10 @@ type DaemonHost struct {
 
 // NewDaemonHost returns the shared state of a daemon that stores its slots in slots.
 func NewDaemonHost(slots *hostcoord.Slots) *DaemonHost {
+	coordinator := hostcoord.New()
+	shareSessionInterfaces(coordinator.Sessions())
 	return &DaemonHost{
-		coordinator: hostcoord.New(),
+		coordinator: coordinator,
 		slots:       slots,
 		isolation:   firewall.NewSessionIsolation(),
 		accounting:  conntrack.NewAccounting(),

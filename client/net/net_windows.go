@@ -26,7 +26,7 @@ const (
 )
 
 // GetBestInterfaceFunc is set at runtime to avoid import cycle
-var GetBestInterfaceFunc func(dest netip.Addr, vpnIntf string) (*net.Interface, error)
+var GetBestInterfaceFunc func(dest netip.Addr, exclude ...string) (*net.Interface, error)
 
 // nativeToBigEndian converts a uint32 from native byte order to big-endian
 func nativeToBigEndian(v uint32) uint32 {
@@ -126,15 +126,15 @@ func selectInterfaceForUnspecified() (*interfaceSelection, error) {
 	}
 
 	var result interfaceSelection
-	vpnIfaceName := GetVPNInterfaceName()
+	exclude := excludedInterfaces()
 
-	if iface4, err := GetBestInterfaceFunc(netip.IPv4Unspecified(), vpnIfaceName); err == nil {
+	if iface4, err := GetBestInterfaceFunc(netip.IPv4Unspecified(), exclude...); err == nil {
 		result.iface4 = iface4
 	} else {
 		log.Debugf("No IPv4 default route found: %v", err)
 	}
 
-	if iface6, err := GetBestInterfaceFunc(netip.IPv6Unspecified(), vpnIfaceName); err == nil {
+	if iface6, err := GetBestInterfaceFunc(netip.IPv6Unspecified(), exclude...); err == nil {
 		result.iface6 = iface6
 	} else {
 		log.Debugf("No IPv6 default route found: %v", err)
@@ -162,7 +162,7 @@ func selectInterface(dest netip.Addr) (*interfaceSelection, error) {
 		return nil, errors.New("GetBestInterfaceFunc not initialized")
 	}
 
-	iface, err := GetBestInterfaceFunc(dest, GetVPNInterfaceName())
+	iface, err := GetBestInterfaceFunc(dest, excludedInterfaces()...)
 	if err != nil {
 		return nil, fmt.Errorf("find route for %s: %w", dest, err)
 	}

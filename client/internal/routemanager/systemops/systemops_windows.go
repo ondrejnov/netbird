@@ -824,7 +824,7 @@ func addZone(ip netip.Addr, interfaceIndex int) netip.Addr {
 }
 
 // parseCandidatesFromTable extracts all matching candidate routes from the routing table
-func parseCandidatesFromTable(table *MIB_IPFORWARD_TABLE2, dest netip.Addr, skipInterfaceIndex int) []candidateRoute {
+func parseCandidatesFromTable(table *MIB_IPFORWARD_TABLE2, dest netip.Addr, skip map[uint32]struct{}) []candidateRoute {
 	var candidates []candidateRoute
 	entrySize := unsafe.Sizeof(MIB_IPFORWARD_ROW2{})
 	basePtr := uintptr(unsafe.Pointer(&table.Table[0]))
@@ -833,7 +833,7 @@ func parseCandidatesFromTable(table *MIB_IPFORWARD_TABLE2, dest netip.Addr, skip
 		entryPtr := basePtr + uintptr(i)*entrySize
 		entry := (*MIB_IPFORWARD_ROW2)(unsafe.Pointer(entryPtr))
 
-		if candidate := parseCandidateRoute(entry, dest, skipInterfaceIndex); candidate != nil {
+		if candidate := parseCandidateRoute(entry, dest, skip); candidate != nil {
 			candidates = append(candidates, *candidate)
 		}
 	}
@@ -843,8 +843,8 @@ func parseCandidatesFromTable(table *MIB_IPFORWARD_TABLE2, dest netip.Addr, skip
 
 // parseCandidateRoute extracts candidate route information from a MIB_IPFORWARD_ROW2 entry
 // Returns nil if the route doesn't match the destination or should be skipped
-func parseCandidateRoute(entry *MIB_IPFORWARD_ROW2, dest netip.Addr, skipInterfaceIndex int) *candidateRoute {
-	if skipInterfaceIndex > 0 && int(entry.InterfaceIndex) == skipInterfaceIndex {
+func parseCandidateRoute(entry *MIB_IPFORWARD_ROW2, dest netip.Addr, skip map[uint32]struct{}) *candidateRoute {
+	if _, skipped := skip[entry.InterfaceIndex]; skipped {
 		return nil
 	}
 
@@ -910,21 +910,26 @@ func combinedMetric(candidate candidateRoute) uint64 {
 }
 
 // GetBestInterface finds the best interface for reaching a destination,
-// excluding the VPN interface to avoid routing loops.
+// excluding the NetBird interfaces to avoid routing loops: the one of this
+// client and, with concurrent sessions, those of all sessions.
 //
 // Route selection priority:
 // 1. Longest prefix match (most specific route)
 // 2. Lowest combined metric (route metric + interface metric)
 // 3. Lowest route metric.
-func GetBestInterface(dest netip.Addr, vpnIntf string) (*net.Interface, error) {
-	var skipInterfaceIndex int
-	if vpnIntf != "" {
-		if iface, err := net.InterfaceByName(vpnIntf); err == nil {
-			skipInterfaceIndex = iface.Index
-		} else {
-			// not critical, if we cannot get ahold of the interface then we won't need to skip it
-			log.Warnf("failed to get VPN interface %s: %v", vpnIntf, err)
+func GetBestInterface(dest netip.Addr, exclude ...string) (*net.Interface, error) {
+	skip := make(map[uint32]struct{}, len(exclude))
+	for _, name := range exclude {
+		if name == "" {
+			continue
 		}
+		iface, err := net.InterfaceByName(name)
+		if err != nil {
+			// Not critical: an interface that does not exist carries no route to skip.
+			log.Debugf("failed to get interface %s to exclude: %v", name, err)
+			continue
+		}
+		skip[uint32(iface.Index)] = struct{}{}
 	}
 
 	table, err := getWindowsRoutingTable()
@@ -933,7 +938,7 @@ func GetBestInterface(dest netip.Addr, vpnIntf string) (*net.Interface, error) {
 	}
 	defer freeWindowsRoutingTable(table)
 
-	candidates := parseCandidatesFromTable(table, dest, skipInterfaceIndex)
+	candidates := parseCandidatesFromTable(table, dest, skip)
 
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no route to %s", dest)
