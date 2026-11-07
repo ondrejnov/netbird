@@ -803,6 +803,15 @@ linuxový, akceptační scénář na Windows se ověřuje ručně ve VM a výsle
   přeložit, stejně na `main`. Privilegované testy (`TestAttachGivesTheSessionItsSlot`) jsou jen linuxové a lokálně
   neběžely.
 
+- **WQ1 z kódu (2026-11-07):** `uspfilter.determineRouting` je stejné na všech platformách. `nativeRouter` se zapne
+  při `DisableServerRoutes`, a při `NB_DISABLE_USERSPACE_ROUTING` se routing v uspfilteru vypne úplně. V obou
+  případech jde routovaný paket do jádra Windows, takže Q10 platí i tady a příznak `Forwarding` na adapteru je
+  jediná jaderná pojistka I3. Spike ověří, že ji jádro opravdu dodrží.
+- **WQ3 z kódu (2026-11-07):** `systemops.GetBestInterface(dest, vpnIntf)` přeskočí jen jeden interface, a ten se
+  bere z procesového `vpnInterfaceName`. Když session 1 drží exit node (`0.0.0.0/1` a `128.0.0.0/1` na `wt1`),
+  vybere se pro sockety session 2 `wt1`, protože delší prefix vyhraje nad výchozí routou. Provoz Managementu,
+  Signalu a Relay session 2 by tak šel tunelem session 1. W3 musí přeskakovat všechny interfaces session.
+  Spike to předvede na skutečné tabulce rout.
 - **WQ5:** Zanikne wintun adapter, když daemon spadne? Co udělá `CreateAdapter` s GUID nebo jménem existujícího
   adapteru? Podle odpovědi vznikne `links_windows.go`, nebo zůstane `links_other.go`.
 
