@@ -86,6 +86,10 @@ type UIPreferences struct {
 	// Its false zero value preserves the historical disconnect-on-quit
 	// behaviour for preference files written before the field existed.
 	KeepConnectedOnQuit bool `json:"keepConnectedOnQuit"`
+	// StartupProfiles lists the IDs of the profiles the GUI connects when it
+	// starts on a daemon with concurrent profiles. Never mutated in place, so
+	// the copy Get returns can share it.
+	StartupProfiles []string `json:"startupProfiles,omitempty"`
 }
 
 // LanguageValidator rejects SetLanguage inputs with no shipped bundle.

@@ -42,3 +42,13 @@ func (s *Preferences) SetOnboardingCompleted(_ context.Context, done bool) error
 func (s *Preferences) SetKeepConnectedOnQuit(_ context.Context, keep bool) error {
 	return s.store.SetKeepConnectedOnQuit(keep)
 }
+
+// StartupProfileParams turns connecting a profile when the GUI starts on or off.
+type StartupProfileParams struct {
+	ProfileID string `json:"profileId"`
+	Enabled   bool   `json:"enabled"`
+}
+
+func (s *Preferences) SetStartupProfile(_ context.Context, p StartupProfileParams) error {
+	return s.store.SetStartupProfile(p.ProfileID, p.Enabled)
+}

@@ -3,8 +3,18 @@
 package main
 
 import (
+	"context"
+	"time"
+
+	"github.com/cenkalti/backoff/v4"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/netbirdio/netbird/client/ui/services"
 )
+
+// startupDaemonWait bounds how long the GUI waits for the daemon at start before it gives up on
+// connecting the startup profiles, such as when the service starts with the session.
+const startupDaemonWait = 2 * time.Minute
 
 // cacheSessions keeps the session list of a status snapshot for the Profiles
 // submenu and reports whether it changed. With concurrent profiles a session
@@ -41,4 +51,33 @@ func (t *Tray) profileRowLabel(display, profileID string, sessions []services.Se
 		label += " · " + t.loc.T("tray.profile.conflict", "resource", session.Conflict)
 	}
 	return label
+}
+
+// connectStartupProfiles connects the profiles the user chose to come up with
+// the GUI, once the daemon answers. Only reachability is retried: a profile the
+// daemon refuses would be refused again.
+func (t *Tray) connectStartupProfiles() {
+	if t.svc.Preferences == nil {
+		return
+	}
+	ids := t.svc.Preferences.Get().StartupProfiles
+	if len(ids) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), startupDaemonWait)
+	defer cancel()
+	reachable := func() error {
+		_, err := t.svc.Profiles.ConcurrentProfiles(ctx)
+		return err
+	}
+	if err := backoff.Retry(reachable, backoff.WithContext(backoff.NewExponentialBackOff(), ctx)); err != nil {
+		log.Warnf("startup profiles: daemon not reachable: %v", err)
+		return
+	}
+
+	if err := services.ConnectStartupProfiles(ctx, t.svc.Profiles, t.svc.Connection, t.svc.DaemonFeed, ids); err != nil {
+		log.Errorf("startup profiles: %v", err)
+		t.notifyError(t.loc.T("notify.error.startupProfiles"))
+	}
 }

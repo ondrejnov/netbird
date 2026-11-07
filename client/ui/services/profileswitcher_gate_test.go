@@ -120,3 +120,52 @@ func TestDisconnectOnQuit(t *testing.T) {
 		assert.False(t, req.GetAll(), "a daemon without the gate has one connection and no all")
 	})
 }
+
+// The GUI connects the profiles chosen for its start, without moving the focus, and leaves alone
+// what runs already, what waits for a login and what was removed since.
+func TestConnectStartupProfiles(t *testing.T) {
+	newDaemon := func(gate bool) *switchDaemon {
+		return &switchDaemon{
+			gate: gate,
+			profiles: []*proto.Profile{
+				{Id: "prace"}, {Id: "doma"}, {Id: "chata"}, {Id: "login"},
+			},
+			sessions: []*proto.SessionStatus{
+				{ProfileId: "prace", Status: StatusConnected, Focused: true},
+				{ProfileId: "login", Status: StatusNeedsLogin},
+			},
+		}
+	}
+	run := func(t *testing.T, daemon *switchDaemon, ids []string) {
+		t.Helper()
+		switcher := newSwitcher(t, daemon)
+		require.NoError(t, ConnectStartupProfiles(context.Background(), switcher.profiles, switcher.connection, switcher.feed, ids))
+	}
+
+	t.Run("with the gate", func(t *testing.T) {
+		daemon := newDaemon(true)
+		run(t, daemon, []string{"prace", "doma", "removed", "login", "chata"})
+
+		assert.Equal(t, []string{"Status", "Up doma", "Up chata"}, daemon.calls,
+			"only the idle profiles should be connected, and the focus left alone")
+		for _, up := range daemon.up {
+			assert.NotEmpty(t, up.GetUsername(), "an Up naming a profile carries the user it belongs to")
+			assert.True(t, up.GetAsync(), "the GUI does not wait for each connection")
+		}
+	})
+
+	t.Run("without the gate nothing connects", func(t *testing.T) {
+		daemon := newDaemon(false)
+		run(t, daemon, []string{"doma"})
+		assert.Empty(t, daemon.up, "without the gate an Up would switch the one connection")
+	})
+
+	t.Run("one refused profile does not keep the others down", func(t *testing.T) {
+		daemon := newDaemon(true)
+		daemon.upErr = gstatus.Error(codes.ResourceExhausted, "session limit reached")
+		switcher := newSwitcher(t, daemon)
+		err := ConnectStartupProfiles(context.Background(), switcher.profiles, switcher.connection, switcher.feed, []string{"doma", "chata"})
+		assert.Error(t, err)
+		assert.Len(t, daemon.up, 2, "every chosen profile should be tried")
+	})
+}

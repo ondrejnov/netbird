@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-multierror"
 	log "github.com/sirupsen/logrus"
 
+	nberrors "github.com/netbirdio/netbird/client/errors"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
@@ -134,6 +136,64 @@ func (s *Connection) DownSession(ctx context.Context, p SessionParams) error {
 		return s.classifyDaemonError(err)
 	}
 	return nil
+}
+
+// needsLogin reports whether a session waits for the user to log in, which only a selection of
+// the profile starts.
+func needsLogin(s SessionStatus) bool {
+	return strings.EqualFold(s.Status, StatusNeedsLogin) ||
+		strings.EqualFold(s.Status, StatusLoginFailed) ||
+		strings.EqualFold(s.Status, StatusSessionExpired)
+}
+
+// ConnectStartupProfiles connects the profiles chosen to come up with the GUI. It acts only with
+// the gate, where an Up that names a profile leaves the focus where it is. A profile that runs
+// already or waits for a login is skipped, as is an ID no longer in the profile list. One profile
+// failing, such as on the session limit or a conflict, does not keep the others down.
+func ConnectStartupProfiles(ctx context.Context, profiles *Profiles, conn *Connection, feed *DaemonFeed, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	gate, err := profiles.ConcurrentProfiles(ctx)
+	if err != nil {
+		return fmt.Errorf("read the concurrent profiles gate: %w", err)
+	}
+	if !gate.Enabled {
+		return nil
+	}
+
+	username, err := profiles.Username()
+	if err != nil {
+		return fmt.Errorf("get current user: %w", err)
+	}
+	list, err := profiles.List(ctx, username)
+	if err != nil {
+		return fmt.Errorf("list profiles: %w", err)
+	}
+	st, err := feed.Get(ctx)
+	if err != nil {
+		return fmt.Errorf("get status: %w", err)
+	}
+
+	known := make(map[string]bool, len(list))
+	for _, p := range list {
+		known[p.ID] = true
+	}
+
+	var merr *multierror.Error
+	for _, id := range ids {
+		if !known[id] {
+			continue
+		}
+		if session, ok := st.SessionOf(id); ok && (sessionRuns(session) || needsLogin(session)) {
+			log.Debugf("startup profiles: skipping profile %s in state %s", id, session.Status)
+			continue
+		}
+		if err := conn.Up(ctx, UpParams{ProfileName: id, Username: username}); err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("connect profile %s: %w", id, err))
+		}
+	}
+	return nberrors.FormatErrorOrNil(merr)
 }
 
 // DisconnectOnQuit ends what quitting the UI ends. Without the gate that is the one connection.

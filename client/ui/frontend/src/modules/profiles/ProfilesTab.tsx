@@ -21,6 +21,7 @@ import { pickProfileIcon } from "@/modules/profiles/ProfileAvatar";
 import { Tooltip } from "@/components/Tooltip";
 import {
     DropdownMenu,
+    DropdownMenuCheckboxItem,
     DropdownMenuContent,
     DropdownMenuItem,
     DropdownMenuTrigger,
@@ -36,6 +37,7 @@ import { cn } from "@/lib/cn";
 import { reconcileOrder } from "@/lib/sorting";
 import { errorDialog, formatErrorMessage } from "@/lib/errors";
 import { sessionRuns, sessionStatusLabel, useProfileSessions } from "@/modules/profiles/sessions";
+import { useStartupProfiles } from "@/hooks/useStartupProfiles";
 
 const DEFAULT_PROFILE_ID = "default";
 
@@ -256,6 +258,7 @@ const ProfilesTable = ({
     onDelete,
 }: ProfilesTableProps) => {
     const { t } = useTranslation();
+    const { startup, setStartupProfile } = useStartupProfiles();
     const [focusedIndex, setFocusedIndex] = useState(0);
     const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
@@ -360,6 +363,10 @@ const ProfilesTable = ({
                         onEdit={() => onEdit(profile.id, profile.name)}
                         onDeregister={() => onDeregister(profile.id, profile.name)}
                         onDelete={() => onDelete(profile.id, profile.name)}
+                        connectOnStart={startup.has(profile.id)}
+                        onConnectOnStartChange={(enabled) =>
+                            void setStartupProfile(profile.id, enabled)
+                        }
                     />
                 ))}
             </tbody>
@@ -380,6 +387,8 @@ type ProfileRowProps = {
     onEdit: () => void;
     onDeregister: () => void;
     onDelete: () => void;
+    connectOnStart: boolean;
+    onConnectOnStartChange: (enabled: boolean) => void;
 };
 
 const ProfileRow = ({
@@ -395,6 +404,8 @@ const ProfileRow = ({
     onEdit,
     onDeregister,
     onDelete,
+    connectOnStart,
+    onConnectOnStartChange,
 }: ProfileRowProps) => {
     const { t } = useTranslation();
     const Icon = pickProfileIcon(profile.name) ?? UserCircle;
@@ -455,6 +466,11 @@ const ProfileRow = ({
                     isDefault={profile.id === DEFAULT_PROFILE_ID}
                     isActive={isActive}
                     isRunning={isRunning}
+                    connectOnStart={
+                        concurrentProfiles
+                            ? { enabled: connectOnStart, onChange: onConnectOnStartChange }
+                            : undefined
+                    }
                     rowFocused={isFocused}
                     onSwitch={onSwitch}
                     onEdit={onEdit}
@@ -494,6 +510,7 @@ type RowActionsProps = {
     isDefault: boolean;
     isActive: boolean;
     isRunning: boolean;
+    connectOnStart?: ConnectOnStart;
     rowFocused: boolean;
     onSwitch: () => void;
     onEdit: () => void;
@@ -507,6 +524,7 @@ const RowActions = ({
     isDefault,
     isActive,
     isRunning,
+    connectOnStart,
     rowFocused,
     onSwitch,
     onEdit,
@@ -532,6 +550,7 @@ const RowActions = ({
                 canDeregister={canDeregister}
                 deleteDisabled={deleteDisabled}
                 deleteDisabledReason={deleteDisabledReason}
+                connectOnStart={connectOnStart}
                 rowFocused={rowFocused}
                 onEdit={onEdit}
                 onDeregister={onDeregister}
@@ -541,8 +560,13 @@ const RowActions = ({
     );
 };
 
+// ConnectOnStart is the choice to connect a profile when the GUI starts. It
+// exists only on a daemon with concurrent profiles.
+type ConnectOnStart = { enabled: boolean; onChange: (enabled: boolean) => void };
+
 type RowMoreMenuProps = {
     canDeregister: boolean;
+    connectOnStart?: ConnectOnStart;
     deleteDisabled: boolean;
     deleteDisabledReason: string | null;
     rowFocused: boolean;
@@ -555,6 +579,7 @@ const RowMoreMenu = ({
     canDeregister,
     deleteDisabled,
     deleteDisabledReason,
+    connectOnStart,
     rowFocused,
     onEdit,
     onDeregister,
@@ -587,6 +612,14 @@ const RowMoreMenu = ({
                         <span className={"flex-1"}>{t("profile.selector.edit")}</span>
                     </div>
                 </DropdownMenuItem>
+                {connectOnStart && (
+                    <DropdownMenuCheckboxItem
+                        checked={connectOnStart.enabled}
+                        onCheckedChange={(checked) => connectOnStart.onChange(checked === true)}
+                    >
+                        {t("profile.selector.connectOnStart")}
+                    </DropdownMenuCheckboxItem>
+                )}
                 {canDeregister && (
                     <DropdownMenuItem onClick={onDeregister}>
                         <div className={"flex w-full items-center gap-2"}>

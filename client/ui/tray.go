@@ -215,6 +215,7 @@ func NewTray(app *application.App, window *application.WebviewWindow, svc TraySe
 	// ready earlier (see d23ef34 InvokeSync nil-deref).
 	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		go t.loadProfiles()
+		go t.connectStartupProfiles()
 		go t.refreshRestrictions()
 		go t.runSessionExpiryTicker()
 		// Category registration must run after the notifications service

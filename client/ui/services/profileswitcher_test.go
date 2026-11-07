@@ -28,6 +28,11 @@ type switchDaemon struct {
 	gate     bool
 	sessions []*proto.SessionStatus
 	upErr    error
+	profiles []*proto.Profile
+}
+
+func (d *switchDaemon) ListProfiles(context.Context, *proto.ListProfilesRequest, ...grpc.CallOption) (*proto.ListProfilesResponse, error) {
+	return &proto.ListProfilesResponse{Profiles: d.profiles}, nil
 }
 
 func (d *switchDaemon) GetFeatures(context.Context, *proto.GetFeaturesRequest, ...grpc.CallOption) (*proto.GetFeaturesResponse, error) {

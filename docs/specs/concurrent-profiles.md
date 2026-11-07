@@ -984,6 +984,12 @@ daemonu s gate dál vidí jen `focused` podle 5.7.
 - Ukončení UI bez „Keep connected on quit" posílá s gate `Down{all}`, ne prosté `Down`, které by odpojilo jen
   `focused`. Daemon `all` u neprivilegovaného volajícího omezí na jeho session a sdílenou `default` (5.6), cizí
   session běží dál. Když `GetFeatures` selže, odpojí se jen `focused` jako bez gate.
+- Připojení při startu UI (rozhodnutí vlastníka 2026-11-07): volba „Connect when NetBird starts" v menu profilu v
+  Settings → Profiles, jen s gate, výchozí vypnutá. Seznam ID je v preferencích UI uživatele OS
+  (`startupProfiles`), config profilu ani `sessions.json` se nemění. Po startu UI počká až 2 min na daemon a
+  pošle `Up` se jménem profilu, který s gate focus nepřesune. Přeskočí běžící session, session čekající na login
+  (ten se spouští výběrem profilu, žádné okno prohlížeče při startu) a smazané profily. Odmítnutí jednoho profilu
+  ostatní nezastaví, uživatel dostane notifikaci. Nezávisí na „Connect on startup", ta dál platí pro start služby.
 - Advanced: název interface s gate nejde upravit. Pole ukazuje skutečný interface session ze slotu, config totiž
   nese u každého profilu `wt0` (5.1). Profil s jiným uloženým názvem (`conflict=interface`) dostane nápovědu a
   uložení ho vrátí na `wt0`.

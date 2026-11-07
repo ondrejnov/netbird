@@ -179,6 +179,10 @@
         "message": "Failed to disconnect",
         "description": "Error notification body shown when disconnecting failed."
     },
+    "notify.error.startupProfiles": {
+        "message": "Some profiles could not be connected at startup",
+        "description": "Error notification when the desktop app starts and fails to connect one or more of the profiles chosen to connect at startup."
+    },
     "notify.error.switchProfile": {
         "message": "Failed to switch to {profile}",
         "description": "Error notification shown when switching profiles failed. {profile} is the target profile name; keep it."
@@ -430,6 +434,10 @@
     "profile.selector.delete": {
         "message": "Delete",
         "description": "Per-profile menu action: delete the profile."
+    },
+    "profile.selector.connectOnStart": {
+        "message": "Connect when NetBird starts",
+        "description": "Checkbox in the per-profile menu of Settings → Profiles, shown when several profiles can be connected at once. When on, the desktop app connects this profile each time it starts."
     },
     "profile.selector.switchTo": {
         "message": "Switch to this profile",
