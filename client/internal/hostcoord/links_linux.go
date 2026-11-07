@@ -70,8 +70,9 @@ func VerifyNoSessionLinks(records []SlotRecord) error {
 // RefuseForeignLink refuses a link called name that cannot be the one of a session. Bringing a session
 // up deletes whatever has its name, so a session must not start on top of such a link. A TUN gets
 // closingTunWait to go away: the one of a previous attempt does, and nobody else's may be deleted.
-// Any lookup failure counts as well, as nobody can tell what is there.
-func RefuseForeignLink(ctx context.Context, name string) error {
+// Any lookup failure counts as well, as nobody can tell what is there. The name alone tells the
+// link of the slot on Linux, so the slot is not needed.
+func RefuseForeignLink(ctx context.Context, name string, _ Slot) error {
 	timeout := time.NewTimer(closingTunWait)
 	defer timeout.Stop()
 	poll := time.NewTicker(closingTunPoll)

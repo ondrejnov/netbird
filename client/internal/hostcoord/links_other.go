@@ -1,4 +1,4 @@
-//go:build !linux || android
+//go:build (!linux && !windows) || android
 
 package hostcoord
 
@@ -15,6 +15,6 @@ func VerifyNoSessionLinks([]SlotRecord) error {
 }
 
 // RefuseForeignLink finds nothing to refuse, for the same reason.
-func RefuseForeignLink(context.Context, string) error {
+func RefuseForeignLink(context.Context, string, Slot) error {
 	return nil
 }

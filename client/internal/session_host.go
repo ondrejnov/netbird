@@ -119,7 +119,7 @@ func (h *SessionHost) attach(ctx context.Context, config *profilemanager.Config,
 		return nil, err
 	}
 	// Outside attachMu, the other sessions have nothing to wait for here.
-	if err := hostcoord.RefuseForeignLink(ctx, resources.Interface); err != nil {
+	if err := hostcoord.RefuseForeignLink(ctx, resources.Interface, resources.Slot); err != nil {
 		d.slots.Release(resources.Lease)
 		if ctx.Err() != nil {
 			return nil, err

@@ -84,14 +84,14 @@ func TestRemoveSessionLinksWithoutRecordsTouchesNothing(t *testing.T) {
 func TestRefuseForeignLink(t *testing.T) {
 	enterLinksNetns(t)
 
-	assert.NoError(t, RefuseForeignLink(t.Context(), "wt0"), "a free name")
+	assert.NoError(t, RefuseForeignLink(t.Context(), "wt0", 0), "a free name")
 
 	require.NoError(t, netlink.LinkAdd(&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "wt1"}}))
-	assert.ErrorIs(t, RefuseForeignLink(t.Context(), "wt1"), ErrForeignLink, "a link that is no interface of a session")
+	assert.ErrorIs(t, RefuseForeignLink(t.Context(), "wt1", 0), ErrForeignLink, "a link that is no interface of a session")
 	assert.True(t, linkExists(t, "wt1"), "the check must leave the link")
 
 	addWireguardLink(t, "wt2")
-	assert.NoError(t, RefuseForeignLink(t.Context(), "wt2"), "what a session of a previous attempt can leave")
+	assert.NoError(t, RefuseForeignLink(t.Context(), "wt2", 0), "what a session of a previous attempt can leave")
 }
 
 // addClosingTun creates the TUN of a session that is closing: it goes away with its descriptors.
@@ -135,7 +135,7 @@ func TestRefuseForeignLinkWaitsForAClosingTun(t *testing.T) {
 	timer := time.AfterFunc(200*time.Millisecond, closeTun)
 	t.Cleanup(func() { timer.Stop() })
 
-	assert.NoError(t, RefuseForeignLink(t.Context(), "wt0"), "a TUN that goes away is what a previous attempt leaves")
+	assert.NoError(t, RefuseForeignLink(t.Context(), "wt0", 0), "a TUN that goes away is what a previous attempt leaves")
 	assert.False(t, linkExists(t, "wt0"), "the check should have seen the TUN go")
 }
 
@@ -148,7 +148,7 @@ func TestRefuseForeignLinkKeepsATunThatStays(t *testing.T) {
 	require.NoError(t, err)
 
 	started := time.Now()
-	assert.ErrorIs(t, RefuseForeignLink(t.Context(), "wt0"), ErrForeignLink)
+	assert.ErrorIs(t, RefuseForeignLink(t.Context(), "wt0", 0), ErrForeignLink)
 	assert.GreaterOrEqual(t, time.Since(started), closingTunWait, "the TUN should have had its time to go away")
 
 	after, err := netlink.LinkByName("wt0")
@@ -166,7 +166,7 @@ func TestRefuseForeignLinkStopsWaitingWithItsContext(t *testing.T) {
 	t.Cleanup(func() { timer.Stop(); cancel() })
 
 	started := time.Now()
-	err := RefuseForeignLink(ctx, "wt0")
+	err := RefuseForeignLink(ctx, "wt0", 0)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.NotErrorIs(t, err, ErrForeignLink, "nothing is known about the link yet")
 	assert.Less(t, time.Since(started), closingTunWait, "the wait should end with the context")
