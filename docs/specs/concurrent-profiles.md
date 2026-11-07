@@ -896,7 +896,8 @@ konflikt tak ze stavu zmizel. Stávající testy Windows DNS (slot 0) procházej
 NRPT se slotem netestováno. `removeEmptyGPOPolicyStore` při stopu jedné session může smazat prázdné úložiště, do
 kterého druhá session s `gpo=true` zapisuje, ta ho při dalším zápisu vytvoří znovu. S `NB_DNS_STATE_FILE`
 sdílí profily jeden state soubor, po pádu se tak uklidí jen slot posledního zápisu, ostatní klíče zmizí s
-restartem. Search list je per adapter, sdílenou search doménu proto Windows zkusí přes obě session.
+restartem. Session bez domény ji vynechá i ze search listu svého adapteru, krátké jméno se tak doplní jen
+přípony vlastníka.
 
 **Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
 I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
