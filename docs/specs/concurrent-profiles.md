@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04, R1 až R6 viz 2.2. **F1 až F3 jsou sloučené v `multi-profile`** (F1 PR 1 až 8, F2 PR 9 až 11, F3 PR 12 až 19 včetně `f3/residual-links`, `f3/flow-filter`, `f3/security-fixes`, `f3/e2e-docs` a `f3/final-fixes`), poznatky v 2.3 až 2.5. Brána v1 prošla 2026-11-05. **F4:** dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md). Kritérium 5.8 je změřené, limit zůstává 4. Vlastník 2026-11-06 rozhodl tři otázky z 2.5, viz „Rozhodnutí vlastníka 2026-11-06". Testy souběžných profilů v CI pro macOS, Windows a FreeBSD opravuje `ci/portability`, viz 2.5. Linuxový CI opravuje `ci/linux-runner`: privilegované testy běží ve vlastním netns, scale testy jen s `NB_TEST_SCALE=true`, viz 2.5. **Do zapnutí gate v provozu zbývá:** zbylé otázky v 2.3 a 2.5, ověření `service install` a `reconfigure` s gate pod skutečným init systémem, DNS backendů systemd-resolved a NetworkManager na skutečném hostiteli (Q8), testu přepínače UI mimo harness (PR 16) a sestavení balíčku `netbird-multiprofile` (PR 18) |
+| **Stav** | Rozhodnutí D1 až D6 schválena 2026-11-04, R1 až R6 viz 2.2. **F1 až F3 jsou sloučené v `multi-profile`** (F1 PR 1 až 8, F2 PR 9 až 11, F3 PR 12 až 19 včetně `f3/residual-links`, `f3/flow-filter`, `f3/security-fixes`, `f3/e2e-docs` a `f3/final-fixes`), poznatky v 2.3 až 2.5. Brána v1 prošla 2026-11-05. **F4:** dokumentace je v [concurrent-profiles.md](../concurrent-profiles.md). Kritérium 5.8 je změřené, limit zůstává 4. Vlastník 2026-11-06 rozhodl tři otázky z 2.5, viz „Rozhodnutí vlastníka 2026-11-06". Testy souběžných profilů v CI pro macOS, Windows a FreeBSD opravuje `ci/portability`, viz 2.5. Linuxový CI opravuje `ci/linux-runner`: privilegované testy běží ve vlastním netns, scale testy jen s `NB_TEST_SCALE=true`, viz 2.5. **Do zapnutí gate v provozu zbývá:** zbylé otázky v 2.3 a 2.5, ověření `service install` a `reconfigure` s gate pod skutečným init systémem, DNS backendů systemd-resolved a NetworkManager na skutečném hostiteli (Q8), testu přepínače UI mimo harness (PR 16) a sestavení balíčku `netbird-multiprofile` (PR 18). **Windows:** rozhodnutí W1 až W3 z 2026-11-07 a plán fáze W, viz 2.6 |
 | **Cíl** | Vlastní fork, nikoli upstream. Upstream [#446](https://github.com/netbirdio/netbird/issues/446) slouží jen jako zdroj informací. Závazný návrh je tento dokument |
 | **Výchozí commit** | `3c996c91d`; odkazy `soubor:řádek` platí pro něj, před použitím je ověř. Poslední sloučený upstream: `313f71fb4` |
 | **Fork** | <https://github.com/ondrejnov/netbird> |
@@ -744,6 +744,46 @@ Userspace WireGuard, nftables (iptables se liší jen ve stejném rozsahu jako v
 - **Link s explicitním `WgIface` po pádu:** vyřešeno odmítnutím v `f3/security-fixes`, viz otázky k revizi. Zůstává link z běhu před zapnutím gate, ten v `sessions.json` není.
 - **Cizí WireGuard na jméně slotu:** typ a jméno ho od zbytku po pádu neodliší, start ho smaže. Odlišit by šel porovnáním veřejného klíče zařízení s klíčem profilu, nečitelný config by pak ale znamenal živý link bez izolace nebo odmítnutí startu. Rozhoduje vlastník.
 
+### 2.6 Windows (rozhodnutí vlastníka 2026-11-07)
+
+Rozšíření za v1 podle 8 „Po v1". Platí sekce 5 až 7, pokud tato sekce neříká jinak. Slot 0 zůstává bajt po bajtu
+shodný s dneškem a bez gate se Windows klient chová jako dnes (I1).
+
+| # | Otázka | Rozhodnutí |
+|---|---|---|
+| W1 | Rozhraní | **Jen CLI**, stejně jako D6. Tray UI beze změny, s gate přepíná jen `focused` |
+| W2 | Identita adapteru | **GUID a jméno ze slotu.** Slot 0 má dnešní GUID `{f2f29e61-…}` (nebo `CustomWindowsGUIDString`) a jméno `wt0`. Slot N má `uuid.NewSHA1(<GUID slotu 0>, "slot-N")` a jméno `wtN`. Úklid po pádu tak stačí `sessions.json`, bez čtení profilů |
+| W3 | Distribuce | **Jen ruční build** s tagem `multiprofile`, auto-update vypnutý (2.1). Instalátor forku je mimo rozsah |
+
+**Pojmenování prostředků slotu N (slot 0 beze změny):**
+
+| Prostředek | Slot 0 | Slot N |
+|---|---|---|
+| Wintun adapter | `wt0`, GUID slotu 0 | `wtN`, GUID podle W2 |
+| netsh pravidla | `Netbird`, `Netbird-v6` | `Netbird-N`, `Netbird-N-v6`. Mazání jen podle přesného jména |
+| NRPT klíče | `NetBird-Match-*`, `NetBird-ExemptLocal` | `NetBirdS<N>-Match-*`, `NetBirdS<N>-ExemptLocal`. Prefix úmyslně nezačíná `NetBird-`, aby je úklid slotu 0 podle prefixu nesmazal |
+| Zámek `sessions.json` | `LockFileEx` místo `flock` | totéž |
+
+**Návrh izolace I3 a I4 (ověří W0):** Windows nemá nativní backend ve smyslu Q9, proto platí řádek „Bez nativního
+firewallu" ze sekce 7 (`uspfilter` a forwarder, session s vypnutým firewallem se odmítne). Navíc `SessionIsolation`
+na každém adapteru session nastaví a ověří `Forwarding=Disabled` a `WeakHostReceive`/`WeakHostSend=Disabled`
+(`SetIpInterfaceEntry`). To je jaderná pojistka proti tranzitu a weak host modelu. Pokud W0 ukáže, že nestačí,
+návrh se před W2 vrátí vlastníkovi.
+
+**Testy:** privilegované testy na Windows běží jen v CI (`golang-test-windows.yml`, tag `privileged`, jednorázový
+runner) nebo ve VM. Na pracovní stanici se nespouští ani `netbird up`, ani privilegované testy. E2E harness je
+linuxový, akceptační scénář na Windows se ověřuje ručně ve VM a výsledek se zapíše sem.
+
+**Otevřené otázky pro W0:**
+
+- **WQ1:** Používá uspfilter na Windows někdy `nativeRouter`? Pokud ano, platí Q10 a session s vypnutými server
+  routes se odmítne.
+- **WQ2:** NRPT se stejným namespace ze dvou slotů (např. `netbird.cloud`): které pravidlo vyhraje a je výběr
+  stabilní? Do odpovědi platí politika sekce 6, jeden vlastník a varování.
+- **WQ3:** Advanced routing (`IP_UNICAST_IF`) se dvěma adaptery: vybere výchozí interface pro nbnet sockety
+  správně, když `vpnInterfaceName` nahradí množina interfaces všech session?
+- **WQ4:** Stejný prefix na dvou adapterech s různou metrikou: rozhoduje jen metrika, nebo i pořadí vložení?
+
 ## 3. Architektura: proč jeden daemon
 
 Komunita v #446 navrhuje N samostatných daemonů, protože to vyžaduje méně změn v RPC a
@@ -1172,6 +1212,19 @@ Před zapnutím gate v provozu proběhne bezpečnostní revize I3 až I6 a oprá
 Dokumentace ve forku: zapnutí gate, známá omezení ze sekce 6 a 5.7, řešení konfliktu overlay sítí.
 **Hotovo 2026-11-05:** [concurrent-profiles.md](../concurrent-profiles.md).
 
+### W: Windows (CLI, za gate)
+
+Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
+
+| PR | Obsah | Hotovo, když |
+|---|---|---|
+| W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ4 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte |
+| W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu (`links_windows.go`) | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
+| W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne |
+| W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu |
+| W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník |
+| W5 | Gate povolí Windows, testy gate a CLI, ruční akceptační scénář ve VM | Akceptační scénář z 1 projde na Windows ve VM |
+
 ### Po v1 (vyžaduje nové rozhodnutí)
 
 - **Zrušení limitu:** podle kritéria v 5.8.
@@ -1179,7 +1232,7 @@ Dokumentace ve forku: zapnutí gate, známá omezení ze sekce 6 a 5.7, řešen�
   Go: `client/ui/tray*.go`, `client/ui/services/{daemon_feed,profileswitcher,connection}.go`.
   Frontend: `contexts/{Profile,Status,Networks}Context.tsx`, `lib/connection.ts`.
 - **macOS:** názvy `utun`, scutil se slotem, `flushScopedDefaults`, `boundIface` refcount, split `/1`.
-- **Windows:** GUID z `SessionKey`, netsh pravidla, NRPT, `vpnInterfaceName` jako množina, route cache.
+- **Windows:** rozhodnuto 2026-11-07, viz 2.6 a fáze W.
 - **FreeBSD:** route flagy a marked flush.
 - **DNS:** fan-out resolver pro sdílené domény jako `netbird.cloud`.
 
