@@ -825,6 +825,24 @@ Adapter, který zmizí mezi výpisem a dotazem na GUID, se přeskočí. Linux sl
 s vlastníkovým souhlasem proběhly na pracovní stanici (jen adaptery, bez rout a DNS). Mutace bez čekání je shodí
 na `ERROR_ALREADY_EXISTS` při vytváření adapteru. Lint a `-race` stále neproběhly (chybí `golangci-lint` a `gcc`).
 
+**Rozhodnutí vlastníka 2026-11-07 (W2):** příznaky adapteru se **nepočítají** jako jaderná izolace ve smyslu Q9.
+`SessionAddResult.Kernel` je na Windows vždy false, takže session s `DisableFirewall` i session s vypnutými server
+routes (Q10) se odmítnou. Důvod: příznaky může kdokoli na hostiteli zapnout (ICS, `Set-NetIPInterface`) a izolační
+watch to zjistí až při další kontrole.
+
+**W2 (2026-11-07):** `firewall/session_windows.go` a `session_flags_windows.go`. `Add` session jen zapíše, protože
+adapter ještě neexistuje. `NewSessionFirewall` (engine ho volá po vytvoření interfacu a před `Up`) adapter slotu najde
+podle GUID slotu, ne podle jména, a vypne na něm `Forwarding`, `WeakHostSend` a `WeakHostReceive` pro IPv4 i IPv6.
+Selhání znamená odmítnutí. `Verify` příznaky kontroluje, `Restore` je znovu vypne. Nepřítomný adapter (zavřený
+enginem před `Remove`) se nekontroluje, protože nic nedoručí. Firewall je uspfilter se zdrojem izolace session
+a netsh pravidly `Netbird-N`/`Netbird-N-v6`. Slot N při `Apply` nahradí pravidlo stejného jména, protože po pádu
+může nést starou adresu. Slot 0 se chová jako dnes. `RemoveResidualSessionIsolation` nic nedělá.
+**Známé omezení:** pravidlo `Netbird-N` slotu, který se po pádu už nepřipojí, zůstane do příštího startu toho slotu
+(povoluje příchozí provoz na starou overlay adresu). Testy: unit testy s falešnými příznaky,
+`TestSessionIsolation_AdapterFlags` se skutečným adapterem na slotu 63 (proběhl na stanici, jen adapter). Mutace
+vypnuté kontroly ho shodí. Android `go build ./client/firewall/...` padá na `nftables` a `iptables` stejně na základním
+commitu, balíčky klienta pro Android se staví.
+
 **Výsledky W0 (2026-11-07, pracovní stanice bez WQ3):** podrobně v [concurrent-profiles-w0.md](concurrent-profiles-w0.md).
 I3 a I4 jádro vynucuje příznaky vstupního adapteru, výchozí stav wintun izoluje. NRPT: pro namespace platí jen
 abecedně první klíč, bez přepadu na druhé pravidlo. WQ4: nižší metrika, při shodě dřív přidaná routa. WQ5: adapter
@@ -1267,7 +1285,7 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
 |---|---|---|
 | W0 | Spike ve VM, žádný produkční kód. Dva wintun adaptery, NRPT, netsh, routy a strong host model, odpovědi WQ1 až WQ5 do `concurrent-profiles-w0.md` | Vlastník zprávu přečte. **2026-11-07 proběhl na pracovní stanici bez WQ3, viz [concurrent-profiles-w0.md](concurrent-profiles-w0.md). Zbývá WQ3 ve VM** |
 | W1 | `hostcoord`: `LockFileEx` pro `sessions.json`, GUID a jméno adapteru ze slotu, úklid adapterů slotů po pádu podle WQ5. **Hotovo v `win/hostcoord`:** zámek, GUID a `RefuseForeignLink` pro Windows. Úklid po pádu podle W0 odpadá | Restart zachová slot i GUID, zbylý adapter slotu se smaže, cizí adapter zůstane |
-| W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne |
+| W2 | Firewall: netsh pravidla podle slotu, `SessionIsolation` a `NewSessionFirewall` pro Windows | Stop slotu 1 nechá pravidla slotu 0, session s vypnutým firewallem se odmítne. **Hotovo v `win/hostcoord`** |
 | W3 | Routing: `vpnInterfaceName` jako množina, sdílené routy s vlastnictvím a vlastník exit nodu na Windows | Stop jedné session nezmění routy druhé, předání vlastnictví prefixu |
 | W4 | DNS: NRPT klíče podle slotu, vlastník catch-all, úklid po pádu | Stop slotu 1 nechá NRPT slotu 0, catch-all má jen vlastník |
 | W5 | Gate povolí Windows, testy gate a CLI, ruční akceptační scénář ve VM | Akceptační scénář z 1 projde na Windows ve VM |
