@@ -8,6 +8,8 @@ import { Label } from "@/components/typography/Label";
 import { SectionGroup, SettingsBottomBar } from "@/modules/settings/SettingsSection.tsx";
 import { useSettings } from "@/contexts/SettingsContext.tsx";
 import { useRestrictions } from "@/contexts/RestrictionsContext.tsx";
+import { useProfile } from "@/contexts/ProfileContext.tsx";
+import { useProfileSessions } from "@/modules/profiles/sessions";
 
 // macOS daemon/CLI only accept utun<N> (Darwin parses digits as the utun unit); Linux caps at IFNAMSIZ-1 = 15 chars.
 const IS_MAC = System.IsMac();
@@ -26,15 +28,25 @@ const MTU_MAX = 8192;
 
 const PSK_MASK = "**********";
 
+// With concurrent profiles the stored default asks for the name of the slot
+// (wt0, wt1, ...), and any other stored name keeps the profile from starting.
+const SLOT_INTERFACE_NAME = "wt0";
+
 export function SettingsAdvanced() {
     const { t } = useTranslation();
     const { config, saveFields } = useSettings();
     const { mdm } = useRestrictions();
+    const { concurrentProfiles, activeProfileId } = useProfile();
+    const session = useProfileSessions().get(activeProfileId);
+    // A fixed name is offered for reset rather than for editing: the daemon
+    // refuses it with conflict=interface.
+    const fixedInterfaceName = concurrentProfiles && config.interfaceName !== SLOT_INTERFACE_NAME;
+    const initialInterfaceName = concurrentProfiles ? SLOT_INTERFACE_NAME : config.interfaceName;
 
     const initialPsk = config.preSharedKeySet ? PSK_MASK : "";
 
     const [values, setValues] = useState({
-        interfaceName: config.interfaceName,
+        interfaceName: initialInterfaceName,
         wireguardPort: config.wireguardPort,
         mtu: config.mtu,
     });
@@ -44,12 +56,12 @@ export function SettingsAdvanced() {
 
     useEffect(() => {
         setValues({
-            interfaceName: config.interfaceName,
+            interfaceName: initialInterfaceName,
             wireguardPort: config.wireguardPort,
             mtu: config.mtu,
         });
         setPskInputValue(config.preSharedKeySet ? PSK_MASK : "");
-    }, [config.interfaceName, config.wireguardPort, config.mtu, config.preSharedKeySet]);
+    }, [initialInterfaceName, config.wireguardPort, config.mtu, config.preSharedKeySet]);
 
     const errors = useMemo(() => {
         const out: { interfaceName?: string; wireguardPort?: string; mtu?: string } = {};
@@ -100,17 +112,38 @@ export function SettingsAdvanced() {
     return (
         <>
             <SectionGroup title={t("settings.advanced.section.interface")}>
-                <Input
-                    label={t("settings.advanced.interfaceName.label")}
-                    dir={"ltr"}
-                    value={values.interfaceName}
-                    error={errors.interfaceName}
-                    onChange={(e) => setValues((v) => ({ ...v, interfaceName: e.target.value }))}
-                    spellCheck={false}
-                    autoComplete={"off"}
-                    autoCorrect={"off"}
-                    autoCapitalize={"off"}
-                />
+                {concurrentProfiles ? (
+                    <div>
+                        <Input
+                            label={t("settings.advanced.interfaceName.label")}
+                            dir={"ltr"}
+                            readOnly
+                            value={session?.interfaceName ?? ""}
+                            placeholder={t("settings.advanced.interfaceName.slotPlaceholder")}
+                        />
+                        <HelpText className={"mt-1.5"}>
+                            {fixedInterfaceName
+                                ? t("settings.advanced.interfaceName.slotFixed", {
+                                      name: config.interfaceName,
+                                  })
+                                : t("settings.advanced.interfaceName.slotHelp")}
+                        </HelpText>
+                    </div>
+                ) : (
+                    <Input
+                        label={t("settings.advanced.interfaceName.label")}
+                        dir={"ltr"}
+                        value={values.interfaceName}
+                        error={errors.interfaceName}
+                        onChange={(e) =>
+                            setValues((v) => ({ ...v, interfaceName: e.target.value }))
+                        }
+                        spellCheck={false}
+                        autoComplete={"off"}
+                        autoCorrect={"off"}
+                        autoCapitalize={"off"}
+                    />
+                )}
                 <div className={mdm.wireguardPort ? "" : "grid grid-cols-2 gap-4"}>
                     {!mdm.wireguardPort && (
                         <div>

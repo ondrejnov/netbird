@@ -981,6 +981,9 @@ daemonu s gate dál vidí jen `focused` podle 5.7.
   session je jen v okně, v tray přes focus a Disconnect.
 - Okno: dropdown profilů ukazuje stav, interface a konflikt a má tlačítko Odpojit u běžící session. V Settings →
   Profiles je stav jako odznak a smazání ani deregistrace běžící session nejde, daemon by je odmítl.
+- Advanced: název interface s gate nejde upravit. Pole ukazuje skutečný interface session ze slotu, config totiž
+  nese u každého profilu `wt0` (5.1). Profil s jiným uloženým názvem (`conflict=interface`) dostane nápovědu a
+  uložení ho vrátí na `wt0`.
 
 **Ověřeno:** `TestGate_StatusStreamHearsEverySession` (session před i po přihlášení streamu, bez opravy selže),
 `TestProfileSwitcher_Gate*` a `TestConnection_DownSessionNamesTheProfile` (bez větve `switchFocus` selžou),
