@@ -76,6 +76,11 @@ type RouteClaim struct {
 	Remove func() error
 	// Notify receives the warnings for this claim. It may be nil.
 	Notify RouteEventFunc
+	// RemoveOnHandover means the route through Dev stays when another session installs the
+	// prefix, as on Windows, where every interface has routes of its own and the one added
+	// first wins at equal metric. Its Remove then runs once the next owner has installed, so
+	// the prefix never falls through to the physical default in between.
+	RemoveOnHandover bool
 }
 
 // RouteResult reports where a prefix went after Add.
@@ -422,6 +427,14 @@ func releaseOwner(prefix netip.Prefix, claims *prefixClaims, keepOnFailure bool)
 
 	notices, _ := promote(prefix, claims, nil)
 	if claims.owner != nil {
+		if !previous.RemoveOnHandover {
+			return notices, nil
+		}
+		// The next owner carries the prefix already. A route left here would keep winning
+		// over it, so the failure is returned; the claim has moved on regardless.
+		if err := previous.Remove(); err != nil {
+			return notices, fmt.Errorf("remove route of %s after handover: %w", previous.Dev, err)
+		}
 		return notices, nil
 	}
 

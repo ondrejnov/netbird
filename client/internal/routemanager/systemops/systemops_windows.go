@@ -203,6 +203,11 @@ func (r *SysOps) SetupRouting(initAddresses []net.IP, stateManager *statemanager
 }
 
 func (r *SysOps) CleanupRouting(stateManager *statemanager.Manager, advancedRouting bool) error {
+	if r.sharedRoutes != nil {
+		if err := r.releaseSharedRoutes(); err != nil {
+			return err
+		}
+	}
 	if advancedRouting {
 		return nil
 	}

@@ -89,16 +89,16 @@ type SysOps struct {
 	coordinator *hostcoord.Coordinator
 	sessionKey  hostcoord.SessionKey
 	// sharedRoutes decides which session carries a prefix of the shared table. When
-	// nil, routes go straight to the kernel. Only Linux uses it.
-	//nolint:unused // only used on Linux
+	// nil, routes go straight to the kernel. Only Linux and Windows use it.
+	//nolint:unused // only used on Linux and Windows
 	sharedRoutes *hostcoord.Routes
-	//nolint:unused // only used on Linux
+	//nolint:unused // only used on Linux and Windows
 	sharedRouteEvents hostcoord.RouteEventFunc
 	// otherOverlays lists the overlay prefixes of the other sessions. When nil, only the
 	// own overlay is refused.
 	otherOverlays overlayPrefixSource
 	// overlayRefusals holds the routes the session was warned about, see warnOverlayRouteRefused.
-	//nolint:unused // only used on Linux
+	//nolint:unused // only used on Linux and Windows
 	overlayRefusals sync.Map
 	// originalSysctl stores the sysctl values from before this instance changed them.
 	//nolint:unused // only used on Linux
@@ -116,8 +116,8 @@ func New(wgInterface wgIface, notifier *notifier.Notifier) *SysOps {
 }
 
 // NewShared returns a SysOps that shares the routing base with the other sessions
-// of coordinator instead of owning it. Only Linux honors the coordinator and the
-// options.
+// of coordinator instead of owning it. Linux honors the coordinator and the options,
+// Windows the shared routes and the overlay prefixes, as it has no routing base.
 func NewShared(wgInterface wgIface, notifier *notifier.Notifier, coordinator *hostcoord.Coordinator, key hostcoord.SessionKey, opts ...SharedOption) *SysOps {
 	r := New(wgInterface, notifier)
 	r.coordinator = coordinator
