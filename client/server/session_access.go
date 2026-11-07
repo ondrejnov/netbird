@@ -32,6 +32,9 @@ type sessionCaller struct {
 	identified bool
 	lookupUID  func(username string) (uint32, error)
 	accounts   func() ([]hostAccount, error)
+	// accountName and windowsAccounts are the account database of a Windows host.
+	accountName     func(sid string) (string, error)
+	windowsAccounts func() ([]windowsAccount, error)
 }
 
 // hostAccount is an account in the account database of the host.
@@ -50,7 +53,22 @@ func (s *Server) callerOf(ctx context.Context) sessionCaller {
 	if accounts == nil {
 		accounts = localAccounts
 	}
-	return sessionCaller{id: id, identified: identified, lookupUID: lookup, accounts: accounts}
+	accountName := s.accountNameFn
+	if accountName == nil {
+		accountName = windowsAccountName
+	}
+	windowsAccounts := s.windowsAccountsFn
+	if windowsAccounts == nil {
+		windowsAccounts = localWindowsAccounts
+	}
+	return sessionCaller{
+		id:              id,
+		identified:      identified,
+		lookupUID:       lookup,
+		accounts:        accounts,
+		accountName:     accountName,
+		windowsAccounts: windowsAccounts,
+	}
 }
 
 // mayReach reports whether the caller may control and read the session of key: its own and the
@@ -87,8 +105,11 @@ func (c sessionCaller) owns(username string) bool {
 // holdsAccount reports whether username names the caller. A name that is no account counts as the
 // numeric identity of a user without one, which is what the CLI sends for it.
 func (c sessionCaller) holdsAccount(username string) bool {
-	if username == "" || c.id.IsWindows() {
+	if username == "" {
 		return false
+	}
+	if c.id.IsWindows() {
+		return c.holdsWindowsAccount(username)
 	}
 	uid, err := c.lookupUID(username)
 	if err == nil {
@@ -107,6 +128,9 @@ func (c sessionCaller) holdsAccount(username string) bool {
 // would have different sessions on the same files, keys included. Only a privileged caller can reach
 // such a directory. It runs on every read of a status, so the refusal stays at debug level.
 func (c sessionCaller) aloneInDirectory(username string) bool {
+	if c.id.IsWindows() {
+		return c.aloneInWindowsDirectory(username)
+	}
 	if profilemanager.SanitizedUsername(username) != username {
 		log.Debugf("denying access to the profiles of %s for an unprivileged caller: the name of their directory differs from the name of the account", username)
 		return false

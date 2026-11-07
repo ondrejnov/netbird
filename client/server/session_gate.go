@@ -76,6 +76,9 @@ type sessionSet struct {
 	// production leaves them nil.
 	lookupUIDFn func(username string) (uint32, error)
 	accountsFn  func() ([]hostAccount, error)
+	// accountNameFn and windowsAccountsFn do the same for a Windows host.
+	accountNameFn     func(sid string) (string, error)
+	windowsAccountsFn func() ([]windowsAccount, error)
 }
 
 func newSessionSet(concurrentProfiles bool) sessionSet {
