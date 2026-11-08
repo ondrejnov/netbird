@@ -12,7 +12,7 @@ import (
 
 // TestNRPTSession is a session sharing the NRPT with others.
 type TestNRPTSession struct {
-	manager *nrptHostManager
+	manager *ownedDomainsHostManager
 	rules   *recordedRules
 }
 
@@ -50,7 +50,7 @@ var errTestRules = testRulesError{}
 func NewTestNRPTSession(coordinator HostDNSCoordinator) *TestNRPTSession {
 	rules := &recordedRules{}
 	return &TestNRPTSession{
-		manager: &nrptHostManager{hostManager: rules, coordinator: coordinator},
+		manager: &ownedDomainsHostManager{hostManager: rules, coordinator: coordinator},
 		rules:   rules,
 	}
 }
@@ -68,7 +68,7 @@ func NewTestRegistrySession(t *testing.T, guid string, slot uint32, coordinator 
 	configurator, err := newRegistryConfigurator(&registryConfigurator{guid: guid, slot: slot, strict: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = configurator.removeDNSMatchPolicies() })
-	return &TestNRPTSession{manager: &nrptHostManager{hostManager: configurator, coordinator: coordinator}}
+	return &TestNRPTSession{manager: &ownedDomainsHostManager{hostManager: configurator, coordinator: coordinator}}
 }
 
 // Apply applies config as the DNS server would.

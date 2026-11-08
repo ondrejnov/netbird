@@ -1001,6 +1001,67 @@ golangci-lint na dotčených balíčcích pro Windows i Linux, `tsc`, eslint, ko
 (PR 16) platí dál. `TestCleanState_NilConnectClient` a `TestDeleteState_NilConnectClient` padají na Windows i na
 základním `win/hostcoord`.
 
+### 2.8 macOS (zadání vlastníka 2026-11-08)
+
+Rozšíření za v1 podle 8 „Po v1". Vlastník zadal podporu macOS 2026-11-08, rozhodnutí M1 až M4 vznikla při
+implementaci podle vzoru Windows a čekají na potvrzení. Slot 0 zůstává bajt po bajtu shodný s dneškem a bez gate se
+klient chová jako dnes (I1). Větev `mac/hostcoord` z `main`.
+
+| # | Otázka | Rozhodnutí |
+|---|---|---|
+| M1 | Jméno interfacu | **`utun` s číslem jednotky ze slotu.** Slot 0 má dnešní `utun100`, slot N `utun(100+N)`. Jméno utun nese jen číslo jednotky, prefix `wt` na macOS nejde |
+| M2 | Izolace I3 a I4 | **Jen userspace firewall.** macOS nemá přepínač forwardingu ani weak host modelu po interfacech (`net.inet.ip.forwarding` a `check_interface` jsou globální). Každý paket session projde jejím uspfilterem dřív, než ho uvidí jádro. `SessionAddResult.Kernel` je vždy false, takže session s `DisableFirewall` i s vypnutými server routes (Q10) se odmítne, stejně jako na Windows |
+| M3 | Distribuce | **Jen ruční build** s tagem `multiprofile` (CLI i UI), auto-update vypnutý (2.1, `supported_darwin.go`). Balíček `.pkg` forku je mimo rozsah |
+| M4 | Rozhraní | **CLI a desktop UI podle 2.7.** UI zjišťuje gate z `GetFeatures`, na macOS proto funguje beze změny kódu UI |
+
+**Pojmenování prostředků slotu N (slot 0 beze změny):**
+
+| Prostředek | Slot 0 | Slot N |
+|---|---|---|
+| Interface | `utun100` | `utun(100+N)` |
+| Klíče scutil | `State:/Network/Service/NetBird-<Match\|Search\|Local>[-i]/DNS` | `State:/Network/Service/NetBirdS<N>-…/DNS`. Úklid bez záznamu klíčů hledá jen celé klíče svého slotu |
+| Scoped defaulty (`RTF_IFSCOPE`, `RTF_PROTO1`) | sdílené | sdílené, drží je `Coordinator.AcquireRoutingBase` |
+
+**Implementace (`mac/hostcoord`):**
+
+- **Firewall:** `firewall/session_darwin.go`. `SessionIsolation` jen eviduje členy, `NewSessionFirewall` staví uspfilter
+  s `IsolationSource` a odmítne session bez userspace bindu, bez zdroje izolace, mimo izolaci a s vypnutými server routes.
+- **Routing, základna:** scoped defaulty a bound interface (`IP_BOUND_IF`) slouží socketům všech session. Drží je
+  koordinátor, poslední session je odstraní (`releaseSharedScopedDefaults`). Session, která se k nim připojí, je
+  přeinstaluje jen tehdy, když se fyzický default změnil (`scopedDefaultsCurrent`), protože se session po změně sítě
+  restartuje. Původně je přeinstalovala každá session: flush smazal defaulty pod ostatními, jejich network monitor to
+  vzal jako změnu sítě a restartoval engine, který je smazal zase jim. Dvě session se tak dokola odpojovaly (zjištěno
+  živě 2026-11-08). Monitor navíc ignoruje smazání scoped defaultu se značkou NetBirdu
+  (`IgnoreRemovedDefaultRoute`), skutečnou změnu pozná podle nescopovaného defaultu. Flush a instalaci serializuje
+  `scopedDefaultsMu`.
+- **Routing, fyzický default:** dotaz na nespecifikovanou adresu trefí split `/1` exit nodu, který už může být na
+  interfacu jiné session. `physicalDefaultNexthop` pak vezme nescopovanou routu `0/0` z tabulky. Link-local brána má na
+  macOS scope ve druhém 16bitovém slově adresy (KAME), `embeddedZoneToZone` ji převede do zóny.
+- **Routing, sdílené prefixy:** logika vlastnictví z Windows je v `systemops_sharedroutes_parts.go`, platformní kroky
+  v `systemops_sharedroutes_{windows,darwin}.go`. Tabulka macOS drží jednu nescopovanou routu na prefix, proto
+  `RemoveOnHandover` je false a nový vlastník routu předchozího **nahradí** (smaže a přidá, jako replace na Linuxu).
+  Nahradí jen routu na interfacu jiné session. Cizí routu pro stejný prefix (typicky připojenou LAN) nechá, jen
+  varuje a přidání **neselže**: chyba aktualizace rout by zrušila DNS batch (`CancelBatch`), takže by se do scutil
+  nezapsaly match domény doménových rout a ty by nefungovaly. Zjištěno živě 2026-11-08 (síťová routa `10.0.0.0/24`
+  na Macu v téže LAN). Bez gate má upstream stejnou chybu, ta se nemění. Odebrání maže jen routu na
+  vlastním interfacu, protože `RTM_DELETE` jmenuje jen prefix a jinak by smazalo routu nového vlastníka.
+- **DNS:** `host_coordination_darwin.go`. Klíče podle slotu, `ShutdownState.Slot`, a obal vlastníků domén z Windows
+  (`ownedDomainsHostManager`, dřív `nrptHostManager`): každá doména i catch-all má jednoho vlastníka, jen ten zapisuje
+  klíč. Odstranění starých klíčů s gate apply selže místo varování (`strict`).
+- **Vlastník session:** kontrola sdíleného adresáře profilů (`aloneInDirectory`) četla účty z `/etc/passwd`, kde na
+  macOS běžní uživatelé nejsou, takže by kolizi jmen neviděla. `hostAccounts` na macOS bere účty z Open Directory
+  (`dscl /Search -list /Users UniqueID`), a když výpis selže, kontrola odmítne. `user.Lookup` na macOS funguje i bez
+  cgo (Go volá libSystem), tam změna není.
+- **Gate:** `concurrentProfilesOSes` obsahuje `darwin`.
+
+**Ověřeno:** cross `go vet` pro darwin, windows, linux a ios. Na Macu (macOS 12.7, Intel) neprivilegované testy
+`hostcoord`, `firewall`, `systemops`, `server` (celý balíček včetně gate testů, dřív na macOS skip) a `net` prošly.
+V `dns` selhává jen `TestMatchDomainBatching`, který zapisuje do scutil a bez roota neprojde.
+**Ověřeno živě (2026-11-08):** dvě session (`home`, `prace`) na Macu běží souběžně bez restartů enginu, doménové routy `www.mojeip.cz` a `ifconfig.me` přes
+routing peer jdou tunelem, síťová routa shodná s LAN se přeskočí. Privilegované `TestSharedRoutes_*` prošly pod
+rootem, test cizí routy bez opravy selže. **Neověřeno:** `TestSharedScopedDefaults_*` (jeho úklid smaže scoped
+defaulty běžícího daemonu, pouštět jen bez něj), scutil testy pod rootem, akceptační scénář se dvěma session, exit node v jedné session při startu druhé (`physicalDefaultNexthop` s fallbackem), IPv6.
+
 ## 3. Architektura: proč jeden daemon
 
 Komunita v #446 navrhuje N samostatných daemonů, protože to vyžaduje méně změn v RPC a
@@ -1449,7 +1510,7 @@ Rozhodnutí v 2.6. PR proti `multi-profile`, stejná pravidla jako v F1 až F3.
   stav indexovaný podle `profile_id`, fronta SSO dialogů.
   Go: `client/ui/tray*.go`, `client/ui/services/{daemon_feed,profileswitcher,connection}.go`.
   Frontend: `contexts/{Profile,Status,Networks}Context.tsx`, `lib/connection.ts`.
-- **macOS:** názvy `utun`, scutil se slotem, `flushScopedDefaults`, `boundIface` refcount, split `/1`.
+- **macOS:** zadáno 2026-11-08, viz 2.8.
 - **Windows:** rozhodnuto 2026-11-07, viz 2.6 a fáze W.
 - **FreeBSD:** route flagy a marked flush.
 - **DNS:** fan-out resolver pro sdílené domény jako `netbird.cloud`.

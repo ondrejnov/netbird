@@ -5,8 +5,11 @@ package systemops
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -15,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	nberrors "github.com/netbirdio/netbird/client/errors"
+	"github.com/netbirdio/netbird/client/internal/hostcoord"
 	"github.com/netbirdio/netbird/client/internal/routemanager/vars"
 	nbnet "github.com/netbirdio/netbird/client/net"
 )
@@ -41,6 +45,84 @@ const scopedRouteBudget = 5 * time.Second
 // the table. Any subsequent reconnect via nbnet.NewDialer picks up the
 // populated bound-iface cache and gets IP_BOUND_IF set cleanly.
 func (r *SysOps) setupAdvancedRouting() error {
+	if r.coordinator != nil {
+		return r.acquireSharedScopedDefaults()
+	}
+	return r.installScopedDefaults()
+}
+
+// acquireSharedScopedDefaults holds the scoped defaults together with the other sessions. A session
+// joining them installs them again only when the physical default moved, as a session restarts
+// after a network change and the defaults would point at the previous network. Reinstalling them
+// otherwise deletes them under the other sessions, whose network monitors take that for a network
+// change and restart, which reinstalls them again. The last session to leave removes them.
+func (r *SysOps) acquireSharedScopedDefaults() error {
+	first := false
+	if _, err := r.coordinator.AcquireRoutingBase(r.sessionKey, func() (hostcoord.RoutingBase, hostcoord.TeardownFunc, error) {
+		first = true
+		return hostcoord.RoutingBase{}, nil, nil
+	}); err != nil {
+		return fmt.Errorf("acquire routing base: %w", err)
+	}
+	if !first && r.scopedDefaultsCurrent() {
+		return nil
+	}
+
+	if err := r.installScopedDefaults(); err != nil {
+		if releaseErr := r.releaseSharedScopedDefaults(); releaseErr != nil {
+			log.Warnf("failed to release the routing base after a failed setup: %v", releaseErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func (r *SysOps) releaseSharedScopedDefaults() error {
+	return r.coordinator.ReleaseRoutingBase(r.sessionKey, func() error {
+		scopedDefaultsMu.Lock()
+		defer scopedDefaultsMu.Unlock()
+		nbnet.ClearBoundInterfaces()
+		clear(scopedNexthops)
+		return r.flushScopedDefaults()
+	})
+}
+
+// scopedDefaultsMu serializes the flush and install of the scoped defaults, which the sessions of a
+// daemon share. It guards scopedNexthops.
+var scopedDefaultsMu sync.Mutex
+
+// scopedNexthops holds the nexthop of each installed scoped default, by the unspecified address of
+// its family.
+var scopedNexthops = map[netip.Addr]Nexthop{}
+
+// scopedDefaultsCurrent reports whether the installed scoped defaults still go through the physical
+// default nexthop of each family.
+func (r *SysOps) scopedDefaultsCurrent() bool {
+	scopedDefaultsMu.Lock()
+	defer scopedDefaultsMu.Unlock()
+
+	for _, unspec := range []netip.Addr{netip.IPv4Unspecified(), netip.IPv6Unspecified()} {
+		installed, ok := scopedNexthops[unspec]
+		nexthop, err := r.physicalDefaultNexthop(unspec)
+		switch {
+		case errors.Is(err, vars.ErrRouteNotFound):
+			if ok {
+				return false
+			}
+		case err != nil:
+			log.Debugf("reinstall the scoped defaults, look up the default of %s: %v", unspec, err)
+			return false
+		case !ok || !installed.Equal(nexthop):
+			return false
+		}
+	}
+	return true
+}
+
+func (r *SysOps) installScopedDefaults() error {
+	scopedDefaultsMu.Lock()
+	defer scopedDefaultsMu.Unlock()
+
 	// Drop any previously-cached egress interface before reinstalling. On a
 	// refresh, a family that no longer resolves would otherwise keep the stale
 	// binding, causing new sockets to scope to an interface without a matching
@@ -50,6 +132,7 @@ func (r *SysOps) setupAdvancedRouting() error {
 	if err := r.flushScopedDefaults(); err != nil {
 		log.Warnf("flush residual scoped defaults: %v", err)
 	}
+	clear(scopedNexthops)
 
 	var merr *multierror.Error
 	installed := 0
@@ -78,7 +161,7 @@ func (r *SysOps) setupAdvancedRouting() error {
 // address family, installs a scoped default via it, and caches the iface for
 // subsequent IP_BOUND_IF / IPV6_BOUND_IF socket binds.
 func (r *SysOps) installScopedDefaultFor(unspec netip.Addr) (bool, error) {
-	nexthop, err := GetNextHop(unspec)
+	nexthop, err := r.physicalDefaultNexthop(unspec)
 	if err != nil {
 		if errors.Is(err, vars.ErrRouteNotFound) {
 			return false, nil
@@ -106,6 +189,7 @@ func (r *SysOps) installScopedDefaultFor(unspec netip.Addr) (bool, error) {
 		af = unix.AF_INET6
 	}
 	nbnet.SetBoundInterface(af, nexthop.Intf)
+	scopedNexthops[unspec] = nexthop
 	via := "point-to-point"
 	if nexthop.IP.IsValid() {
 		via = nexthop.IP.String()
@@ -118,9 +202,24 @@ func (r *SysOps) installScopedDefaultFor(unspec netip.Addr) (bool, error) {
 	return true, nil
 }
 
+// cleanupAdvancedRouting releases the routes of a session before the scoped defaults, so its
+// prefixes move on to the other sessions while their sockets still find the physical egress.
 func (r *SysOps) cleanupAdvancedRouting() error {
-	nbnet.ClearBoundInterfaces()
-	return r.flushScopedDefaults()
+	if r.coordinator == nil {
+		nbnet.ClearBoundInterfaces()
+		return r.flushScopedDefaults()
+	}
+
+	var merr *multierror.Error
+	if r.sharedRoutes != nil {
+		if err := r.releaseSharedRoutes(); err != nil {
+			merr = multierror.Append(merr, err)
+		}
+	}
+	if err := r.releaseSharedScopedDefaults(); err != nil {
+		merr = multierror.Append(merr, fmt.Errorf("release routing base: %w", err))
+	}
+	return nberrors.FormatErrorOrNil(merr)
 }
 
 // flushPlatformExtras runs darwin-specific residual cleanup hooked into the
@@ -250,4 +349,44 @@ func afOf(a netip.Addr) string {
 		return "IPv4"
 	}
 	return "IPv6"
+}
+
+// physicalDefaultNexthop returns the default nexthop of the physical network for the family of
+// unspec. A lookup of the unspecified address matches the split default of an exit node, which with
+// concurrent sessions may be up on the interface of another session already. The unscoped default
+// route stays in the table under the split halves, so it is used then.
+func (r *SysOps) physicalDefaultNexthop(unspec netip.Addr) (Nexthop, error) {
+	nexthop, err := GetNextHop(unspec)
+	if err != nil || r.coordinator == nil || nexthop.Intf == nil || !r.isSessionInterface(nexthop.Intf.Name) {
+		return nexthop, err
+	}
+
+	current, found, err := unscopedRoute(netip.PrefixFrom(unspec, 0))
+	if err != nil {
+		return Nexthop{}, err
+	}
+	if !found || current.nexthop.Intf == nil || r.isSessionInterface(current.nexthop.Intf.Name) {
+		return Nexthop{}, vars.ErrRouteNotFound
+	}
+	current.nexthop.IP = embeddedZoneToZone(current.nexthop.IP, current.nexthop.Intf)
+	return current.nexthop, nil
+}
+
+// isSessionInterface reports whether name is the interface of this or another session.
+func (r *SysOps) isSessionInterface(name string) bool {
+	if r.wgInterface != nil && r.wgInterface.Name() == name {
+		return true
+	}
+	return slices.Contains(r.coordinator.Sessions().SessionInterfaces(), name)
+}
+
+// embeddedZoneToZone moves the scope of a link-local gateway into the zone. The routing socket of
+// macOS reports it in the second 16-bit word of the address instead (the KAME convention).
+func embeddedZoneToZone(addr netip.Addr, intf *net.Interface) netip.Addr {
+	if !addr.Is6() || !addr.IsLinkLocalUnicast() || addr.Zone() != "" {
+		return addr
+	}
+	raw := addr.As16()
+	raw[2], raw[3] = 0, 0
+	return netip.AddrFrom16(raw).WithZone(intf.Name)
 }

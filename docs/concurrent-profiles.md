@@ -22,7 +22,7 @@ Existující služba. Příkaz službu přeinstaluje, a pokud běžela, spustí 
 sudo netbird service reconfigure --enable-concurrent-profiles
 ```
 
-Hodnota se ukládá do `service.json` a platí po restartu služby. Gate odmítne start služby mimo Linux a na TCP
+Hodnota se ukládá do `service.json` a platí po restartu služby. Gate odmítne start služby mimo Linux, Windows a macOS a na TCP
 socketu daemonu nebo zapnutém JSON socketu na TCP, kde volající nemá identitu.
 
 Session se s gate nespustí, když:

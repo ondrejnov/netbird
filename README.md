@@ -69,7 +69,8 @@ them connected at once.
 | --- | --- |
 | Linux | Supported (CLI and desktop UI) |
 | Windows | Supported behind the gate, manual build only |
-| macOS, FreeBSD | Builds and behaves like upstream; the gate is refused |
+| macOS | Supported behind the gate, manual build only, not yet verified end to end |
+| FreeBSD | Builds and behaves like upstream; the gate is refused |
 | Android, iOS, WASM, embedded client | Out of scope, unchanged |
 
 ## Requirements
@@ -83,7 +84,7 @@ On Linux, a session refuses to start with the gate on when any of these holds:
 | `NB_DNS_STATE_FILE` is set | Unset it; all sessions would share one state file |
 | Kernel older than 5.6 | Upgrade the kernel |
 | iptables without ipset modules | Install the ipset modules |
-| Explicit `interface_name` in the profile | `netbird up --profile X --interface-name wt0` (`wt0` means "use the slot name") |
+| Explicit `interface_name` in the profile | `netbird up --profile X --interface-name wt0` (`wt0` means "use the slot name", `utun100` on macOS) |
 | No native firewall and the session firewall is disabled | Install nftables or iptables, or keep the session firewall on |
 
 ## Getting started
@@ -111,6 +112,19 @@ cd client; go build -tags multiprofile -o netbird.exe .   # put wintun.dll next 
 # elevated terminal
 .\netbird.exe service install --enable-concurrent-profiles; .\netbird.exe service start
 ```
+
+</details>
+
+<details>
+<summary>macOS (manual build, test machine)</summary>
+
+```bash
+cd client && CGO_ENABLED=0 go build -tags multiprofile -o netbird .
+sudo ./netbird service install --enable-concurrent-profiles && sudo ./netbird service start
+```
+
+Slot N uses `utun(100+N)`. A session with the firewall or server routes disabled is refused, as on
+Windows.
 
 </details>
 

@@ -84,21 +84,21 @@ type SysOps struct {
 	localSubnetsCacheTime time.Time
 
 	// coordinator shares the routing base between sessions. When nil, this instance
-	// owns the base alone. Only Linux uses it.
-	//nolint:unused // only used on Linux
+	// owns the base alone. Only Linux and macOS use it.
+	//nolint:unused // only used on Linux and macOS
 	coordinator *hostcoord.Coordinator
 	sessionKey  hostcoord.SessionKey
 	// sharedRoutes decides which session carries a prefix of the shared table. When
-	// nil, routes go straight to the kernel. Only Linux and Windows use it.
-	//nolint:unused // only used on Linux and Windows
+	// nil, routes go straight to the kernel. Only Linux, Windows and macOS use it.
+	//nolint:unused // only used on Linux, Windows and macOS
 	sharedRoutes *hostcoord.Routes
-	//nolint:unused // only used on Linux and Windows
+	//nolint:unused // only used on Linux, Windows and macOS
 	sharedRouteEvents hostcoord.RouteEventFunc
 	// otherOverlays lists the overlay prefixes of the other sessions. When nil, only the
 	// own overlay is refused.
 	otherOverlays overlayPrefixSource
 	// overlayRefusals holds the routes the session was warned about, see warnOverlayRouteRefused.
-	//nolint:unused // only used on Linux and Windows
+	//nolint:unused // only used on Linux, Windows and macOS
 	overlayRefusals sync.Map
 	// originalSysctl stores the sysctl values from before this instance changed them.
 	//nolint:unused // only used on Linux
