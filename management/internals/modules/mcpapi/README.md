@@ -39,6 +39,13 @@ request carries at most one tool call. `GET` and `DELETE` answer 405.
 `mcpapi_test.go` fails when a tool description or the server instructions name a tool
 the catalog does not have.
 
+A new public endpoint, one `openapi.yml` documents without `x-cloud-only`, needs either a
+tool in `catalog.go` or an entry with its reason in `notExposed` in `openapi_test.go`,
+which lists what is left out today and why. The MCP Catalog check
+(`.github/workflows/mcp-catalog.yml`) enforces this on pull requests and pushes to main,
+along with the reverse: every tool is a public operation, and the API router serves it on
+its own route.
+
 ## Enabling
 
 | Variable | Meaning |
@@ -104,7 +111,8 @@ from the embedded IdP's issuer or else the request; see [Reverse proxy](#reverse
    gets an error page, since open registration would otherwise make this an open
    redirector.
 3. **Consent.** The page names the client and the host the code goes to; write access is
-   a ticked checkbox when the client asked for `mcp:write` or no scope. The request is
+   an unticked checkbox, offered when the client asked for `mcp:write` or no scope, so
+   a connection stays read-only unless the user opts in. The request is
    sealed into the form and bound to the browser by the consent cookie, a post from
    another origin (by `Sec-Fetch-Site`) gets 403, and the page is unframeable and arms
    the approve button only after pointer or keyboard input.
@@ -205,6 +213,22 @@ scopes, for at most 1 hour. A stolen refresh token works until the thief and the
 refresh more than 10 seconds apart: the later of the two presents a replaced token,
 which is a replay and revokes the session for both. A stolen code is useless without
 the client's PKCE verifier.
+
+### Activity log
+
+The broker records three events in the account the user signed in to, with that user as
+initiator and target: `mcp.session.start` when a code redemption starts a session,
+`mcp.session.revoke` when the revocation endpoint ends one that still existed, and
+`mcp.session.replay` when a replayed refresh token or a second redemption of a code revokes
+one. A replay that finds the session already ended records nothing. For a code that gap is
+at most its 2 minutes, and the sign-out or replay that ended the session is already in the
+log. Meta holds:
+
+- `access`: `read` or `read and write`, the scopes the user approved. The user's role still
+  limits what the session can do.
+- `client_name`, when the request carries the client ID: the name the client registered,
+  with control characters and characters that render as nothing removed. It proves nothing.
+- `redirect_host`, on the two events a code redemption records.
 
 ### Security notes
 
