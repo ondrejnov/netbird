@@ -51,15 +51,21 @@ func (r *SysOps) setupAdvancedRouting() error {
 	return r.installScopedDefaults()
 }
 
-// acquireSharedScopedDefaults holds the scoped defaults together with the other sessions. Every
-// session installs them again on its start, as a session restarts after a network change and the
-// defaults of the session that started first would point at the previous network. The last
-// session to leave removes them.
+// acquireSharedScopedDefaults holds the scoped defaults together with the other sessions. A session
+// joining them installs them again only when the physical default moved, as a session restarts
+// after a network change and the defaults would point at the previous network. Reinstalling them
+// otherwise deletes them under the other sessions, whose network monitors take that for a network
+// change and restart, which reinstalls them again. The last session to leave removes them.
 func (r *SysOps) acquireSharedScopedDefaults() error {
+	first := false
 	if _, err := r.coordinator.AcquireRoutingBase(r.sessionKey, func() (hostcoord.RoutingBase, hostcoord.TeardownFunc, error) {
+		first = true
 		return hostcoord.RoutingBase{}, nil, nil
 	}); err != nil {
 		return fmt.Errorf("acquire routing base: %w", err)
+	}
+	if !first && r.scopedDefaultsCurrent() {
+		return nil
 	}
 
 	if err := r.installScopedDefaults(); err != nil {
@@ -76,13 +82,42 @@ func (r *SysOps) releaseSharedScopedDefaults() error {
 		scopedDefaultsMu.Lock()
 		defer scopedDefaultsMu.Unlock()
 		nbnet.ClearBoundInterfaces()
+		clear(scopedNexthops)
 		return r.flushScopedDefaults()
 	})
 }
 
 // scopedDefaultsMu serializes the flush and install of the scoped defaults, which the sessions of a
-// daemon share.
+// daemon share. It guards scopedNexthops.
 var scopedDefaultsMu sync.Mutex
+
+// scopedNexthops holds the nexthop of each installed scoped default, by the unspecified address of
+// its family.
+var scopedNexthops = map[netip.Addr]Nexthop{}
+
+// scopedDefaultsCurrent reports whether the installed scoped defaults still go through the physical
+// default nexthop of each family.
+func (r *SysOps) scopedDefaultsCurrent() bool {
+	scopedDefaultsMu.Lock()
+	defer scopedDefaultsMu.Unlock()
+
+	for _, unspec := range []netip.Addr{netip.IPv4Unspecified(), netip.IPv6Unspecified()} {
+		installed, ok := scopedNexthops[unspec]
+		nexthop, err := r.physicalDefaultNexthop(unspec)
+		switch {
+		case errors.Is(err, vars.ErrRouteNotFound):
+			if ok {
+				return false
+			}
+		case err != nil:
+			log.Debugf("reinstall the scoped defaults, look up the default of %s: %v", unspec, err)
+			return false
+		case !ok || !installed.Equal(nexthop):
+			return false
+		}
+	}
+	return true
+}
 
 func (r *SysOps) installScopedDefaults() error {
 	scopedDefaultsMu.Lock()
@@ -97,6 +132,7 @@ func (r *SysOps) installScopedDefaults() error {
 	if err := r.flushScopedDefaults(); err != nil {
 		log.Warnf("flush residual scoped defaults: %v", err)
 	}
+	clear(scopedNexthops)
 
 	var merr *multierror.Error
 	installed := 0
@@ -153,6 +189,7 @@ func (r *SysOps) installScopedDefaultFor(unspec netip.Addr) (bool, error) {
 		af = unix.AF_INET6
 	}
 	nbnet.SetBoundInterface(af, nexthop.Intf)
+	scopedNexthops[unspec] = nexthop
 	via := "point-to-point"
 	if nexthop.IP.IsValid() {
 		via = nexthop.IP.String()

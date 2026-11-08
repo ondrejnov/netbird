@@ -73,6 +73,10 @@ func routeCheck(ctx context.Context, fd int, nexthopv4, nexthopv6 systemops.Next
 				log.Infof("Network monitor: default route changed: via %s, interface %s", route.Gw, intf)
 				return nil
 			case unix.RTM_DELETE:
+				if systemops.IgnoreRemovedDefaultRoute(flags) {
+					log.Debugf("Network monitor: ignoring removed default route via %s, interface %s, flags %#x", route.Gw, intf, flags)
+					continue
+				}
 				if nexthopv4.Intf != nil && route.Gw.Compare(nexthopv4.IP) == 0 || nexthopv6.Intf != nil && route.Gw.Compare(nexthopv6.IP) == 0 {
 					log.Infof("Network monitor: default route removed: via %s, interface %s", route.Gw, intf)
 					return nil
