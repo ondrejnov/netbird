@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/user"
 	"strconv"
 	"strings"
@@ -18,11 +17,7 @@ import (
 	"github.com/netbirdio/netbird/client/proto"
 )
 
-const (
-	errSessionOfAnotherUser = "the session belongs to another user"
-
-	passwdPath = "/etc/passwd"
-)
+const errSessionOfAnotherUser = "the session belongs to another user"
 
 // sessionCaller is who an RPC answers to, as far as the sessions are concerned. The identity comes
 // from the kernel through ipcauth.CallerIdentity, and never from a field of the request: a username
@@ -51,7 +46,7 @@ func (s *Server) callerOf(ctx context.Context) sessionCaller {
 	}
 	accounts := s.accountsFn
 	if accounts == nil {
-		accounts = localAccounts
+		accounts = hostAccounts
 	}
 	accountName := s.accountNameFn
 	if accountName == nil {
@@ -150,30 +145,22 @@ func (c sessionCaller) aloneInDirectory(username string) bool {
 	return true
 }
 
-// localAccounts reads the accounts of the host from its passwd file. No such file means no accounts,
-// as in a container that runs on numeric identities. There is no way to list accounts through NSS.
-func localAccounts() ([]hostAccount, error) {
-	raw, err := os.ReadFile(passwdPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", passwdPath, err)
-	}
-
+// parseDsclAccounts reads the output of "dscl /Search -list /Users UniqueID": the name and the
+// UID of one account per line. A line without a numeric UID is skipped.
+func parseDsclAccounts(out string) []hostAccount {
 	var accounts []hostAccount
-	for _, line := range strings.Split(string(raw), "\n") {
-		fields := strings.Split(line, ":")
-		if len(fields) < 3 {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
 			continue
 		}
-		uid, err := strconv.ParseUint(fields[2], 10, 32)
+		uid, err := strconv.ParseUint(fields[1], 10, 32)
 		if err != nil {
 			continue
 		}
 		accounts = append(accounts, hostAccount{name: fields[0], uid: uint32(uid)})
 	}
-	return accounts, nil
+	return accounts
 }
 
 // accountUID returns the UID of the account username on this host.
