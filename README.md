@@ -6,7 +6,7 @@
 
 **One machine, one daemon, several NetBird networks connected at the same time.**
 
-[Features](#features) · [Requirements](#requirements) · [Getting started](#getting-started) · [Usage](#usage) · [Conflicts](#conflicts) · [Limitations](#known-limitations)
+[Why this fork](#why-this-fork) · [Features](#features) · [Requirements](#requirements) · [Getting started](#getting-started) · [Usage](#usage) · [Conflicts](#conflicts) · [Limitations](#known-limitations)
 
 </div>
 
@@ -15,6 +15,25 @@ NetBird client keep **multiple profiles connected concurrently**. Upstream NetBi
 profile at a time, and switching profiles drops the previous connection. In this fork, each
 profile runs as its own session with its own identity, interface, ACLs, routes, and DNS, and
 bringing one session up or down leaves the others untouched.
+
+## Why this fork
+
+The main drawback of upstream NetBird is that **the client can hold only one active
+connection**. You can define as many profiles as you like, but only one of them is connected at
+any moment. `netbird up --profile home` first tears down the `work` connection, so you lose
+access to one network the moment you need the other.
+
+That hurts anyone who belongs to more than one NetBird network:
+
+- an admin or consultant managing several self-hosted deployments for different customers,
+- an employee who needs the company network and a home lab at the same time,
+- a developer running staging and production networks side by side.
+
+The usual workarounds are switching back and forth, running extra clients in containers or VMs,
+or merging the networks into one Management. Long-standing upstream request
+[netbirdio/netbird#446](https://github.com/netbirdio/netbird/issues/446) asks for exactly this
+capability. This fork solves it in the client: one daemon runs one session per profile, all of
+them connected at once.
 
 > [!IMPORTANT]
 > This fork targets **self-hosted Management only**. NetBird Cloud is neither supported nor
@@ -191,6 +210,7 @@ since upstream does not know `sessions.json` and would not clean up the extra sl
 ## Documentation
 
 - [User guide](docs/concurrent-profiles.md) (Czech): gate, usage, conflicts, upgrade, and rollback.
+- [Technical design](docs/concurrent-profiles-architecture.md): how sessions, slots, the host coordinator, isolation, and DNS make concurrent connections work.
 - [Specification](docs/specs/concurrent-profiles.md) (Czech): design, invariants, and phase plan.
 - [Upstream documentation](https://docs.netbird.io/) for everything else NetBird does.
 
