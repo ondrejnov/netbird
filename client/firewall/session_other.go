@@ -1,4 +1,4 @@
-//go:build (!linux && !windows) || android
+//go:build (!linux && !windows && !(darwin && !ios)) || android
 
 package firewall
 
@@ -14,7 +14,7 @@ import (
 )
 
 // ErrSessionNotIsolated means the session cannot run: nothing would keep it from the other sessions.
-var ErrSessionNotIsolated = errors.New("concurrent sessions are supported only on Linux")
+var ErrSessionNotIsolated = errors.New("concurrent sessions are not supported on this platform")
 
 // SessionAddResult is what a session has to honor after SessionIsolation.Add.
 type SessionAddResult struct {
