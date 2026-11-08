@@ -25,7 +25,9 @@ type tableRoute struct {
 
 // ensureRoute adds the route unless the interface has it already, and reports which it was. A
 // route of another session for the prefix is the one a handover takes over, so it is replaced. A
-// route of anything else stays, and the add fails on it as it does without sessions.
+// route of anything else, the connected route of the local network for instance, stays and keeps
+// carrying the prefix. The add would fail on it, and a failed route update discards the DNS
+// changes of the whole update, the match domains of domain routes among them.
 func (r *SysOps) ensureRoute(prefix netip.Prefix, nexthop Nexthop) (existed bool, err error) {
 	if nexthop.Intf == nil {
 		return false, fmt.Errorf("route %s without an interface", prefix)
@@ -37,7 +39,11 @@ func (r *SysOps) ensureRoute(prefix netip.Prefix, nexthop Nexthop) (existed bool
 	if found && current.index == nexthop.Intf.Index {
 		return true, nil
 	}
-	if found && r.isOtherSessionInterface(current.index) {
+	if found && !r.isOtherSessionInterface(current.index) {
+		log.Warnf("not routing %s through %s: the host routes it through interface %d already", prefix, nexthop.Intf.Name, current.index)
+		return true, nil
+	}
+	if found {
 		if err := r.removeFromRouteTable(prefix, current.nexthop); err != nil {
 			return false, fmt.Errorf("take over route %s: %w", prefix, err)
 		}

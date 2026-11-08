@@ -163,7 +163,9 @@ func TestSharedRoutes_StopOfTheOwnerHandsOverOnMacOS(t *testing.T) {
 	assert.Equal(t, b.intf.Index, carrier(t, routed), "the stop of the owner hands the prefix to the other session")
 }
 
-// A route for the prefix that no session put there is not taken over.
+// A route for the prefix that no session put there, as the connected route of the local network
+// is, is not taken over. The add succeeds, since a failed route update would discard the DNS changes
+// of the whole update, and the remove of the session leaves the route alone.
 func TestSharedRoutes_ForeignRouteStaysOnMacOS(t *testing.T) {
 	routed := netip.MustParsePrefix("203.0.113.0/24")
 	out, err := exec.Command("route", "-n", "add", "-net", routed.String(), "-interface", "lo0").CombinedOutput()
@@ -176,8 +178,11 @@ func TestSharedRoutes_ForeignRouteStaysOnMacOS(t *testing.T) {
 	a := newTestSession(t, coordinator, "work", "utun166", "100.93.0.1/16")
 	t.Cleanup(func() { _ = a.ops.CleanupRouting(nil, true) })
 
-	assert.Error(t, a.ops.AddVPNRoute(routed, a.intf), "the add fails on a route of something else")
+	assert.NoError(t, a.ops.AddVPNRoute(routed, a.intf), "the route of the host is no failure")
 	assert.Equal(t, lo.Index, carrier(t, routed), "the foreign route stays")
+
+	require.NoError(t, a.ops.RemoveVPNRoute(routed, a.intf))
+	assert.Equal(t, lo.Index, carrier(t, routed), "the remove of the session leaves the foreign route")
 }
 
 func TestSharedRoutes_RefuseTheOverlayOfAnotherSessionOnMacOS(t *testing.T) {
