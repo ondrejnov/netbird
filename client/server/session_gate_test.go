@@ -205,17 +205,18 @@ func requireCode(t *testing.T, want codes.Code, err error) {
 func TestConcurrentProfilesPlatform(t *testing.T) {
 	assert.NoError(t, checkConcurrentProfilesPlatform("linux"))
 	assert.NoError(t, checkConcurrentProfilesPlatform("windows"))
+	assert.NoError(t, checkConcurrentProfilesPlatform("darwin"))
 
-	for _, goos := range []string{"darwin", "freebsd", "android", "ios"} {
+	for _, goos := range []string{"freebsd", "android", "ios"} {
 		err := checkConcurrentProfilesPlatform(goos)
 		require.Error(t, err, "the gate must refuse %s", goos)
-		assert.Contains(t, err.Error(), "only on Linux and Windows", "the operator should be told why")
+		assert.Contains(t, err.Error(), "only on Linux, Windows and macOS", "the operator should be told why")
 		assert.Contains(t, err.Error(), goos)
 		assert.Contains(t, err.Error(), "--enable-concurrent-profiles", "the operator should be told what to change")
 	}
 }
 
-// Off Linux and Windows the service with the gate does not start, and the refusal leaves the disk and the host
+// Off Linux, Windows and macOS the service with the gate does not start, and the refusal leaves the disk and the host
 // as they were: no sessions file, no slots, no session.
 func TestGate_StartIsRefusedOnUnsupportedOS(t *testing.T) {
 	if slices.Contains(concurrentProfilesOSes, runtime.GOOS) {
@@ -226,7 +227,7 @@ func TestGate_StartIsRefusedOnUnsupportedOS(t *testing.T) {
 
 	err := f.s.Start()
 	require.Error(t, err, "the gate must refuse %s", runtime.GOOS)
-	assert.Contains(t, err.Error(), "only on Linux and Windows", "the operator should be told why")
+	assert.Contains(t, err.Error(), "only on Linux, Windows and macOS", "the operator should be told why")
 	assert.Contains(t, err.Error(), "--enable-concurrent-profiles", "the operator should be told what to change")
 
 	_, statErr := os.Stat(filepath.Join(dir, "sessions.json"))
