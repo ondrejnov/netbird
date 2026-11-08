@@ -94,7 +94,7 @@ func TestSlots_FirstSessionGetsSlotZeroAndTodaysNames(t *testing.T) {
 	assert.Equal(t, Slot(0), res.Slot, "the first session takes slot 0")
 	assert.Equal(t, iface.WgInterfaceDefault, res.Interface, "slot 0 keeps the default name")
 	if runtime.GOOS == "linux" {
-		assert.Equal(t, "wt0", res.Interface, "slot 0 is wt0 on Linux")
+		assert.Equal(t, slotInterfaceName(0), res.Interface, "slot 0 is wt0 on Linux")
 	}
 	assert.Equal(t, uint16(51820), res.Port, "slot 0 keeps the default port")
 }
@@ -118,11 +118,11 @@ func TestSlots_LowestFreeIncludingHolesAndBeyondSessionLimit(t *testing.T) {
 		name    string
 		port    uint16
 	}{
-		{"new1", 1, "wt1", 51821},
-		{"new2", 5, "wt5", 51825},
-		{"new3", 8, "wt8", 51828},
-		{"new4", 9, "wt9", 51829},
-		{"new5", 10, "wt10", 51830},
+		{"new1", 1, slotInterfaceName(1), 51821},
+		{"new2", 5, slotInterfaceName(5), 51825},
+		{"new3", 8, slotInterfaceName(8), 51828},
+		{"new4", 9, slotInterfaceName(9), 51829},
+		{"new5", 10, slotInterfaceName(10), 51830},
 	} {
 		res, err := s.Reserve(sessionKey(want.profile), autoRequest)
 		require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestSlots_LowestFreeIncludingHolesAndBeyondSessionLimit(t *testing.T) {
 	res, err := s.Reserve(sessionKey("s7"), autoRequest)
 	require.NoError(t, err)
 	assert.Equal(t, Slot(7), res.Slot, "a stored slot past the session limit stays valid")
-	assert.Equal(t, "wt7", res.Interface, "the name follows the slot number, not the session count")
+	assert.Equal(t, slotInterfaceName(7), res.Interface, "the name follows the slot number, not the session count")
 }
 
 func TestSlots_UsernameIsPartOfTheKey(t *testing.T) {
@@ -174,7 +174,7 @@ func TestSlots_StableAcrossRestart(t *testing.T) {
 	res, err := second.Reserve(sessionKey("c"), autoRequest)
 	require.NoError(t, err)
 	assert.Equal(t, Slot(2), res.Slot, "a known session keeps its slot even when a lower one is free")
-	assert.Equal(t, "wt2", res.Interface, "the interface stays stable")
+	assert.Equal(t, slotInterfaceName(2), res.Interface, "the interface stays stable")
 
 	res, err = second.Reserve(sessionKey("d"), autoRequest)
 	require.NoError(t, err)
@@ -222,7 +222,7 @@ func TestSlots_AutoValuesAreNotWrittenAnywhere(t *testing.T) {
 
 	data, err := os.ReadFile(filepath.Join(base, sessionsFileName))
 	require.NoError(t, err)
-	assert.NotContains(t, string(data), "wt1", "the slot name is derived, never stored")
+	assert.NotContains(t, string(data), slotInterfaceName(1), "the slot name is derived, never stored")
 	assert.NotContains(t, string(data), "51821", "the slot port is derived, never stored")
 }
 
@@ -247,7 +247,7 @@ func TestSlots_ExplicitInterfaceCollisionIsRefused(t *testing.T) {
 
 	tests := map[string]string{
 		"same explicit name":   "office",
-		"name of an auto slot": "wt1",
+		"name of an auto slot": slotInterfaceName(1),
 	}
 	for name, wanted := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -273,7 +273,7 @@ func TestSlots_ExplicitInterfaceCollisionIsRefused(t *testing.T) {
 func TestSlots_AutoNameTakenByExplicitSessionIsRefused(t *testing.T) {
 	s := newFakeSlots(t, t.TempDir())
 	// Session a sits on slot 0 and claims the name slot 1 would derive.
-	_, err := s.Reserve(sessionKey("a"), ResourceRequest{WgIface: "wt1", WgPort: autoPort})
+	_, err := s.Reserve(sessionKey("a"), ResourceRequest{WgIface: slotInterfaceName(1), WgPort: autoPort})
 	require.NoError(t, err)
 
 	_, err = s.Reserve(sessionKey("b"), autoRequest)
@@ -391,7 +391,7 @@ func TestSlots_PortBeyondRangeUsesAllocator(t *testing.T) {
 	res, err := s.Reserve(sessionKey("last"), autoRequest)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(65535), res.Port, "the last port of the range is still derived")
-	assert.Equal(t, "wt13715", res.Interface, "the name has no digit limit")
+	assert.Equal(t, slotInterfaceName(13715), res.Interface, "the name has no digit limit")
 
 	res, err = s.Reserve(sessionKey("over"), autoRequest)
 	require.NoError(t, err)
@@ -400,7 +400,7 @@ func TestSlots_PortBeyondRangeUsesAllocator(t *testing.T) {
 	res, err = s.Reserve(sessionKey("far"), autoRequest)
 	require.NoError(t, err)
 	assert.Equal(t, uint16(30002), res.Port, "the largest slot does not overflow")
-	assert.Equal(t, "wt4294967295", res.Interface, "the largest slot still fits the name limit")
+	assert.Equal(t, slotInterfaceName(4294967295), res.Interface, "the largest slot still fits the name limit")
 }
 
 func TestSlots_AllocatorSkipsReservedPorts(t *testing.T) {
@@ -573,7 +573,7 @@ func TestSlots_SlotZeroOwnerOnMissingFile(t *testing.T) {
 	other, err := s.Reserve(sessionKey("work"), autoRequest)
 	require.NoError(t, err)
 	assert.Equal(t, Slot(1), other.Slot, "another profile starting first gets slot 1")
-	assert.Equal(t, "wt1", other.Interface, "and stays away from the interface of the owner")
+	assert.Equal(t, slotInterfaceName(1), other.Interface, "and stays away from the interface of the owner")
 
 	legacy, err := s.Reserve(sessionKey("legacy"), autoRequest)
 	require.NoError(t, err)

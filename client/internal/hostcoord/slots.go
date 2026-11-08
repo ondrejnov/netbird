@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	slotInterfacePrefix = "wt"
-	maxPort             = 65535
+	maxPort = 65535
 	// anyFreePort asks the allocator directly, which is what freePort does with 0.
 	anyFreePort = 0
 )
@@ -419,7 +418,7 @@ func slotInterfaceName(slot Slot) string {
 	if slot == 0 {
 		return iface.WgInterfaceDefault
 	}
-	return slotInterfacePrefix + strconv.FormatUint(uint64(slot), 10)
+	return slotInterfacePrefix + strconv.FormatUint(slotInterfaceOffset+uint64(slot), 10)
 }
 
 // validateSlotInterfaceName adds what the kernel's dev_valid_name refuses on top of
