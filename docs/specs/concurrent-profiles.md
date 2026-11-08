@@ -1027,10 +1027,13 @@ klient chová jako dnes (I1). Větev `mac/hostcoord` z `main`.
 - **Firewall:** `firewall/session_darwin.go`. `SessionIsolation` jen eviduje členy, `NewSessionFirewall` staví uspfilter
   s `IsolationSource` a odmítne session bez userspace bindu, bez zdroje izolace, mimo izolaci a s vypnutými server routes.
 - **Routing, základna:** scoped defaulty a bound interface (`IP_BOUND_IF`) slouží socketům všech session. Drží je
-  koordinátor, poslední session je odstraní (`releaseSharedScopedDefaults`). Každý start session je nainstaluje znovu,
-  protože session se po změně sítě restartuje a defaulty první session by ukazovaly na předchozí síť. Flush a instalaci
-  serializuje `scopedDefaultsMu`. Mezi flushem a instalací je krátké okno, ve kterém nový socket jiné session nemá
-  bound interface.
+  koordinátor, poslední session je odstraní (`releaseSharedScopedDefaults`). Session, která se k nim připojí, je
+  přeinstaluje jen tehdy, když se fyzický default změnil (`scopedDefaultsCurrent`), protože se session po změně sítě
+  restartuje. Původně je přeinstalovala každá session: flush smazal defaulty pod ostatními, jejich network monitor to
+  vzal jako změnu sítě a restartoval engine, který je smazal zase jim. Dvě session se tak dokola odpojovaly (zjištěno
+  živě 2026-11-08). Monitor navíc ignoruje smazání scoped defaultu se značkou NetBirdu
+  (`IgnoreRemovedDefaultRoute`), skutečnou změnu pozná podle nescopovaného defaultu. Flush a instalaci serializuje
+  `scopedDefaultsMu`.
 - **Routing, fyzický default:** dotaz na nespecifikovanou adresu trefí split `/1` exit nodu, který už může být na
   interfacu jiné session. `physicalDefaultNexthop` pak vezme nescopovanou routu `0/0` z tabulky. Link-local brána má na
   macOS scope ve druhém 16bitovém slově adresy (KAME), `embeddedZoneToZone` ji převede do zóny.
@@ -1054,7 +1057,7 @@ klient chová jako dnes (I1). Větev `mac/hostcoord` z `main`.
 **Ověřeno:** cross `go vet` pro darwin, windows, linux a ios. Na Macu (macOS 12.7, Intel) neprivilegované testy
 `hostcoord`, `firewall`, `systemops`, `server` (celý balíček včetně gate testů, dřív na macOS skip) a `net` prošly.
 V `dns` selhává jen `TestMatchDomainBatching`, který zapisuje do scutil a bez roota neprojde.
-**Ověřeno živě (2026-11-08):** jedna session s gate na Macu, doménové routy `www.mojeip.cz` a `ifconfig.me` přes
+**Ověřeno živě (2026-11-08):** dvě session (`home`, `prace`) na Macu běží souběžně bez restartů enginu, doménové routy `www.mojeip.cz` a `ifconfig.me` přes
 routing peer jdou tunelem, síťová routa shodná s LAN se přeskočí. Privilegované `TestSharedRoutes_*` prošly pod
 rootem, test cizí routy bez opravy selže. **Neověřeno:** `TestSharedScopedDefaults_*` (jeho úklid smaže scoped
 defaulty běžícího daemonu, pouštět jen bez něj), scutil testy pod rootem, akceptační scénář se dvěma session, exit node v jedné session při startu druhé (`physicalDefaultNexthop` s fallbackem), IPv6.
