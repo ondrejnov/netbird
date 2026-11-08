@@ -1,4 +1,4 @@
-//go:build !linux && !ios && !js && !windows
+//go:build !linux && !ios && !js && !windows && !darwin
 
 package systemops
 

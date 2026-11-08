@@ -60,6 +60,20 @@ func ClearBoundInterfaces() {
 	boundIface6 = nil
 }
 
+// BoundInterface returns the egress interface recorded for the address family, nil when none is.
+func BoundInterface(af int) *net.Interface {
+	boundIfaceMu.RLock()
+	defer boundIfaceMu.RUnlock()
+	switch af {
+	case unix.AF_INET:
+		return boundIface4
+	case unix.AF_INET6:
+		return boundIface6
+	default:
+		return nil
+	}
+}
+
 // boundInterfaceFor returns the cached egress interface for a socket's address
 // family, falling back to the other family if the preferred slot is empty.
 // The kernel stores both IP_BOUND_IF and IPV6_BOUND_IF in inp_boundifp, so

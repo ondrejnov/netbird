@@ -1,3 +1,5 @@
+//go:build windows || (darwin && !ios)
+
 package systemops
 
 import (
@@ -36,7 +38,7 @@ func (r *SysOps) RemoveVPNRoute(prefix netip.Prefix, intf *net.Interface) error 
 	return r.genericRemoveVPNRoute(prefix, intf)
 }
 
-// routeParts are the routes Windows holds for one prefix. The default prefixes are split in
+// routeParts are the routes a session holds for one prefix. The default prefixes are split in
 // halves, and a v4 exit node without v6 adds the v6 halves as a best-effort blackhole, the same
 // as genericAddVPNRoute.
 type routeParts struct {
@@ -69,9 +71,9 @@ func (r *SysOps) addSharedVPNRoute(prefix netip.Prefix, intf *net.Interface) err
 
 	_, err := r.sharedRoutes.Add(r.sessionKey, prefix, hostcoord.RouteClaim{
 		Dev:              intf.Name,
-		Install:          func() error { return installRouteParts(parts, nexthop) },
-		Remove:           func() error { return removeRouteParts(parts, nexthop) },
-		RemoveOnHandover: true,
+		Install:          func() error { return r.installRouteParts(parts, nexthop) },
+		Remove:           func() error { return r.removeRouteParts(parts, nexthop) },
+		RemoveOnHandover: routeHandoverRemoves,
 		Notify:           r.sharedRouteEvents,
 	})
 	if err != nil {
@@ -98,12 +100,12 @@ func (r *SysOps) releaseSharedRoutes() error {
 
 // installRouteParts adds the routes of a claim. A route already on the interface comes from an
 // earlier install by the same session and counts as added.
-func installRouteParts(parts routeParts, nexthop Nexthop) error {
+func (r *SysOps) installRouteParts(parts routeParts, nexthop Nexthop) error {
 	var added []netip.Prefix
 	for _, p := range parts.required {
-		existed, err := ensureRoute(p, nexthop)
+		existed, err := r.ensureRoute(p, nexthop)
 		if err != nil {
-			rollBackRoutes(added, nexthop)
+			r.rollBackRoutes(added, nexthop)
 			return err
 		}
 		if !existed {
@@ -111,16 +113,16 @@ func installRouteParts(parts routeParts, nexthop Nexthop) error {
 		}
 	}
 	for _, p := range parts.optional {
-		if _, err := ensureRoute(p, nexthop); err != nil {
+		if _, err := r.ensureRoute(p, nexthop); err != nil {
 			log.Warnf("failed to add v6 split-default blackhole %s: %v", p, err)
 		}
 	}
 	return nil
 }
 
-func rollBackRoutes(added []netip.Prefix, nexthop Nexthop) {
+func (r *SysOps) rollBackRoutes(added []netip.Prefix, nexthop Nexthop) {
 	for _, p := range added {
-		if err := removeRouteIfPresent(p, nexthop); err != nil {
+		if err := r.removeRouteIfPresent(p, nexthop); err != nil {
 			log.Warnf("failed to roll back route %s: %v", p, err)
 		}
 	}
@@ -128,42 +130,14 @@ func rollBackRoutes(added []netip.Prefix, nexthop Nexthop) {
 
 // removeRouteParts removes the routes of a claim. A route already gone is a success, so the
 // removal can repeat after the session stopped.
-func removeRouteParts(parts routeParts, nexthop Nexthop) error {
+func (r *SysOps) removeRouteParts(parts routeParts, nexthop Nexthop) error {
 	var errs []error
 	for _, list := range [][]netip.Prefix{parts.required, parts.optional} {
 		for _, p := range list {
-			if err := removeRouteIfPresent(p, nexthop); err != nil {
+			if err := r.removeRouteIfPresent(p, nexthop); err != nil {
 				errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
 			}
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// ensureRoute adds the route unless the interface has it already, and reports which it was.
-func ensureRoute(prefix netip.Prefix, nexthop Nexthop) (existed bool, err error) {
-	if routePresent(prefix, nexthop) {
-		return true, nil
-	}
-	if err := addRoute(prefix, nexthop); err != nil {
-		return false, fmt.Errorf("add route %s: %w", prefix, err)
-	}
-	return false, nil
-}
-
-func removeRouteIfPresent(prefix netip.Prefix, nexthop Nexthop) error {
-	if !routePresent(prefix, nexthop) {
-		return nil
-	}
-	return deleteRoute(prefix, nexthop)
-}
-
-// routePresent reports whether the interface of nexthop has a route for prefix. An interface
-// that is gone has no routes.
-func routePresent(prefix netip.Prefix, nexthop Nexthop) bool {
-	route, err := setupRouteEntry(prefix, nexthop)
-	if err != nil {
-		return false
-	}
-	return getIPForwardEntry2(route) == nil
 }
