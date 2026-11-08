@@ -11,6 +11,7 @@ concurrency:
 
 jobs:
   trigger_sync_main:
+    if: github.repository == 'netbirdio/netbird'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger main branch sync

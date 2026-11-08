@@ -27,6 +27,8 @@ concurrency:
 jobs:
   e2e:
     name: Agent Network E2E
+    # The fork has no provider secrets, so the nightly run only fails there.
+    if: github.repository == 'netbirdio/netbird' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

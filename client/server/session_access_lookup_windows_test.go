@@ -15,6 +15,12 @@ import (
 func TestWindowsAccountName_IsWhatTheCLISends(t *testing.T) {
 	invoking, err := profilemanager.InvokingUser()
 	require.NoError(t, err)
+	// For LocalSystem os/user reports the machine account (DOMAIN\HOST$) while the SID resolves
+	// to NT AUTHORITY\SYSTEM. The CI runs the tests as SYSTEM through PsExec, and the daemon
+	// treats SYSTEM as privileged, so it never matches the name for it.
+	if invoking.Uid == sidLocalSystem {
+		t.Skip("LocalSystem is a privileged caller, its name is never matched")
+	}
 
 	name, err := windowsAccountName(invoking.Uid)
 	require.NoError(t, err)
@@ -40,3 +46,5 @@ func TestLocalWindowsAccounts_ListsTheHost(t *testing.T) {
 		assert.True(t, strings.EqualFold(name, account.name), "the SID of %s resolves to %s", account.name, name)
 	}
 }
+
+const sidLocalSystem = "S-1-5-18"
