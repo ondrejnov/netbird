@@ -1037,7 +1037,10 @@ klient chová jako dnes (I1). Větev `mac/hostcoord` z `main`.
 - **Routing, sdílené prefixy:** logika vlastnictví z Windows je v `systemops_sharedroutes_parts.go`, platformní kroky
   v `systemops_sharedroutes_{windows,darwin}.go`. Tabulka macOS drží jednu nescopovanou routu na prefix, proto
   `RemoveOnHandover` je false a nový vlastník routu předchozího **nahradí** (smaže a přidá, jako replace na Linuxu).
-  Nahradí jen routu na interfacu jiné session, cizí routu nechá a přidání selže jako dnes. Odebrání maže jen routu na
+  Nahradí jen routu na interfacu jiné session. Cizí routu pro stejný prefix (typicky připojenou LAN) nechá, jen
+  varuje a přidání **neselže**: chyba aktualizace rout by zrušila DNS batch (`CancelBatch`), takže by se do scutil
+  nezapsaly match domény doménových rout a ty by nefungovaly. Zjištěno živě 2026-11-08 (síťová routa `10.0.0.0/24`
+  na Macu v téže LAN). Bez gate má upstream stejnou chybu, ta se nemění. Odebrání maže jen routu na
   vlastním interfacu, protože `RTM_DELETE` jmenuje jen prefix a jinak by smazalo routu nového vlastníka.
 - **DNS:** `host_coordination_darwin.go`. Klíče podle slotu, `ShutdownState.Slot`, a obal vlastníků domén z Windows
   (`ownedDomainsHostManager`, dřív `nrptHostManager`): každá doména i catch-all má jednoho vlastníka, jen ten zapisuje
@@ -1051,8 +1054,10 @@ klient chová jako dnes (I1). Větev `mac/hostcoord` z `main`.
 **Ověřeno:** cross `go vet` pro darwin, windows, linux a ios. Na Macu (macOS 12.7, Intel) neprivilegované testy
 `hostcoord`, `firewall`, `systemops`, `server` (celý balíček včetně gate testů, dřív na macOS skip) a `net` prošly.
 V `dns` selhává jen `TestMatchDomainBatching`, který zapisuje do scutil a bez roota neprojde.
-**Neověřeno:** privilegované testy `sharedroutes_privileged_darwin_test.go` a scutil testy pod rootem, akceptační
-scénář z 1 na Macu, exit node v jedné session při startu druhé (`physicalDefaultNexthop` s fallbackem), IPv6.
+**Ověřeno živě (2026-11-08):** jedna session s gate na Macu, doménové routy `www.mojeip.cz` a `ifconfig.me` přes
+routing peer jdou tunelem, síťová routa shodná s LAN se přeskočí. Privilegované `TestSharedRoutes_*` prošly pod
+rootem, test cizí routy bez opravy selže. **Neověřeno:** `TestSharedScopedDefaults_*` (jeho úklid smaže scoped
+defaulty běžícího daemonu, pouštět jen bez něj), scutil testy pod rootem, akceptační scénář se dvěma session, exit node v jedné session při startu druhé (`physicalDefaultNexthop` s fallbackem), IPv6.
 
 ## 3. Architektura: proč jeden daemon
 
