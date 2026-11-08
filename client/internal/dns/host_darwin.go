@@ -25,6 +25,8 @@ import (
 const (
 	netbirdDNSStateKeyFormat            = "State:/Network/Service/NetBird-%s/DNS"
 	netbirdDNSStateKeyIndexedFormat     = "State:/Network/Service/NetBird-%s-%d/DNS"
+	slotDNSStateKeyFormat               = "State:/Network/Service/NetBirdS%d-%s/DNS"
+	slotDNSStateKeyIndexedFormat        = "State:/Network/Service/NetBirdS%d-%s-%d/DNS"
 	globalIPv4State                     = "State:/Network/Global/IPv4"
 	primaryServiceStateKeyFormat        = "State:/Network/Service/%s/DNS"
 	keySupplementalMatchDomains         = "SupplementalMatchDomains"
@@ -49,6 +51,12 @@ const (
 )
 
 type systemConfigurator struct {
+	// slot names the keys, so the cleanup of one session leaves the keys of the others. Slot 0
+	// keeps the names from before concurrent sessions.
+	slot uint32
+	// strict fails an apply when the keys of the previous one cannot be removed, for a session
+	// whose domains have owners: a key left behind would keep a released domain.
+	strict            bool
 	createdKeys       map[string]struct{}
 	systemDNSSettings SystemDNSSettings
 
@@ -57,9 +65,31 @@ type systemConfigurator struct {
 }
 
 func newHostManager() (*systemConfigurator, error) {
+	return newSlotHostManager(0), nil
+}
+
+// newSlotHostManager returns the configurator of the session on slot.
+func newSlotHostManager(slot uint32) *systemConfigurator {
 	return &systemConfigurator{
+		slot:        slot,
 		createdKeys: make(map[string]struct{}),
-	}, nil
+	}
+}
+
+// stateKey returns the key of suffix for the slot of the configurator.
+func (s *systemConfigurator) stateKey(suffix string) string {
+	if s.slot == 0 {
+		return getKeyWithInput(netbirdDNSStateKeyFormat, suffix)
+	}
+	return fmt.Sprintf(slotDNSStateKeyFormat, s.slot, suffix)
+}
+
+// indexedStateKey returns the key of batch i of suffix for the slot of the configurator.
+func (s *systemConfigurator) indexedStateKey(suffix string, i int) string {
+	if s.slot == 0 {
+		return fmt.Sprintf(netbirdDNSStateKeyIndexedFormat, suffix, i)
+	}
+	return fmt.Sprintf(slotDNSStateKeyIndexedFormat, s.slot, suffix, i)
 }
 
 func (s *systemConfigurator) supportCustomPort() bool {
@@ -96,6 +126,9 @@ func (s *systemConfigurator) applyDNSConfig(config HostDNSConfig, stateManager *
 	}
 
 	if err := s.removeKeysContaining(matchSuffix); err != nil {
+		if s.strict {
+			return fmt.Errorf("remove old match keys: %w", err)
+		}
 		log.Warnf("failed to remove old match keys: %v", err)
 	}
 	if len(matchDomains) != 0 {
@@ -106,6 +139,9 @@ func (s *systemConfigurator) applyDNSConfig(config HostDNSConfig, stateManager *
 	s.updateState(stateManager)
 
 	if err := s.removeKeysContaining(searchSuffix); err != nil {
+		if s.strict {
+			return fmt.Errorf("remove old search keys: %w", err)
+		}
 		log.Warnf("failed to remove old search keys: %v", err)
 	}
 	if len(searchDomains) != 0 {
@@ -123,7 +159,7 @@ func (s *systemConfigurator) applyDNSConfig(config HostDNSConfig, stateManager *
 }
 
 func (s *systemConfigurator) updateState(stateManager *statemanager.Manager) {
-	if err := stateManager.UpdateState(&ShutdownState{CreatedKeys: maps.Keys(s.createdKeys)}); err != nil {
+	if err := stateManager.UpdateState(&ShutdownState{CreatedKeys: maps.Keys(s.createdKeys), Slot: s.slot}); err != nil {
 		log.Errorf("failed to update shutdown state: %s", err)
 	}
 }
@@ -177,7 +213,7 @@ func (s *systemConfigurator) discoverExistingKeys() []string {
 	var keys []string
 
 	for _, suffix := range []string{searchSuffix, matchSuffix, localSuffix} {
-		key := getKeyWithInput(netbirdDNSStateKeyFormat, suffix)
+		key := s.stateKey(suffix)
 		if strings.Contains(dnsKeys, key) {
 			keys = append(keys, key)
 		}
@@ -185,7 +221,7 @@ func (s *systemConfigurator) discoverExistingKeys() []string {
 
 	for _, suffix := range []string{searchSuffix, matchSuffix} {
 		for i := 0; ; i++ {
-			key := fmt.Sprintf(netbirdDNSStateKeyIndexedFormat, suffix, i)
+			key := s.indexedStateKey(suffix, i)
 			if !strings.Contains(dnsKeys, key) {
 				break
 			}
@@ -224,7 +260,7 @@ func (s *systemConfigurator) addLocalDNS() error {
 			return fmt.Errorf("recordSystemDNSSettings(): %w", err)
 		}
 	}
-	localKey := getKeyWithInput(netbirdDNSStateKeyFormat, localSuffix)
+	localKey := s.stateKey(localSuffix)
 	if !s.systemDNSSettings.ServerIP.IsValid() || len(s.systemDNSSettings.Domains) == 0 {
 		log.Info("Not enabling local DNS server")
 		return nil
@@ -415,7 +451,7 @@ func (s *systemConfigurator) addBatchedDomains(suffix string, domains []string, 
 	batches := splitDomainsIntoBatches(domains)
 
 	for i, batch := range batches {
-		key := fmt.Sprintf(netbirdDNSStateKeyIndexedFormat, suffix, i)
+		key := s.indexedStateKey(suffix, i)
 		domainsStr := strings.Join(batch, " ")
 
 		if err := s.addDNSState(key, domainsStr, ip, port, enableSearch); err != nil {

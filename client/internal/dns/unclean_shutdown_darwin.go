@@ -8,6 +8,9 @@ import (
 
 type ShutdownState struct {
 	CreatedKeys []string
+	// Slot is the slot of the session that created the keys. Without recorded keys the cleanup
+	// looks for the keys of this slot only, so it cannot take those of another session.
+	Slot uint32 `json:",omitempty"`
 }
 
 func (s *ShutdownState) Name() string {
@@ -15,11 +18,7 @@ func (s *ShutdownState) Name() string {
 }
 
 func (s *ShutdownState) Cleanup() error {
-	manager, err := newHostManager()
-	if err != nil {
-		return fmt.Errorf("create host manager: %w", err)
-	}
-
+	manager := newSlotHostManager(s.Slot)
 	for _, key := range s.CreatedKeys {
 		manager.createdKeys[key] = struct{}{}
 	}

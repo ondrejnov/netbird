@@ -167,7 +167,7 @@ type DefaultServer struct {
 	fallbackHandler handlerWithStop
 
 	// hostSlot is DefaultServerConfig.Slot.
-	//nolint:unused // only used on Windows
+	//nolint:unused // only used on Windows and macOS
 	hostSlot uint32
 
 	// make sense on mobile only
@@ -218,11 +218,11 @@ type DefaultServerConfig struct {
 	StatusRecorder *peer.Status
 	StateManager   *statemanager.Manager
 	DisableSys     bool
-	// HostDNS shares the host DNS with other sessions on Linux, FreeBSD and Windows. Nil
-	// means this server is the only one on the host.
+	// HostDNS shares the host DNS with other sessions on Linux, FreeBSD, Windows and macOS.
+	// Nil means this server is the only one on the host.
 	HostDNS HostDNSCoordinator
 	// Slot names the host DNS entries of a session sharing the host, so they differ from those
-	// of the other sessions. Only Windows uses it, and only with HostDNS.
+	// of the other sessions. Only Windows and macOS use it, and only with HostDNS.
 	Slot uint32
 }
 
