@@ -32,8 +32,10 @@ func isDbusListenerRunning(dest string, path dbus.ObjectPath) bool {
 	return true
 }
 
+// getDbusObject opens a private connection: the shared one of dbus.SystemBus is used concurrently by
+// every session and other packages, and closing it fails their calls in flight.
 func getDbusObject(dest string, path dbus.ObjectPath) (dbus.BusObject, func(), error) {
-	conn, err := dbus.SystemBus()
+	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return nil, nil, fmt.Errorf("get dbus: %w", err)
 	}
