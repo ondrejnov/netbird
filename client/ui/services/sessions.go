@@ -87,6 +87,13 @@ func (st Status) focusedSession() (SessionStatus, bool) {
 	return SessionStatus{}, false
 }
 
+// FocusedProfileID returns the profile ID of the focused session, empty without the concurrent
+// profiles gate.
+func (st Status) FocusedProfileID() string {
+	focused, _ := st.focusedSession()
+	return focused.ProfileID
+}
+
 // SessionsFingerprint changes whenever a session starts, stops, changes its status, its conflict
 // or the focus.
 func (st Status) SessionsFingerprint() string {
