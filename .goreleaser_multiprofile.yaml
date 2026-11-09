@@ -2,10 +2,16 @@ version: 2
 # Build of the multi-profile fork (docs/specs/concurrent-profiles.md, 2.1).
 # Run it next to the upstream configuration, never in place of it:
 #   goreleaser release --snapshot --clean --config .goreleaser_multiprofile.yaml
-# Linux only. The multiprofile tag marks the version, switches off the lookup of
-# the latest upstream release and keeps the updater from installing
-# anything. Nothing here publishes a package or adds the official repository.
+# The Windows installer needs makensis, unzip and curl on the build host.
+# Linux and Windows. The multiprofile tag marks the version, switches off the
+# lookup of the latest upstream release and keeps the updater from installing
+# anything. A tag vX.Y.Z-multiprofile publishes to the fork's GitHub releases
+# only; no package repository, Homebrew tap or image registry is touched.
 project_name: netbird-multiprofile
+
+before:
+  hooks:
+    - bash release_files/multiprofile/fetch-wintun.sh
 
 builds:
   - id: netbird-multiprofile
@@ -17,18 +23,52 @@ builds:
     goarch:
       - amd64
       - arm64
+    # The binary reports X.Y.Z+multiprofile, so the tag suffix is not repeated.
     ldflags:
-      - -s -w -X github.com/netbirdio/netbird/version.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
+      - -s -w -X github.com/netbirdio/netbird/version.version={{.Major}}.{{.Minor}}.{{.Patch}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
     mod_timestamp: "{{ .CommitTimestamp }}"
     tags:
       - multiprofile
       - load_wgnt_from_rsrc
 
+  - id: netbird-multiprofile-windows
+    dir: client
+    binary: netbird
+    env: [CGO_ENABLED=0]
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/netbirdio/netbird/version.version={{.Major}}.{{.Minor}}.{{.Patch}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    tags:
+      - multiprofile
+      - load_wgnt_from_rsrc
+    hooks:
+      post:
+        - cmd: >-
+            bash release_files/multiprofile/windows-installer.sh
+            "{{ .Path }}" {{ .Arch }} {{ .Version }} {{ .Major }}.{{ .Minor }}.{{ .Patch }}
+            dist/{{ .ProjectName }}_{{ .Version }}_windows_{{ .Arch }}_installer.exe
+          output: true
+
 archives:
   - id: netbird-multiprofile
-    builds:
+    ids:
       - netbird-multiprofile
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: netbird-multiprofile-windows
+    ids:
+      - netbird-multiprofile-windows
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - zip
+    files:
+      - LICENSE
+      - src: ".wintun/wintun/bin/{{ .Arch }}/wintun.dll"
+        strip_parent: true
 
 nfpms:
   - id: netbird-multiprofile
@@ -39,7 +79,7 @@ nfpms:
     license: BSD-3-Clause
     vendor: NetBird fork
     bindir: /usr/bin
-    builds:
+    ids:
       - netbird-multiprofile
     formats:
       - deb
@@ -53,9 +93,20 @@ nfpms:
       postinstall: "release_files/post_install.sh"
       preremove: "release_files/pre_remove.sh"
 
-# Nothing is uploaded: the artifacts stay in dist/ and the owner distributes them.
+checksum:
+  extra_files:
+    - glob: ./dist/*_installer.exe
+
 release:
-  disable: true
+  github:
+    owner: ondrejnov
+    name: netbird
+  name_template: "{{ .Tag }}"
+  # The tag suffix is a fork marker, not a prerelease.
+  prerelease: "false"
+  make_latest: "true"
+  extra_files:
+    - glob: ./dist/*_installer.exe
 
 changelog:
   disable: true

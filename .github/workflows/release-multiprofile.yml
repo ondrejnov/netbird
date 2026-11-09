@@ -1,0 +1,85 @@
+name: Release multiprofile
+
+# A tag vX.Y.Z-multiprofile (or vX.Y.Z-multiprofile.N) publishes the fork's
+# Linux packages and Windows installer to the GitHub releases of this
+# repository. Pull requests that touch the release files and manual runs build
+# a snapshot and keep it as a workflow artifact.
+on:
+  push:
+    tags:
+      - "v*-multiprofile"
+      - "v*-multiprofile.*"
+  pull_request:
+    paths:
+      - .github/workflows/release-multiprofile.yml
+      - .goreleaser_multiprofile.yaml
+      - client/installer_multiprofile.nsis
+      - release_files/multiprofile/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GORELEASER_VER: "v2.16.0"
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-multiprofile(\.[0-9]+)?$ ]]; then
+            echo "::error::tag $GITHUB_REF_NAME is not vX.Y.Z-multiprofile or vX.Y.Z-multiprofile.N"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: "go.mod"
+
+      - name: Install NSIS
+        run: sudo apt-get update && sudo apt-get install -y nsis
+
+      - name: Set snapshot flag
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: echo "flags=--snapshot" >> "$GITHUB_ENV"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7.2.2
+        with:
+          version: ${{ env.GORELEASER_VER }}
+          args: release --config .goreleaser_multiprofile.yaml --clean ${{ env.flags }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Another tag on the same commit, such as the upstream one the fork
+          # release is based on, must not be picked instead.
+          GORELEASER_CURRENT_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+
+      - name: Upload snapshot
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: release-multiprofile
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*_installer.exe
+            dist/*checksums.txt
+          retention-days: 7
