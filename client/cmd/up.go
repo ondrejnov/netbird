@@ -148,7 +148,7 @@ func upFunc(cmd *cobra.Command, args []string) error {
 		return runInForegroundMode(ctx, cmd, activeProf)
 	}
 	if err := runInDaemonMode(ctx, cmd, pm, activeProf, profileSwitched); err != nil {
-		focus.giveBack(ctx, pm, activeProf.ID, username.Username)
+		focus.giveBack(ctx, pm, activeProf.ID)
 		return err
 	}
 	return nil

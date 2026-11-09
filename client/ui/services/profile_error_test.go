@@ -29,6 +29,12 @@ func (d *stubProfileDaemon) SwitchProfile(_ context.Context, _ *proto.SwitchProf
 	return nil, d.err
 }
 
+// GetFeatures reports the concurrent profiles gate off, so the switcher takes
+// the plain SwitchProfile path the refusal is raised on.
+func (d *stubProfileDaemon) GetFeatures(_ context.Context, _ *proto.GetFeaturesRequest, _ ...grpc.CallOption) (*proto.GetFeaturesResponse, error) {
+	return &proto.GetFeaturesResponse{}, nil
+}
+
 // sessionHeldRefusal is the error the daemon raises when another user holds the
 // connection, detail and all: see ipcauth.SessionHeldError.
 func sessionHeldRefusal(t *testing.T) error {

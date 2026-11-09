@@ -53,9 +53,10 @@ func focusBeforeSwitch(ctx context.Context, pm *profilemanager.ProfileManager) *
 
 // giveBack moves the focus back after an up of target failed. It leaves the focus on target when
 // the session runs after all, as a plain down is then to end it, and when someone else has moved
-// the focus since.
-func (f *focusReturn) giveBack(ctx context.Context, pm *profilemanager.ProfileManager, target profilemanager.ID, username string) {
-	if f == nil || (f.id == target.String() && f.username == username) {
+// the focus since. Profiles are compared by ID: the username the daemon reports for the focus is
+// the legacy directory of the profile, not the user who switched to it.
+func (f *focusReturn) giveBack(ctx context.Context, pm *profilemanager.ProfileManager, target profilemanager.ID) {
+	if f == nil || f.id == target.String() {
 		return
 	}
 
@@ -70,7 +71,7 @@ func (f *focusReturn) giveBack(ctx context.Context, pm *profilemanager.ProfileMa
 	defer conn.Close()
 	client := proto.NewDaemonServiceClient(conn)
 
-	if !focusStillOn(ctx, client, target, username) {
+	if !focusStillOn(ctx, client, target) {
 		return
 	}
 
@@ -87,18 +88,18 @@ func (f *focusReturn) giveBack(ctx context.Context, pm *profilemanager.ProfileMa
 }
 
 // focusStillOn reports whether the focus is on the session of target and that session does not run.
-func focusStillOn(ctx context.Context, client proto.DaemonServiceClient, target profilemanager.ID, username string) bool {
+func focusStillOn(ctx context.Context, client proto.DaemonServiceClient, target profilemanager.ID) bool {
 	active, err := client.GetActiveProfile(ctx, &proto.GetActiveProfileRequest{})
 	if err != nil {
 		log.Warnf("failed to read the focus of the daemon: %v", err)
 		return false
 	}
-	if active.GetId() != target.String() || active.GetUsername() != username {
+	if active.GetId() != target.String() {
 		return false
 	}
 
 	status, err := client.Status(ctx, &proto.StatusRequest{
-		Session: &proto.SessionSelector{Profile: target.String(), Username: username},
+		Session: &proto.SessionSelector{Profile: target.String(), Username: active.GetUsername()},
 	})
 	if err != nil {
 		log.Warnf("failed to read the status of profile %s: %v", target, err)
