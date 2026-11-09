@@ -83,3 +83,53 @@ jobs:
             dist/*_installer.exe
             dist/*checksums.txt
           retention-days: 7
+
+      - name: Upload Windows installer for the install test
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: windows-installer-amd64
+          path: dist/*_windows_amd64_installer.exe
+          retention-days: 3
+
+  # Installs, checks and removes the amd64 installer. On a tag the release is
+  # already published by then, so a failure here means fixing it and tagging
+  # a follow-up release.
+  test_windows_installer:
+    runs-on: windows-2022
+    needs: release
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Download installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-installer-amd64
+          path: installer
+
+      - name: Install
+        run: |
+          $exe = Get-ChildItem installer -Filter '*_installer.exe' | Select-Object -First 1
+          $p = Start-Process $exe.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exited with $($p.ExitCode)" }
+
+      - name: Check the installation
+        run: |
+          $dir = Join-Path $env:ProgramFiles 'Netbird'
+          if (-not (Test-Path (Join-Path $dir 'wintun.dll'))) { throw 'wintun.dll is missing' }
+          $version = & (Join-Path $dir 'netbird.exe') version
+          if ($version -notmatch '\+multiprofile$') { throw "unexpected version '$version'" }
+          $svc = Get-Service -Name Netbird
+          $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+          $path = [Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';'
+          if ($path -notcontains $dir) { throw "$dir is not on the machine PATH" }
+
+      - name: Uninstall
+        run: |
+          $dir = Join-Path $env:ProgramFiles 'Netbird'
+          $p = Start-Process (Join-Path $dir 'netbird_uninstall.exe') -ArgumentList "/S _?=$dir" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstaller exited with $($p.ExitCode)" }
+          if (Get-Service -Name Netbird -ErrorAction SilentlyContinue) { throw 'the service is still registered' }
+          if (Test-Path (Join-Path $dir 'netbird.exe')) { throw 'netbird.exe is still installed' }
+          $path = [Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';'
+          if ($path -contains $dir) { throw "$dir is still on the machine PATH" }

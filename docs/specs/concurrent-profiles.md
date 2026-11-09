@@ -568,11 +568,30 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 - **Build řídí tag `multiprofile`.** Bez něj se nemění nic: `fork_off.go` má prázdný `forkMarker`, `NetbirdVersion()` vrací `version` jako dřív a `.goreleaser.yaml` ani workflow se nedotkly. Tag má jen `.goreleaser_multiprofile.yaml`, který staví Linux (amd64, arm64) a balíčky deb a rpm `netbird-multiprofile`. Spuštění: `goreleaser release --snapshot --clean --config .goreleaser_multiprofile.yaml`. `release.disable`, žádný `publishers`, `brews`, `blobs` ani Docker: nic se nenahrává a oficiální repozitář se nepřidává (`install.sh` z `release_files` se pro fork nepoužívá, přidává právě ten repozitář). `TestForkReleaseConfig` hlídá Linux, tag, název balíčku, `conflicts` a `replaces` na `netbird` a nepublikování, `TestUpstreamReleaseConfigHasNoForkTag` hlídá, že tag není v upstream konfiguraci.
 - **Označení verze je build metadata `+multiprofile`** (`0.70.1+multiprofile`, `development+multiprofile`), takže ho nese status, `netbird version`, debug bundle (`status.txt` bere obě verze z `NetbirdVersion()`), User-Agent i verze, kterou klient hlásí Managementu a peerům. Metadata se při porovnání verzí nepočítají a `MeetsMinVersion` i `IsDevelopmentVersion` s nimi pracují, takže fork se řadí jako upstream vydání, ze kterého vychází (`TestForkVersionStaysComparable`). Označení se nepřidá dvakrát, kdyby ho vložil `ldflags`. Prerelease `-multiprofile` jsem nezvolil, protože by se řadilo pod vydání a `sanitizeVersion` ho odřezává.
 - **Dotaz na `pkgs.netbird.io`** (`version.Update.fetchVersion`) se s tagem nepošle: `StartFetcher` skončí hned a `fetchVersion` vrací false. `TestForkBuildDoesNotQueryReleaseEndpoint` počítá požadavky na testovací server, počet je nula. Updater klienta tím nikdy nezjistí „novější“ upstream verzi. Directive z Managementu (`SetVersion`) na Linuxu dál padá na download-only, protože `isAutoUpdateSupported` je tam false.
-- **Windows a macOS:** `isAutoUpdateSupported` vrací false, když `version.ForkBuild()`. Bez tagu se `supported_windows.go` chová jako dřív (`!false`). Fork se pro ty platformy nedistribuuje, build ale projde (`GOOS=windows` a `darwin`, s tagem i bez).
+- **Windows a macOS:** `isAutoUpdateSupported` vrací false, když `version.ForkBuild()`. Bez tagu se `supported_windows.go` chová jako dřív (`!false`). Windows od 2026-11-09 dostává instalátor, macOS se staví lokálně (viz „Vydání forku“ níže), build projde (`GOOS=windows` a `darwin`, s tagem i bez).
 - **Balíček:** deb a rpm instalují `/usr/bin/netbird` a službu `netbird` jako upstream, proto `conflicts` a `replaces` na `netbird`. Skripty `post_install.sh` a `pre_remove.sh` se berou beze změny. Přechod z upstream balíčku tedy odstraní jeho službu a nainstaluje službu forku (`/var/lib/netbird` zůstává).
 - **Existující testy:** `version/update_test.go` má `//go:build !multiprofile`, protože testuje právě dotaz, který fork vypíná. V `client/status/status_test.go` hlídá `withUpstreamVersion` fixtury s `development` i pro tagovaný build.
 - **Neověřeno:** samotný `goreleaser` v prostředí není, konfiguraci proto čte jen test (YAML), balíček se nestavěl. Test na Windows a macOS se jen kompiluje (`go vet` s tagem), neběží.
 - **Nález mimo rozsah (beze změny):** `TestDoNotUpdate` v `version` je pod `-race` červený, závod `StopWatch` a `StartFetcher` z PR 17 (viz výše). Platí s tagem i bez něj.
+
+**Vydání forku (rozhodnutí vlastníka 2026-11-09):** Linux a Windows z GitHub Actions, macOS se staví lokálně podle
+[macos-install.md](../macos-install.md). Nic se nepodepisuje, certifikáty se neplatí. Tímto se mění `release.disable`
+a „Linux only“ z PR 18 výše.
+
+- **Spouštěč:** tag `vX.Y.Z-multiprofile` nebo `vX.Y.Z-multiprofile.N` spustí `release-multiprofile.yml`. Ten vydá
+  do GitHub releases forku (`release.github` je pevně `ondrejnov/netbird`, hlídá `TestForkReleaseConfig`). PR, které
+  mění soubory vydání, a ruční spuštění staví snapshot jako artefakt. Upstream `release.yml` je smazaný: potřeboval
+  runner `ubuntu-24.04-8-core`, podpisové klíče a repozitáře NetBird, ve forku visel ve frontě nebo padal.
+- **Verze:** binárka hlásí `X.Y.Z+multiprofile` (`ldflags` bere jen `Major.Minor.Patch`), přípona tagu se neopakuje.
+  Deb má verzi `X.Y.Z~multiprofile`.
+- **Windows:** zip a nepodepsaný NSIS instalátor (`client/installer_multiprofile.nsis`) pro amd64 a arm64, jen CLI
+  a daemon s Wintun 0.14.1 z wintun.net (pevný SHA-256, `release_files/multiprofile/fetch-wintun.sh`). Instalátor
+  sdílí klíč `Uninstall\Netbird` s upstream, takže jeden nahradí druhý. PATH upravuje `path.ps1` místo pluginu EnVar,
+  hodnota zůstává `REG_EXPAND_SZ`. Instalátor odmítne architekturu, která neodpovídá hostiteli, protože Wintun
+  pod emulací nenaběhne. Job `test_windows_installer` instalátor na `windows-2022` nainstaluje, zkontroluje
+  verzi, službu, `wintun.dll` a PATH a zase odinstaluje. SmartScreen nepodepsaný instalátor varuje.
+- **Ověřeno lokálně:** `goreleaser release --snapshot` i režim tagu (`--skip=publish`) v kontejneru `golang:1.26.10`
+  s NSIS. Instalátor se na Windows lokálně nespouštěl, to dělá jen CI.
 
 **PR 19, `f3/scale-test`:**
 
