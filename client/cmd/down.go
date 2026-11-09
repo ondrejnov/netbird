@@ -25,10 +25,8 @@ var downCmd = &cobra.Command{
 
 		cmd.SetOut(cmd.OutOrStdout())
 
-		err := util.InitLog(logLevel, util.LogConsole)
-		if err != nil {
-			log.Errorf("failed initializing log %v", err)
-			return err
+		if err := util.InitLog(logLevel, util.LogConsole); err != nil {
+			return fmt.Errorf("initialize log: %w", err)
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
@@ -36,8 +34,7 @@ var downCmd = &cobra.Command{
 
 		conn, err := DialClientGRPCServer(ctx, daemonAddr)
 		if err != nil {
-			log.Errorf("failed to connect to service CLI interface %v", err)
-			return err
+			return fmt.Errorf("connect to service CLI interface: %w", err)
 		}
 		defer conn.Close()
 
@@ -49,8 +46,7 @@ var downCmd = &cobra.Command{
 		}
 
 		if _, err := daemonClient.Down(ctx, req); err != nil {
-			log.Errorf("call service down method: %v", err)
-			return withRunningSessions(ctx, daemonClient, req, err)
+			return withRunningSessions(ctx, daemonClient, req, daemonCallError("call service down method", err))
 		}
 
 		cmd.Println("Disconnected")

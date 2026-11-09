@@ -26,6 +26,7 @@ import (
 	gstatus "google.golang.org/grpc/status"
 
 	"github.com/netbirdio/netbird/client/internal/ipcauth"
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
@@ -148,34 +149,44 @@ func copyExecutable(t *testing.T, from, to string) {
 	require.NoError(t, target.Close())
 }
 
-// The whole way a request takes: the kernel says who connected, and the account database says whose
-// session that is. Nothing in the request can change either.
+// The whole way a request takes: the kernel says who connected, the gate checks the owner recorded
+// in the profile, and the handler picks the session. Nothing in the request can change either.
 func TestSessionAccessOverTheRealSocket(t *testing.T) {
 	ownAccount, err := user.Lookup(accessOwnUser)
 	require.NoError(t, err, "the harness image has the account")
-	_, err = user.Lookup(accessOtherUser)
+	otherAccount, err := user.Lookup(accessOtherUser)
 	require.NoError(t, err, "the harness image has the account")
 
 	f := newGateFixture(t)
-	// The account database of the host, not a stand-in.
-	f.s.lookupUIDFn = nil
+	dir := profilemanager.DefaultConfigPathDir
+	for profile, account := range map[string]*user.User{accessOwnProf: ownAccount, accessOtherProf: otherAccount} {
+		uid, err := strconv.ParseUint(account.Uid, 10, 32)
+		require.NoError(t, err)
+		owner := ipcauth.KnownForTest(ipcauth.Identity{UID: uint32(uid), GID: uint32(uid)})
+		require.NoError(t, profilemanager.StampOwner(filepath.Join(dir, profile+".json"), owner))
+	}
 
-	dir, err := os.MkdirTemp("", "access-socket")
+	socketDir, err := os.MkdirTemp("", "access-socket")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	require.NoError(t, os.Chmod(dir, 0o755))
-	socket := filepath.Join(dir, "daemon.sock")
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	require.NoError(t, os.Chmod(socketDir, 0o755))
+	socket := filepath.Join(socketDir, "daemon.sock")
 	listener, err := net.Listen("unix", socket)
 	require.NoError(t, err)
 	require.NoError(t, os.Chmod(socket, 0o666))
 
-	server := grpc.NewServer(grpc.Creds(ipcauth.NewTransportCredentials()))
+	gate := ipcauth.NewAuthzGate()
+	gate.SetState(f.s)
+	server := grpc.NewServer(
+		grpc.Creds(ipcauth.NewTransportCredentials()),
+		grpc.ChainUnaryInterceptor(gate.UnaryPolicyInterceptor()),
+		grpc.ChainStreamInterceptor(gate.StreamPolicyInterceptor()),
+	)
 	proto.RegisterDaemonServiceServer(server, f.s)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
-	own := sessionKeyOf(accessOwnProf, accessOwnUser)
-	other := sessionKeyOf(accessOtherProf, accessOtherUser)
+	own, other := f.second, f.third
 	require.NoError(t, f.up(own))
 	require.NoError(t, f.up(other))
 	require.NoError(t, f.up(f.first))

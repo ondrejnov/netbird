@@ -70,7 +70,7 @@ func (s *Server) adoptStoredConfigLocked(path string, config *profilemanager.Con
 		return
 	}
 	for _, ss := range s.sessions {
-		if sessionPath, err := profileStateOf(ss.key).FilePath(); err == nil && sessionPath == path {
+		if sessionPath, err := s.profileManager.ActiveProfilePath(profileStateOf(ss.key)); err == nil && sessionPath == path {
 			ss.setConfig(ss.key, config)
 			return
 		}

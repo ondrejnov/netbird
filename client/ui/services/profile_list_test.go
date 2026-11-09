@@ -39,7 +39,7 @@ func (d *listDaemon) GetConfig(_ context.Context, in *proto.GetConfigRequest, _ 
 func listedIDs(t *testing.T, d *listDaemon) []string {
 	t.Helper()
 
-	profiles, err := NewProfiles(stubConn{client: d}).List(context.Background(), "alice")
+	profiles, err := NewProfiles(stubConn{client: d}, nil, nil).List(context.Background(), "alice")
 	require.NoError(t, err)
 	ids := make([]string, 0, len(profiles))
 	for _, p := range profiles {

@@ -231,7 +231,7 @@ func TestCLI_TwoSessionsOnARealDaemon(t *testing.T) {
 	res = runCLIAt(t, addr, "profile", "list")
 	require.NoError(t, res.err, res.out)
 	assert.Regexp(t, `prace\s+Connected`, res.out)
-	assert.Regexp(t, `doma\s+✓\s+Connected`, res.out)
+	assert.Regexp(t, `doma\s+\*\s+Connected`, res.out)
 
 	// A selection moves the focus and leaves the connections as they are.
 	res = runCLIAt(t, addr, "profile", "select", "prace")

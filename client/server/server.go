@@ -152,9 +152,9 @@ type oauthAuthFlow struct {
 	info      auth.AuthFlowInfo
 
 	// cacheGeneration is the SSH JWT cache's generation as of the start of the
-	// request that created this flow. The flow outlives a profile switch, so
-	// reading the generation any later — when the IdP has answered, or when the
-	// token finally arrives — would read the new session's one and let the old
+	// request that created this flow. A logout or a profile switch clears the
+	// flow, but the IdP may already have been polled by then, so reading the
+	// generation any later would read the new session's one and let the old
 	// session's token into the new session's cache.
 	cacheGeneration uint64
 
@@ -253,9 +253,9 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	activeProf, err := s.profileManager.GetActiveProfileState()
+	activeProf, err := s.activeProfileAtStart()
 	if err != nil {
-		return fmt.Errorf("failed to get active profile state: %w", err)
+		return err
 	}
 
 	config, existingConfig, err := s.getConfig(activeProf)
@@ -287,6 +287,31 @@ func (s *Server) Start() error {
 	go s.connectWithRetryRuns(ctx, ss, activeProf.SessionKey(), config, runningChan, giveUpChan)
 	s.publishConfigChangedEvent(ss, proto.MetadataSourceStartup)
 	return nil
+}
+
+// activeProfileAtStart migrates the legacy profile layout and returns the active profile. A
+// half-migrated machine still runs, it just keeps resolving profiles the old way, so a failed
+// migration is logged and retried on the next start. An active profile that resolves to more
+// than one file could connect the machine as another user's profile, so the daemon comes up on
+// the default profile instead.
+func (s *Server) activeProfileAtStart() (*profilemanager.ActiveProfileState, error) {
+	if err := s.profileManager.MigrateLegacyProfiles(); err != nil {
+		log.Errorf("profile migration did not finish, retrying on next start: %v", err)
+	}
+
+	activeProf, err := s.profileManager.GetActiveProfileState()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active profile state: %w", err)
+	}
+
+	if _, err := s.profileManager.ActiveProfilePath(activeProf); errors.Is(err, profilemanager.ErrAmbiguousActiveProfile) {
+		log.Errorf("starting on the default profile, the active one could not be resolved: %v", err)
+		if err := s.profileManager.SetActiveProfileStateToDefault(); err != nil {
+			return nil, fmt.Errorf("set active profile to default: %w", err)
+		}
+		return &profilemanager.ActiveProfileState{ID: profilemanager.DefaultProfileName}, nil
+	}
+	return activeProf, nil
 }
 
 // startDaemonServices brings up what the daemon runs once, whatever its sessions do: residual
@@ -474,10 +499,6 @@ func (s *Server) loginAttempt(ctx context.Context, config *profilemanager.Config
 
 // Login uses setup key to prepare configuration for the daemon.
 func (s *Server) SetConfig(callerCtx context.Context, msg *proto.SetConfigRequest) (*proto.SetConfigResponse, error) {
-	if err := s.authorizeNamedProfile(callerCtx, msg.ProfileName, msg.Username); err != nil {
-		return nil, err
-	}
-
 	// Privilege gate: refuse the parts of the request that would let a local
 	// user turn the root daemon into a root shell. Held across the write so the
 	// config cannot gain the SSH server between the decision and the update.
@@ -491,12 +512,17 @@ func (s *Server) SetConfig(callerCtx context.Context, msg *proto.SetConfigReques
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	stored, err := s.storedProfileConfig(msg.ProfileName, msg.Username)
+	resolved, err := s.selectedProfile(callerCtx, msg.ProfileName)
 	if err != nil {
 		return nil, err
 	}
 
-	config, err := s.setConfigInputFromRequest(msg)
+	stored, err := s.storedProfileConfig(resolved)
+	if err != nil {
+		return nil, err
+	}
+
+	config, err := s.setConfigInputFromRequest(msg, resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +562,7 @@ func (s *Server) SetConfig(callerCtx context.Context, msg *proto.SetConfigReques
 	s.adoptStoredConfigLocked(config.ConfigPath, updatedConf)
 
 	if activeProf, err := s.profileManager.GetActiveProfileState(); err == nil {
-		if activePath, err := activeProf.FilePath(); err == nil && activePath == config.ConfigPath {
+		if activePath, err := s.profileManager.ActiveProfilePath(activeProf); err == nil && activePath == config.ConfigPath {
 			s.localMetrics.Reconcile(updatedConf.LocalMetricsEnabled, updatedConf.LocalMetricsAddress)
 		}
 	}
@@ -551,17 +577,10 @@ func (s *Server) SetConfig(callerCtx context.Context, msg *proto.SetConfigReques
 // fields (DNS labels, NAT external IPs). Extracted from SetConfig to
 // keep the handler's cognitive complexity below the SonarCube
 // threshold; the body is intentionally linear because each proto
-// field is its own optional case. Returns the resolved ConfigInput
-// and a non-nil error only when the active profile file path cannot
-// be determined.
-func (s *Server) setConfigInputFromRequest(msg *proto.SetConfigRequest) (profilemanager.ConfigInput, error) {
+// field is its own optional case. Returns the resolved ConfigInput.
+func (s *Server) setConfigInputFromRequest(msg *proto.SetConfigRequest, resolved *profilemanager.Profile) (profilemanager.ConfigInput, error) {
 	var config profilemanager.ConfigInput
 
-	resolved, err := s.resolveProfileHandle(msg.ProfileName, msg.Username)
-	if err != nil {
-		log.Errorf("failed to resolve profile %q: %v", msg.ProfileName, err)
-		return config, err
-	}
 	profPath := resolved.Path
 	if profPath == "" {
 		profPath = profilemanager.DefaultConfigPath
@@ -655,7 +674,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 	// refused login neither switches the profile nor cancels a login already
 	// in progress, and it is the profile the switch further down would
 	// activate.
-	stored, err := s.storedLoginConfig(activeProf, msg)
+	stored, err := s.storedLoginConfig(callerCtx, activeProf, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -713,7 +732,7 @@ func (s *Server) Login(callerCtx context.Context, msg *proto.LoginRequest) (*pro
 		return nil, err
 	}
 
-	log.Infof("active profile: %s for %s", activeProf.ID, activeProf.Username)
+	log.Infof("active profile: %s", activeProf.ID)
 
 	s.mutex.Lock()
 
@@ -1186,7 +1205,12 @@ func (s *Server) upLocked(callerCtx context.Context, ss *session, msg *proto.UpR
 	}
 
 	if msg != nil && msg.ProfileName != nil {
-		switched, err := s.switchProfileIfNeeded(*msg.ProfileName, msg.Username, activeProf)
+		resolved, err := s.selectedProfile(callerCtx, *msg.ProfileName)
+		if err != nil {
+			s.mutex.Unlock()
+			return false, err
+		}
+		switched, err := s.switchProfileIfNeeded(resolved, activeProf)
 		if err != nil {
 			s.mutex.Unlock()
 			log.Errorf("failed to switch profile: %v", err)
@@ -1204,7 +1228,7 @@ func (s *Server) upLocked(callerCtx context.Context, ss *session, msg *proto.UpR
 		return false, fmt.Errorf("failed to get active profile state: %w", err)
 	}
 
-	log.Infof("active profile: %s for %s", activeProf.ID, activeProf.Username)
+	log.Infof("active profile: %s", activeProf.ID)
 
 	if err := s.restoreOwnResidual(callerCtx, activeProf.SessionKey()); err != nil {
 		log.Warnf(errRestoreResidualState, err)
@@ -1260,12 +1284,7 @@ func (s *Server) waitForUp(callerCtx context.Context, ss *session) (*proto.UpRes
 // targets, so a privileged-change decision can be made against the values the
 // profile currently holds. A profile that has no config file yet yields nil,
 // which every caller must read as "nothing enabled yet".
-func (s *Server) storedProfileConfig(handle, username string) (*profilemanager.Config, error) {
-	resolved, err := s.resolveProfileHandle(handle, username)
-	if err != nil {
-		return nil, err
-	}
-
+func (s *Server) storedProfileConfig(resolved *profilemanager.Profile) (*profilemanager.Config, error) {
 	path := resolved.Path
 	if path == "" {
 		path = profilemanager.DefaultConfigPath
@@ -1277,24 +1296,23 @@ func (s *Server) storedProfileConfig(handle, username string) (*profilemanager.C
 // storedLoginConfig loads the on-disk config of the profile a login request
 // targets: the one it names, or the active one when it names none. Used to decide
 // a privileged change before the request is allowed to switch profiles.
-func (s *Server) storedLoginConfig(activeProf *profilemanager.ActiveProfileState, msg *proto.LoginRequest) (*profilemanager.Config, error) {
+func (s *Server) storedLoginConfig(ctx context.Context, activeProf *profilemanager.ActiveProfileState, msg *proto.LoginRequest) (*profilemanager.Config, error) {
 	// With the gate the state names the session the login was settled on, handle or no handle.
 	if msg.ProfileName == nil || s.concurrentProfiles {
-		cfgPath, err := activeProf.FilePath()
+		cfgPath, err := s.profileManager.ActiveProfilePath(activeProf)
 		if err != nil {
 			return nil, fmt.Errorf("active profile file path: %w", err)
 		}
 		return s.storedConfigAtPath(cfgPath)
 	}
 
-	// Mirrors switchProfileIfNeeded: the default profile resolves without a
-	// username, so this reads the same profile the switch would activate.
-	handle := *msg.ProfileName
-	username := ""
-	if handle != profilemanager.DefaultProfileName {
-		username = msg.GetUsername()
+	// Mirrors switchProfileIfNeeded, so this reads the very profile the switch
+	// would activate.
+	resolved, err := s.selectedProfile(ctx, msg.GetProfileName())
+	if err != nil {
+		return nil, err
 	}
-	return s.storedProfileConfig(handle, username)
+	return s.storedProfileConfig(resolved)
 }
 
 // storedConfigAtPath reads a profile config file, yielding nil when it does not
@@ -1318,54 +1336,25 @@ func (s *Server) storedConfigAtPath(path string) (*profilemanager.Config, error)
 	return cfg, nil
 }
 
-// resolveProfileHandle resolves a wire-level profile handle (display
-// name, ID, or unique ID prefix) to a concrete profile. Returns gRPC
-// status errors so handlers can return them directly.
-func (s *Server) resolveProfileHandle(handle, username string) (*profilemanager.Profile, error) {
-	p, err := s.profileManager.ResolveProfile(handle, username)
-	if err == nil {
-		return p, nil
+// callerIdentity returns the kernel-authenticated identity of the RPC caller.
+//
+// Every profile-addressing RPC scopes itself with this rather than with the
+// username its request carries: that field is whatever the client chose to
+// send, so scoping by it lets any local caller address another user's profile.
+// The username fields on the wire are kept for compatibility and ignored.
+func callerIdentity(ctx context.Context) (ipcauth.Identity, error) {
+	id, ok := ipcauth.CallerIdentity(ctx)
+	if !ok {
+		return ipcauth.Identity{}, gstatus.Error(codes.Unauthenticated, "caller identity could not be verified on the daemon control channel")
 	}
-	var amb *profilemanager.ErrAmbiguousHandle
-	if errors.As(err, &amb) {
-		return nil, gstatus.Errorf(codes.InvalidArgument, "%v", amb)
-	}
-	if errors.Is(err, profilemanager.ErrProfileNotFound) {
-		return nil, gstatus.Errorf(codes.NotFound, "profile %q not found", handle)
-	}
-	return nil, fmt.Errorf("resolve profile: %w", err)
+	return id, nil
 }
 
-// resolveNamedProfile resolves a handle a request names along with its username, which only
-// the default profile can do without, as every user shares it.
-func (s *Server) resolveNamedProfile(handle string, userName *string) (*profilemanager.Profile, string, error) {
-	if handle != profilemanager.DefaultProfileName && (userName == nil || *userName == "") {
-		log.Errorf("profile name is set to %s, but username is not provided", handle)
-		return nil, "", fmt.Errorf("profile name is set to %s, but username is not provided", handle)
-	}
-
-	var username string
-	if handle != profilemanager.DefaultProfileName {
-		username = *userName
-	}
-
-	resolved, err := s.resolveProfileHandle(handle, username)
-	if err != nil {
-		return nil, "", err
-	}
-	return resolved, username, nil
-}
-
-// switchProfileIfNeeded resolves the user-supplied handle, updates the
-// active profile state if it differs from the current one, and reports
-// whether the active profile changed.
-func (s *Server) switchProfileIfNeeded(handle string, userName *string, activeProf *profilemanager.ActiveProfileState) (bool, error) {
-	resolved, username, err := s.resolveNamedProfile(handle, userName)
-	if err != nil {
-		return false, err
-	}
-
-	if resolved.ID == activeProf.ID && username == activeProf.Username {
+// switchProfileIfNeeded updates the active profile state when the profile the
+// gate resolved differs from the current one, and reports whether the active
+// profile changed.
+func (s *Server) switchProfileIfNeeded(resolved *profilemanager.Profile, activeProf *profilemanager.ActiveProfileState) (bool, error) {
+	if s.isActiveProfile(activeProf, resolved) {
 		return false, nil
 	}
 
@@ -1374,10 +1363,10 @@ func (s *Server) switchProfileIfNeeded(handle string, userName *string, activePr
 		return false, gstatus.Errorf(codes.Unavailable, errProfilesDisabled)
 	}
 
-	log.Infof("switching to profile %s (%s) for user %s", resolved.Name, resolved.ID, username)
+	log.Infof("switching to profile %s (%s)", resolved.Name, resolved.ID)
 	if err := s.profileManager.SetActiveProfileState(&profilemanager.ActiveProfileState{
 		ID:       resolved.ID,
-		Username: username,
+		Username: legacyDirHint(resolved),
 	}); err != nil {
 		log.Errorf("failed to set active profile state: %v", err)
 		return false, fmt.Errorf("failed to set active profile state: %w", err)
@@ -1422,7 +1411,11 @@ func (s *Server) SwitchProfile(callerCtx context.Context, msg *proto.SwitchProfi
 	}
 
 	if msg != nil && msg.ProfileName != nil {
-		if _, err := s.switchProfileIfNeeded(*msg.ProfileName, msg.Username, activeProf); err != nil {
+		resolved, err := s.selectedProfile(callerCtx, *msg.ProfileName)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.switchProfileIfNeeded(resolved, activeProf); err != nil {
 			log.Errorf("failed to switch profile: %v", err)
 			return nil, err
 		}
@@ -1526,7 +1519,7 @@ func (s *Server) downSession(ctx context.Context, ss *session) error {
 // the lifecycle of ss, which keeps a new run out until the stop is over, and not s.mutex.
 func (s *Server) cleanupConnection(ss *session) error {
 	s.mutex.Lock()
-	ss.clearOAuthFlow()
+	ss.clearPendingAuthFlows()
 
 	if !ss.hasActCancel() {
 		s.mutex.Unlock()
@@ -1604,17 +1597,12 @@ func (s *Server) Logout(ctx context.Context, msg *proto.LogoutRequest) (*proto.L
 }
 
 func (s *Server) handleProfileLogout(ctx context.Context, target *session, msg *proto.LogoutRequest) (*proto.LogoutResponse, error) {
-	if msg.Username == nil || *msg.Username == "" {
-		return nil, gstatus.Errorf(codes.InvalidArgument, "username must be provided when profile name is specified")
-	}
-	username := *msg.Username
-
-	resolved, err := s.resolveProfileHandle(*msg.ProfileName, username)
+	resolved, err := s.selectedProfile(ctx, msg.GetProfileName())
 	if err != nil {
 		return nil, err
 	}
 
-	if err := s.requireLogoutTarget(target, resolved.ID, username); err != nil {
+	if err := s.requireLogoutTarget(target, resolved); err != nil {
 		return nil, err
 	}
 
@@ -1623,11 +1611,11 @@ func (s *Server) handleProfileLogout(ctx context.Context, target *session, msg *
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "failed to get active profile state: %v", err)
 	}
 
-	if err := s.validateProfileLogout(resolved.ID, isSessionProfile(current, resolved.ID, username)); err != nil {
+	if err := s.validateProfileLogout(resolved.ID, s.isSessionProfile(current, resolved)); err != nil {
 		return nil, err
 	}
 
-	if err := s.logoutFromProfile(ctx, resolved, username); err != nil {
+	if err := s.logoutFromProfile(ctx, resolved); err != nil {
 		log.Errorf("failed to logout from profile %s: %v", resolved.ID, err)
 		// A refused deregistration is already a status error carrying the reason
 		// and the command to run; rewrapping it as Internal would flatten both
@@ -1643,7 +1631,7 @@ func (s *Server) handleProfileLogout(ctx context.Context, target *session, msg *
 		return &proto.LogoutResponse{}, nil
 	}
 
-	s.cleanupAfterProfileLogout(resolved.ID, username)
+	s.cleanupAfterProfileLogout(resolved)
 
 	return &proto.LogoutResponse{}, nil
 }
@@ -1654,15 +1642,15 @@ func (s *Server) handleProfileLogout(ctx context.Context, target *session, msg *
 // Login switches profiles under guardedConfigMu, which this path does not hold,
 // so a login that landed meanwhile must not have its fresh connection dropped by
 // a logout that targeted the profile it replaced.
-func (s *Server) cleanupAfterProfileLogout(id profilemanager.ID, username string) {
+func (s *Server) cleanupAfterProfileLogout(profile *profilemanager.Profile) {
 	ss := s.focusedSession()
 	current, err := s.runningOrActiveKey()
 	if err != nil {
-		log.Errorf("failed to get active profile state after logout from profile %s: %v", id, err)
+		log.Errorf("failed to get active profile state after logout from profile %s: %v", profile.ID, err)
 		return
 	}
 
-	if !isSessionProfile(current, id, username) {
+	if !s.isSessionProfile(current, profile) {
 		return
 	}
 
@@ -1728,8 +1716,8 @@ func (s *Server) finishLogout(ctx context.Context, ss *session, config *profilem
 // key that stays in memory would come back different on the next start and
 // re-register the peer. Reads themselves are pure, so the write is here, in
 // the open, instead of hiding inside the reader.
-func provisionProfileIdentity(activeProf *profilemanager.ActiveProfileState) (*profilemanager.Config, bool, error) {
-	cfgPath, err := activeProf.FilePath()
+func provisionProfileIdentity(sm *profilemanager.ServiceManager, activeProf *profilemanager.ActiveProfileState) (*profilemanager.Config, bool, error) {
+	cfgPath, err := sm.ActiveProfilePath(activeProf)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to get active profile file path: %w", err)
 	}
@@ -1737,7 +1725,7 @@ func provisionProfileIdentity(activeProf *profilemanager.ActiveProfileState) (*p
 	_, err = os.Stat(cfgPath)
 	configExisted := !os.IsNotExist(err)
 
-	log.Infof("active profile config existed: %t, err %v", configExisted, err)
+	log.Debugf("active profile config existed: %t, err %v", configExisted, err)
 
 	config, err := profilemanager.ReadConfigOrDefault(cfgPath)
 	if err != nil {
@@ -1761,7 +1749,7 @@ func provisionProfileIdentity(activeProf *profilemanager.ActiveProfileState) (*p
 // getConfig resolves the active profile's config, provisions its identity and
 // reports whether the config file already existed.
 func (s *Server) getConfig(activeProf *profilemanager.ActiveProfileState) (*profilemanager.Config, bool, error) {
-	config, configExisted, err := provisionProfileIdentity(activeProf)
+	config, configExisted, err := provisionProfileIdentity(s.profileManager, activeProf)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1796,12 +1784,11 @@ func (s *Server) validateProfileLogout(id profilemanager.ID, isActive bool) erro
 	return nil
 }
 
-// isSessionProfile reports whether id is the profile key names for username. The
-// username is part of the comparison because legacy profile IDs are display names,
-// which two users can both hold; the default profile is shared by every user and
-// carries no username.
-func isSessionProfile(key profilemanager.SessionKey, id profilemanager.ID, username string) bool {
-	return sameSessionProfile(key, profilemanager.SessionKey{Profile: id, Username: username})
+// isSessionProfile reports whether profile is the one key names. The comparison ends on the
+// config file rather than on the ID, as a legacy profile ID is a display name two users can
+// each hold.
+func (s *Server) isSessionProfile(key profilemanager.SessionKey, profile *profilemanager.Profile) bool {
+	return s.isActiveProfile(profileStateOf(key), profile)
 }
 
 // runningOrActiveKey returns the profile a logout decides about: the one the session
@@ -1828,7 +1815,7 @@ func profileStateOf(key profilemanager.SessionKey) *profilemanager.ActiveProfile
 // overrides a deregistration has to honour. It does not provision an identity: a profile
 // without one has nothing to deregister.
 func (s *Server) storedRunningConfig(key profilemanager.SessionKey) (*profilemanager.Config, error) {
-	cfgPath, err := profileStateOf(key).FilePath()
+	cfgPath, err := s.profileManager.ActiveProfilePath(profileStateOf(key))
 	if err != nil {
 		return nil, fmt.Errorf("profile file path: %w", err)
 	}
@@ -1840,17 +1827,51 @@ func (s *Server) storedRunningConfig(key profilemanager.SessionKey) (*profileman
 	return config, nil
 }
 
+// isActiveProfile reports whether profile is the one the daemon runs.
+//
+// The comparison ends on the config file rather than on the ID, because a
+// legacy profile ID is a display name that two users can each hold: the path is
+// what tells alice's `work` from bob's. It is not the caller's username, which
+// says nothing about which profile the daemon activated.
+func (s *Server) isActiveProfile(activeProf *profilemanager.ActiveProfileState, profile *profilemanager.Profile) bool {
+	if activeProf == nil || profile == nil || activeProf.ID != profile.ID {
+		return false
+	}
+	if profile.ID == profilemanager.DefaultProfileName {
+		return true
+	}
+
+	activePath, err := s.profileManager.ActiveProfilePath(activeProf)
+	if err != nil {
+		log.Warnf("cannot resolve the active profile's path, treating %s as not active: %v", profile.ID, err)
+		return false
+	}
+	return activePath == profile.Path
+}
+
+// legacyDirHint records which per-username directory a pre-migration profile's
+// file sits in, which is all the active-profile state still reads its username
+// for. A profile in the shared directory needs no hint: its ID is unique. The
+// loader knows which directory is which, also when an override names the shared
+// one, so the hint comes from it rather than from the path.
+func legacyDirHint(profile *profilemanager.Profile) string {
+	if profile.ID == profilemanager.DefaultProfileName {
+		return ""
+	}
+	return profile.LegacyUserDir
+}
+
 // logoutFromProfile deregisters profile, reusing the running config when
-// profile is the one the daemon is connected with. The username takes part in
-// that decision for the same reason it does in the logout gate: a legacy
-// profile ID is a display name two users can share, and sending the running
-// config for a namesake would deregister the active peer instead of the
+// profile is the one the daemon is connected with. That decision is made on the
+// profile's file rather than on its ID, for the same reason the logout gate is:
+// a legacy profile ID is a display name two users can share, and sending the
+// running config for a namesake would deregister the active peer instead of the
 // requested one. The session config can belong to a profile selected since the
 // run started, and then only the stored config is the running profile's.
-func (s *Server) logoutFromProfile(ctx context.Context, profile *profilemanager.Profile, username string) error {
+func (s *Server) logoutFromProfile(ctx context.Context, profile *profilemanager.Profile) error {
 	ss := s.focusedSession()
 	current, err := s.runningOrActiveKey()
-	if err == nil && isSessionProfile(current, profile.ID, username) && ss.client() != nil && ss.configBelongsTo(current) {
+	if err == nil && s.isSessionProfile(current, profile) && ss.client() != nil && ss.configBelongsTo(current) {
 		return s.sendLogoutRequest(ctx)
 	}
 
@@ -2586,10 +2607,6 @@ func (s *Server) runProbes(ctx context.Context, ss *session, waitForProbeResult 
 
 // GetConfig of the daemon.
 func (s *Server) GetConfig(ctx context.Context, req *proto.GetConfigRequest) (*proto.GetConfigResponse, error) {
-	if err := s.authorizeNamedProfile(ctx, req.ProfileName, req.Username); err != nil {
-		return nil, err
-	}
-
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2597,9 +2614,8 @@ func (s *Server) GetConfig(ctx context.Context, req *proto.GetConfigRequest) (*p
 		return nil, ctx.Err()
 	}
 
-	resolved, err := s.resolveProfileHandle(req.ProfileName, req.Username)
+	resolved, err := s.selectedProfile(ctx, req.ProfileName)
 	if err != nil {
-		log.Errorf("failed to resolve profile %q: %v", req.ProfileName, err)
 		return nil, err
 	}
 	cfgPath := resolved.Path
@@ -2701,10 +2717,6 @@ func (s *Server) GetConfig(ctx context.Context, req *proto.GetConfigRequest) (*p
 
 // AddProfile adds a new profile to the daemon.
 func (s *Server) AddProfile(ctx context.Context, msg *proto.AddProfileRequest) (*proto.AddProfileResponse, error) {
-	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
-		return nil, err
-	}
-
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2712,11 +2724,16 @@ func (s *Server) AddProfile(ctx context.Context, msg *proto.AddProfileRequest) (
 		return nil, gstatus.Errorf(codes.Unavailable, errProfilesDisabled)
 	}
 
-	if msg.ProfileName == "" || msg.Username == "" {
-		return nil, gstatus.Errorf(codes.InvalidArgument, "profile name and username must be provided")
+	if msg.ProfileName == "" {
+		return nil, gstatus.Errorf(codes.InvalidArgument, "profile name must be provided")
 	}
 
-	created, err := s.profileManager.AddProfile(msg.ProfileName, msg.Username)
+	callerID, err := callerIdentity(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	created, err := s.profileManager.AddProfile(msg.ProfileName, &callerID)
 	if err != nil {
 		log.Errorf("failed to create profile: %v", err)
 		return nil, fmt.Errorf("failed to create profile: %w", err)
@@ -2728,10 +2745,6 @@ func (s *Server) AddProfile(ctx context.Context, msg *proto.AddProfileRequest) (
 }
 
 func (s *Server) RenameProfile(ctx context.Context, msg *proto.RenameProfileRequest) (*proto.RenameProfileResponse, error) {
-	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
-		return nil, err
-	}
-
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -2739,16 +2752,16 @@ func (s *Server) RenameProfile(ctx context.Context, msg *proto.RenameProfileRequ
 		return nil, gstatus.Errorf(codes.Unavailable, errProfilesDisabled)
 	}
 
-	if msg.Handle == "" || msg.Username == "" || msg.NewProfileName == "" {
-		return nil, gstatus.Errorf(codes.InvalidArgument, "profile name, username and new profile name must be provided")
+	if msg.Handle == "" || msg.NewProfileName == "" {
+		return nil, gstatus.Errorf(codes.InvalidArgument, "profile name and new profile name must be provided")
 	}
 
-	resolved, err := s.resolveProfileHandle(msg.Handle, msg.Username)
+	resolved, err := s.selectedProfile(ctx, msg.Handle)
 	if err != nil {
 		return nil, err
 	}
 
-	err = s.profileManager.RenameProfile(resolved.ID, msg.Username, msg.NewProfileName)
+	err = s.profileManager.RenameProfile(resolved.ID, msg.NewProfileName)
 	if err != nil {
 		log.Errorf("failed to rename profile: %v", err)
 		return nil, fmt.Errorf("failed to rename profile: %w", err)
@@ -2776,24 +2789,24 @@ func (s *Server) RemoveProfile(ctx context.Context, msg *proto.RemoveProfileRequ
 		return nil, gstatus.Errorf(codes.InvalidArgument, "profile name must be provided")
 	}
 
-	resolved, err := s.resolveProfileHandle(msg.ProfileName, msg.Username)
+	resolved, err := s.selectedProfile(ctx, msg.ProfileName)
 	if err != nil {
 		return nil, err
 	}
 
 	// Ahead of the deregistration, which cannot be undone.
-	if key, running := s.focusedSession().runningKey(); running && isSessionProfile(key, resolved.ID, msg.Username) {
+	if key, running := s.focusedSession().runningKey(); running && s.isSessionProfile(key, resolved) {
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "profile %q is running, bring the connection down first", msg.ProfileName)
 	}
 
-	if err := s.logoutFromProfile(ctx, resolved, msg.Username); err != nil {
+	if err := s.logoutFromProfile(ctx, resolved); err != nil {
 		// Deregistration is best-effort here: the local profile is removed
 		// either way, so an unprivileged caller leaves the peer registered on
 		// the management server rather than being blocked from removing it.
 		log.Warnf("removing profile %s locally without deregistering it: %v", resolved.ID, err)
 	}
 
-	if err := s.profileManager.RemoveProfile(resolved.ID, msg.Username); err != nil {
+	if err := s.profileManager.RemoveProfile(resolved.ID); err != nil {
 		log.Errorf("failed to remove profile: %v", err)
 		return nil, fmt.Errorf("failed to remove profile: %w", err)
 	}
@@ -2801,6 +2814,48 @@ func (s *Server) RemoveProfile(ctx context.Context, msg *proto.RemoveProfileRequ
 	s.publishProfileListChanged(msg.ProfileName)
 
 	return &proto.RemoveProfileResponse{Id: resolved.ID.String()}, nil
+}
+
+// ClaimProfile records an owner on a profile.
+//
+// Root or administrator only, enforced by the gate. The owner is whoever the
+// caller names rather than the caller's own identity, so it is validated
+// before anything is written.
+func (s *Server) ClaimProfile(ctx context.Context, msg *proto.ClaimProfileRequest) (*proto.ClaimProfileResponse, error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.checkProfilesDisabled() {
+		return nil, gstatus.Errorf(codes.Unavailable, errProfilesDisabled)
+	}
+
+	if msg.Handle == "" {
+		return nil, gstatus.Errorf(codes.InvalidArgument, "profile must be provided")
+	}
+	if msg.Owner == "" {
+		return nil, gstatus.Errorf(codes.InvalidArgument, "owner must be provided")
+	}
+
+	principal, err := ipcauth.ValidatePrincipal(msg.Owner)
+	if err != nil {
+		return nil, gstatus.Errorf(codes.InvalidArgument, "%v", err)
+	}
+
+	resolved, err := s.selectedProfile(ctx, msg.Handle)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.profileManager.ClaimProfile(resolved, principal); err != nil {
+		return nil, fmt.Errorf("failed to claim profile: %w", err)
+	}
+
+	s.publishProfileListChanged(resolved.Name)
+
+	return &proto.ClaimProfileResponse{
+		Id:    resolved.ID.String(),
+		Owner: principal.String(),
+	}, nil
 }
 
 // publishProfileListChanged nudges the desktop UI to refresh its profile list
@@ -2847,20 +2902,17 @@ func (s *Server) publishLogLevelChanged(level string) {
 	)
 }
 
-// ListProfiles lists all profiles in the daemon.
+// ListProfiles lists all profiles for the caller in the context.
 func (s *Server) ListProfiles(ctx context.Context, msg *proto.ListProfilesRequest) (*proto.ListProfilesResponse, error) {
-	if err := s.authorizeProfilesOf(ctx, msg.Username); err != nil {
-		return nil, err
-	}
-
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if msg.Username == "" {
-		return nil, gstatus.Errorf(codes.InvalidArgument, "username must be provided")
+	callerID, err := callerIdentity(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	profiles, err := s.profileManager.ListProfiles(msg.Username)
+	profiles, err := s.profileManager.ListProfiles(callerID)
 	if err != nil {
 		log.Errorf("failed to list profiles: %v", err)
 		return nil, fmt.Errorf("failed to list profiles: %w", err)
@@ -2870,10 +2922,15 @@ func (s *Server) ListProfiles(ctx context.Context, msg *proto.ListProfilesReques
 		Profiles: make([]*proto.Profile, len(profiles)),
 	}
 	for i, profile := range profiles {
+		owners := make([]string, 0, len(profile.Owners))
+		for _, owner := range profile.Owners {
+			owners = append(owners, owner.String())
+		}
 		response.Profiles[i] = &proto.Profile{
 			Id:       profile.ID.String(),
 			Name:     profile.Name,
 			IsActive: profile.IsActive,
+			Owners:   owners,
 		}
 	}
 
@@ -2892,12 +2949,14 @@ func (s *Server) GetActiveProfile(ctx context.Context, msg *proto.GetActiveProfi
 		log.Errorf("failed to get active profile state: %v", err)
 		return nil, fmt.Errorf("failed to get active profile state: %w", err)
 	}
-	if err := s.authorizeActiveProfile(ctx, activeProfile); err != nil {
-		return nil, err
+
+	userID, ok := ipcauth.CallerIdentity(ctx)
+	if !ok {
+		return nil, gstatus.Error(codes.Unauthenticated, "caller identity could not be resolved")
 	}
 
 	return &proto.GetActiveProfileResponse{
-		ProfileName: s.profileDisplayName(activeProfile.SessionKey()),
+		ProfileName: s.activeProfileNameFor(userID, activeProfile.ID),
 		Username:    activeProfile.Username,
 		Id:          activeProfile.ID.String(),
 	}, nil
@@ -2906,19 +2965,39 @@ func (s *Server) GetActiveProfile(ctx context.Context, msg *proto.GetActiveProfi
 // profileDisplayName returns the name of the profile of key, falling back to the legacy
 // name, which is the ID.
 func (s *Server) profileDisplayName(key profilemanager.SessionKey) string {
-	if key.Profile == profilemanager.DefaultProfileName {
-		return key.Profile.String()
-	}
-	profiles, err := s.profileManager.ListProfiles(key.Username)
+	profile, err := s.profileOfKey(key)
 	if err != nil {
 		return key.Profile.String()
 	}
+	return profile.Name
+}
+
+// profileOfKey reads the profile of key off disk, its owners included.
+func (s *Server) profileOfKey(key profilemanager.SessionKey) (*profilemanager.Profile, error) {
+	if key.Profile == profilemanager.DefaultProfileName {
+		return s.profileManager.ProfileByID(key.Profile)
+	}
+	path, err := s.profileManager.ActiveProfilePath(profileStateOf(key))
+	if err != nil {
+		return nil, err
+	}
+	return s.profileManager.ProfileByPath(path)
+}
+
+// activeProfileNameFor returns the display name of the active profile as this
+// caller may read it, and empty when the profile is not theirs.
+func (s *Server) activeProfileNameFor(caller ipcauth.Identity, activeID profilemanager.ID) string {
+	profiles, err := s.profileManager.ListProfiles(caller)
+	if err != nil {
+		log.Debugf("failed to list profiles to name the active one: %v", err)
+		return ""
+	}
 	for _, p := range profiles {
-		if p.ID == key.Profile {
+		if p.ID == activeID {
 			return p.Name
 		}
 	}
-	return key.Profile.String()
+	return ""
 }
 
 // GetFeatures returns the features supported by the daemon.
@@ -2961,13 +3040,38 @@ func (s *Server) checkDisableAdvancedView() *bool {
 	return nil
 }
 
+// profileOwnerOption names the owner of the profile being connected, whose certificate
+// store answers user certificate posture checks.
+func profileOwnerOption(config *profilemanager.Config) internal.ConnectClientOption {
+	owner, known := profileOwner(config)
+	if !known {
+		return internal.WithUnknownProfileOwner()
+	}
+	return internal.WithProfileOwner(owner)
+}
+
+// profileOwner returns the owner principal's value, a numeric uid or a SID. An unowned
+// profile yields an empty owner. An owner that names no account on this platform is
+// not known.
+func profileOwner(config *profilemanager.Config) (string, bool) {
+	if len(config.Owners) == 0 {
+		return "", true
+	}
+	principal, err := ipcauth.ValidatePrincipal(config.Owners[0])
+	if err != nil {
+		log.Warnf("no user certificate store is used for certificate posture: %v", err)
+		return "", false
+	}
+	return principal.Value, true
+}
+
 func (s *Server) connect(ctx context.Context, ss *session, key profilemanager.SessionKey, config *profilemanager.Config, runningChan chan struct{}) error {
 	if s.connectFn != nil {
 		return s.connectFn(ctx, ss, key, config, runningChan)
 	}
 
 	log.Tracef("running client connection")
-	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(ss, key)...)
+	client := internal.NewConnectClient(ctx, config, ss.statusRecorder, s.clientOptions(ss, key, config)...)
 	updateManager, releaseUpdates := s.claimUpdates(ss)
 	defer releaseUpdates()
 	client.SetUpdateManager(updateManager)
@@ -3144,7 +3248,7 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, ss *session
 	s.guardedConfigMu.Lock()
 	defer s.guardedConfigMu.Unlock()
 
-	stored, err := s.storedLoginConfig(activeProf, msg)
+	stored, err := s.storedLoginConfig(callerCtx, activeProf, msg)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -3179,7 +3283,11 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, ss *session
 		}
 	} else {
 		if msg.ProfileName != nil {
-			switched, err = s.switchProfileIfNeeded(*msg.ProfileName, msg.Username, activeProf)
+			resolved, err := s.selectedProfile(callerCtx, *msg.ProfileName)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			switched, err = s.switchProfileIfNeeded(resolved, activeProf)
 			if err != nil {
 				return nil, nil, false, fmt.Errorf("switch profile: %w", err)
 			}
@@ -3203,7 +3311,7 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, ss *session
 		}
 	}
 
-	if err := persistLoginOverrides(activeProf, msg); err != nil {
+	if err := s.persistLoginOverrides(activeProf, msg); err != nil {
 		return nil, nil, false, fmt.Errorf("persist login overrides: %w", err)
 	}
 
@@ -3212,23 +3320,163 @@ func (s *Server) authorizeAndPrepareLogin(callerCtx context.Context, ss *session
 	// it once this returns: between its read and its write, a SetConfig that
 	// had already answered its caller would be overwritten by the config this
 	// login read before it landed.
-	if _, _, err := provisionProfileIdentity(activeProf); err != nil {
+	if _, _, err := provisionProfileIdentity(s.profileManager, activeProf); err != nil {
 		return nil, nil, false, err
 	}
 
 	return ctx, activeProf, switched, nil
 }
 
+// SessionHolder returns the principal that owns the active profile while it is
+// connected. The owner is a config value, so it stays a principal and is never
+// turned into an identity.
+//
+// Only the first owner is read. The field is a list on disk so multiple owners
+// can be added later without a format change, but multiple owners are not
+// supported yet.
+func (s *Server) SessionHolder() (ipcauth.Principal, bool) {
+	ss := s.focusedSession()
+	if !ss.isClientRunning() {
+		return ipcauth.Principal{}, false
+	}
+
+	key, running := ss.runningKey()
+	if !running {
+		key, _ = ss.selectedConfig()
+	}
+
+	// The owner is read off disk rather than from the session's config, so a claim stamped
+	// since the run started is seen. A session whose profile cannot be read, or that has no
+	// owner, is held by the zero Principal, which matches nobody and fails closed.
+	profile, err := s.profileOfKey(key)
+	if err != nil {
+		log.Warnf("cannot read the owner of the running profile %s: %v", key.Profile, err)
+		return ipcauth.Principal{}, true
+	}
+	if len(profile.Owners) == 0 {
+		return ipcauth.Principal{}, true
+	}
+	return profile.Owners[0], true
+}
+
+// SessionPerProfile reports whether every profile runs a session of its own, which its owner
+// holds whatever else runs.
+func (s *Server) SessionPerProfile() bool {
+	return s.concurrentProfiles
+}
+
+// ResolveTarget resolves the profile a request names to a concrete profile and
+// reports whether this identity may address it.
+//
+// This triggers stamping of legacy and default profiles, and reloads the active
+// profile's config so the stamp is visible to SessionHolder.
+func (s *Server) ResolveTarget(id ipcauth.Identity, handle string) (ipcauth.Target, error) {
+	s.profileManager.ClaimDefaultProfileIfNeeded(id)
+	s.profileManager.ClaimLegacyProfiles(id)
+
+	// Without the active profile there is nothing to fall back to and nothing
+	// to refresh, so the gate gets a no rather than a guess. The handle is not
+	// what went wrong here, so the gate is left to refuse in its own words.
+	activeProfile, err := s.profileManager.GetActiveProfileState()
+	if err != nil {
+		log.Warnf("failed to get active profile: %v", err)
+		return ipcauth.Target{}, nil
+	}
+	if activeProfile == nil {
+		log.Warn("no active profile to authorize against")
+		return ipcauth.Target{}, nil
+	}
+	if handle == "" {
+		handle = activeProfile.ID.String()
+	}
+
+	match, matchErr := s.profileManager.MatchProfiles(handle)
+
+	if matchErr != nil {
+		log.Debugf("failed to match profile %q: %v", handle, matchErr)
+		return ipcauth.Target{}, matchHandleError(handle, matchErr)
+	}
+
+	return targetFromMatch(id, handle, match)
+}
+
+// targetFromMatch picks the profile the caller meant out of everything the
+// handle matched. Their own profile wins, only a handle matching two of the
+// caller's own profiles is ambiguous.
+func targetFromMatch(id ipcauth.Identity, handle string, match profilemanager.HandleMatch) (ipcauth.Target, error) {
+	var owned []profilemanager.Profile
+	for _, p := range match.Profiles {
+		if p.AccessibleBy(id) {
+			owned = append(owned, p)
+		}
+	}
+
+	switch {
+	case len(owned) == 1:
+		return targetForProfile(owned[0], true), nil
+
+	case len(owned) > 1:
+		return ipcauth.Target{}, gstatus.Errorf(codes.InvalidArgument, "%v", &profilemanager.ErrAmbiguousHandle{
+			Handle:     handle,
+			Candidates: owned,
+			Kind:       match.Kind,
+		})
+
+	case len(match.Profiles) > 0:
+		// The handle names a profile that is real but not the caller's.
+		return targetForProfile(match.Profiles[0], false), nil
+
+	default:
+		return ipcauth.Target{}, gstatus.Errorf(codes.NotFound, "profile %q not found", handle)
+	}
+}
+
+// targetForProfile describes a resolved profile for the gate. UnOwned comes
+// off the profile rather than from owned, since a privileged caller may address
+// a profile nobody has claimed.
+func targetForProfile(p profilemanager.Profile, owned bool) ipcauth.Target {
+	return ipcauth.Target{
+		Path:    p.Path,
+		Owned:   owned,
+		UnOwned: len(p.Owners) == 0,
+		Handle:  p.ID.String(),
+	}
+}
+
+// matchHandleError renders a failed match as something the caller can act on.
+func matchHandleError(handle string, err error) error {
+	if errors.Is(err, profilemanager.ErrProfileNotFound) {
+		return gstatus.Errorf(codes.NotFound, "profile %q not found", handle)
+	}
+	return fmt.Errorf("match profile: %w", err)
+}
+
+// targetProfile returns the profile the gate resolved and authorized for this
+// request.
+func (s *Server) targetProfile(ctx context.Context) (*profilemanager.Profile, error) {
+	path, ok := ipcauth.TargetFromContext(ctx)
+	if !ok {
+		return nil, gstatus.Error(codes.Internal, "no target profile was resolved for this request")
+	}
+
+	resolved, err := s.profileManager.ProfileByPath(path)
+	if err != nil {
+		log.Debugf("the profile the gate resolved at %q is gone: %v", path, err)
+		return nil, gstatus.Error(codes.NotFound, "the profile this request names is no longer there")
+	}
+	return resolved, nil
+}
+
 // persistLoginOverrides writes the config fields a login request is allowed to
 // carry into the active profile. It shares its input builder with the
 // update-settings gate, so the gate judges exactly the fields this writes.
-func persistLoginOverrides(activeProf *profilemanager.ActiveProfileState, msg *proto.LoginRequest) error {
+func (s *Server) persistLoginOverrides(activeProf *profilemanager.ActiveProfileState, msg *proto.LoginRequest) error {
 	input := loginOverridesInput(msg)
 	if input.ManagementURL == "" && input.PreSharedKey == nil {
 		return nil
 	}
 
-	cfgPath, err := activeProf.FilePath()
+	cfgPath, err := s.profileManager.ActiveProfilePath(activeProf)
 	if err != nil {
 		return fmt.Errorf("active profile file path: %w", err)
 	}

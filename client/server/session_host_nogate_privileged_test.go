@@ -32,6 +32,8 @@ func TestNoGateHostSnapshotMatchesToday(t *testing.T) {
 			t.Setenv(netstack.EnvUseNetstackMode, "false")
 
 			s, ctx, profile, username, cfgPath := setupServerWithProfile(t)
+			// The RPCs here name their profiles themselves, which the gate resolves one by one.
+			ctx = withTarget(ctx, "")
 			rootCtx, cancelRoot := context.WithCancel(ctx)
 			s.rootCtx = rootCtx
 			stopRunAtCleanup(t, s, cancelRoot)

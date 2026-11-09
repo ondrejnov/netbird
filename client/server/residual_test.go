@@ -38,11 +38,14 @@ func newResidualFixture(t *testing.T) *residualFixture {
 	t.Setenv("NB_DNS_STATE_FILE", "")
 
 	s, ctx, profName, username, cfgPath := setupServerWithProfile(t)
+	// The RPCs here name their profiles themselves, which the gate resolves one by one.
+	ctx = withTarget(ctx, "")
 	f := &residualFixture{
 		s:      s,
 		ctx:    ctx,
 		active: profilemanager.SessionKey{Profile: profilemanager.ID(profName), Username: username},
-		other:  profilemanager.SessionKey{Profile: "other-profile", Username: username},
+		// A profile in the shared directory carries no username in its key.
+		other: profilemanager.SessionKey{Profile: "other-profile"},
 	}
 	s.flushRoutesFn = func() error {
 		f.flushes++

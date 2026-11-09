@@ -44,6 +44,8 @@ func TestUp_ProfileOfAConnectedSessionWithTheGateIsAlreadyConnected(t *testing.T
 	d := newGateDaemon(t)
 	d.status[profileWork.Id] = "Connected"
 	d.status[profileHome.Id] = "Connected"
+	// The caller holds the session, so the daemon answers with its peer detail.
+	d.fullStatus = true
 
 	res := runCLI(t, d, "up", "--profile", profileHome.Name)
 	require.NoError(t, res.err, res.out)
@@ -78,6 +80,7 @@ func TestUp_ProfileWithoutTheGateTakesTheConnectionDown(t *testing.T) {
 			d := newGateDaemon(t)
 			d.features = features
 			d.status[profileHome.Id] = "Connected"
+			d.fullStatus = true
 
 			res := runCLI(t, d, "up", "--profile", profileHome.Name)
 			require.NoError(t, res.err, res.out)
@@ -95,6 +98,7 @@ func TestUp_UnreadableFeaturesTakeNothingDown(t *testing.T) {
 	d := newGateDaemon(t)
 	d.featuresErr = gstatus.Error(codes.Internal, "features are unavailable")
 	d.status[profileHome.Id] = "Connected"
+	d.fullStatus = true
 
 	res := runCLI(t, d, "up", "--profile", profileHome.Name)
 
@@ -322,6 +326,7 @@ func TestProfileSelect_WithoutTheGateTakesTheConnectionDown(t *testing.T) {
 			d := newGateDaemon(t)
 			d.features = features
 			d.status[profileHome.Id] = "Connected"
+			d.fullStatus = true
 
 			res := runCLI(t, d, "profile", "select", profileHome.Name)
 			require.NoError(t, res.err, res.out)
@@ -342,7 +347,7 @@ func TestProfileList_WithTheGateShowsTheConnectionStatus(t *testing.T) {
 	require.NoError(t, res.err, res.out)
 
 	assert.Regexp(t, `NAME\s+ACTIVE\s+STATUS`, res.out)
-	assert.Regexp(t, `prace\s+✓\s+Connected`, res.out)
+	assert.Regexp(t, `prace\s+\*\s+Connected`, res.out)
 	assert.Regexp(t, `doma\s+Connecting`, res.out)
 }
 
@@ -367,7 +372,7 @@ func TestProfileList_WithoutTheGateIsWhatItWasToday(t *testing.T) {
 			res := runCLI(t, d, "profile", "list")
 			require.NoError(t, res.err, res.out)
 
-			assert.Equal(t, "NAME   ACTIVE\nprace  ✓\ndoma   \n", res.out)
+			assert.Equal(t, "NAME   ACTIVE\nprace  *\ndoma   \n", res.out)
 		})
 	}
 }

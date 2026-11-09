@@ -74,14 +74,6 @@ type sessionSet struct {
 	advancedRoutingFn func() bool
 	removeLinksFn     func(records []hostcoord.SlotRecord) error
 	verifyLinksFn     func(records []hostcoord.SlotRecord) error
-
-	// lookupUIDFn and accountsFn stand in for the account database of the host. Tests set them;
-	// production leaves them nil.
-	lookupUIDFn func(username string) (uint32, error)
-	accountsFn  func() ([]hostAccount, error)
-	// accountNameFn and windowsAccountsFn do the same for a Windows host.
-	accountNameFn     func(sid string) (string, error)
-	windowsAccountsFn func() ([]windowsAccount, error)
 }
 
 func newSessionSet(concurrentProfiles bool) sessionSet {
@@ -93,9 +85,10 @@ func newSessionSet(concurrentProfiles bool) sessionSet {
 	return set
 }
 
-// clientOptions binds a client to its profile and, with the gate, to its share of the host.
-func (s *Server) clientOptions(ss *session, key profilemanager.SessionKey) []internal.ConnectClientOption {
-	opts := []internal.ConnectClientOption{internal.WithSessionKey(key)}
+// clientOptions binds a client to its profile and, with the gate, to its share of the host. The
+// owner of the profile comes from its config, after the key that leaves it unknown.
+func (s *Server) clientOptions(ss *session, key profilemanager.SessionKey, config *profilemanager.Config) []internal.ConnectClientOption {
+	opts := []internal.ConnectClientOption{internal.WithSessionKey(key), profileOwnerOption(config)}
 	if s.concurrentProfiles {
 		opts = append(opts, internal.WithSessionHost(s.host.Session(key, ss.statusRecorder)))
 	}
@@ -297,7 +290,7 @@ func (s *Server) loginTarget(ctx context.Context, msg *proto.LoginRequest) (*ses
 		return s.checkSessionSelector(ctx, nil)
 	}
 
-	ss, err := s.namedSession(s.callerOf(ctx), *msg.ProfileName, msg.GetUsername())
+	ss, err := s.namedSession(ctx, *msg.ProfileName)
 	if err != nil {
 		return nil, err
 	}
@@ -324,17 +317,17 @@ func (s *Server) logoutTarget(ctx context.Context, msg *proto.LogoutRequest) (*s
 	if !s.concurrentProfiles {
 		return s.focusedSession(), nil
 	}
-	if msg.ProfileName == nil || *msg.ProfileName == "" || msg.Username == nil || *msg.Username == "" {
+	if msg.ProfileName == nil || *msg.ProfileName == "" {
 		return s.checkSessionSelector(ctx, nil)
 	}
-	return s.namedSession(s.callerOf(ctx), *msg.ProfileName, msg.GetUsername())
+	return s.namedSession(ctx, *msg.ProfileName)
 }
 
 // requireLogoutTarget refuses a logout whose handle no longer resolves to the session it was checked
 // against: a profile added or renamed in between can move a handle. It would deregister one peer and
 // clear the login of another session.
-func (s *Server) requireLogoutTarget(target *session, id profilemanager.ID, username string) error {
-	if s.concurrentProfiles && target.key != sessionKeyOf(id, username) {
+func (s *Server) requireLogoutTarget(target *session, resolved *profilemanager.Profile) error {
+	if s.concurrentProfiles && !s.isSessionProfile(target.key, resolved) {
 		return gstatus.Error(codes.FailedPrecondition, "the profile changed during the logout, try again")
 	}
 	return nil
@@ -383,16 +376,13 @@ func (s *Server) removeProfileConcurrent(ctx context.Context, msg *proto.RemoveP
 	if msg.ProfileName == "" {
 		return nil, gstatus.Errorf(codes.InvalidArgument, "profile name must be provided")
 	}
-	if err := s.authorizeNamedProfile(ctx, msg.ProfileName, msg.Username); err != nil {
-		return nil, err
-	}
-	resolved, err := s.resolveProfileHandle(msg.ProfileName, msg.Username)
+	resolved, err := s.selectedProfile(ctx, msg.ProfileName)
 	if err != nil {
 		return nil, err
 	}
 
-	key := sessionKeyOf(resolved.ID, msg.Username)
 	s.mutex.Lock()
+	key := s.keyOfProfileLocked(resolved)
 	ss := s.sessionOfLocked(key)
 	s.mutex.Unlock()
 
@@ -406,14 +396,14 @@ func (s *Server) removeProfileConcurrent(ctx context.Context, msg *proto.RemoveP
 		return nil, gstatus.Errorf(codes.FailedPrecondition, "profile %q is running, bring the connection down first", msg.ProfileName)
 	}
 
-	if err := s.logoutFromProfile(ctx, resolved, msg.Username); err != nil {
+	if err := s.logoutFromProfile(ctx, resolved); err != nil {
 		log.Warnf("removing profile %s locally without deregistering it: %v", resolved.ID, err)
 	}
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if err := s.profileManager.RemoveProfile(resolved.ID, msg.Username); err != nil {
+	if err := s.profileManager.RemoveProfile(resolved.ID); err != nil {
 		log.Errorf("failed to remove profile: %v", err)
 		return nil, fmt.Errorf("failed to remove profile: %w", err)
 	}
@@ -434,8 +424,11 @@ func (s *Server) removeProfileConcurrent(ctx context.Context, msg *proto.RemoveP
 // selector act on, and leaves every session as it is. The focus follows the active profile file,
 // which is why the file is written only once the new session has a config to answer with.
 func (s *Server) switchFocus(ctx context.Context, msg *proto.SwitchProfileRequest) (*proto.SwitchProfileResponse, error) {
+	var resolved *profilemanager.Profile
 	if msg != nil && msg.ProfileName != nil {
-		if err := s.authorizeNamedProfile(ctx, *msg.ProfileName, msg.GetUsername()); err != nil {
+		var err error
+		if resolved, err = s.selectedProfile(ctx, *msg.ProfileName); err != nil {
+			log.Errorf("failed to switch profile: %v", err)
 			return nil, err
 		}
 	}
@@ -446,13 +439,8 @@ func (s *Server) switchFocus(ctx context.Context, msg *proto.SwitchProfileReques
 	previous := s.focusedSession()
 	key := previous.key
 
-	if msg != nil && msg.ProfileName != nil {
-		resolved, username, err := s.resolveNamedProfile(*msg.ProfileName, msg.Username)
-		if err != nil {
-			log.Errorf("failed to switch profile: %v", err)
-			return nil, err
-		}
-		key = sessionKeyOf(resolved.ID, username)
+	if resolved != nil {
+		key = s.keyOfProfileLocked(resolved)
 		if key != previous.key && s.checkProfilesDisabled() {
 			return nil, profilesDisabledError()
 		}
@@ -466,7 +454,7 @@ func (s *Server) switchFocus(ctx context.Context, msg *proto.SwitchProfileReques
 	}
 
 	if key != previous.key {
-		log.Infof("switching focus to profile %s for user %s", key.Profile, key.Username)
+		log.Infof("switching focus to profile %s", key.Profile)
 		if err := s.profileManager.SetActiveProfileState(target); err != nil {
 			log.Errorf("failed to set active profile state: %v", err)
 			return nil, fmt.Errorf("failed to set active profile state: %w", err)

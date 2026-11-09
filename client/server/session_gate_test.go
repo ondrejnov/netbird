@@ -17,10 +17,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	gstatus "google.golang.org/grpc/status"
+	protobuf "google.golang.org/protobuf/proto"
 
 	"github.com/netbirdio/netbird/client/iface/netstack"
 	"github.com/netbirdio/netbird/client/internal"
 	"github.com/netbirdio/netbird/client/internal/hostcoord"
+	"github.com/netbirdio/netbird/client/internal/ipcauth"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/internal/statemanager"
 	"github.com/netbirdio/netbird/client/proto"
@@ -70,17 +72,20 @@ func prepareGateServer(t *testing.T, opts ...gateOption) *gateFixture {
 	t.Setenv(netstack.EnvUseNetstackMode, "false")
 
 	s, ctx, profName, username, cfgPath := setupServerWithProfile(t)
+	// The RPCs here name their profiles themselves, which the gate resolves one by one.
+	ctx = withTarget(ctx, "")
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)
 	s.localMetrics = s.newLocalMetrics(rootCtx)
 
 	f := &gateFixture{
-		s:        s,
-		ctx:      ctx,
-		first:    profilemanager.SessionKey{Profile: profilemanager.ID(profName), Username: username},
-		second:   profilemanager.SessionKey{Profile: "second-profile", Username: username},
-		third:    profilemanager.SessionKey{Profile: "third-profile", Username: username},
+		s:     s,
+		ctx:   ctx,
+		first: profilemanager.SessionKey{Profile: profilemanager.ID(profName), Username: username},
+		// Profiles in the shared directory carry no username in their key.
+		second:   profilemanager.SessionKey{Profile: "second-profile"},
+		third:    profilemanager.SessionKey{Profile: "third-profile"},
 		runs:     make(map[profilemanager.SessionKey]int),
 		failRuns: make(map[profilemanager.SessionKey]error),
 	}
@@ -561,103 +566,184 @@ func (f fakeServerStream[T]) Context() context.Context { return f.ctx }
 
 func (f fakeServerStream[T]) Send(*T) error { return nil }
 
+// selectorRPC is one RPC with a selector: its request and how to call its handler with it.
+type selectorRPC struct {
+	req    any
+	stream bool
+	call   func(ctx context.Context) error
+}
+
+func rpcWith[T any](req *T, stream bool, call func(ctx context.Context, req *T) error) selectorRPC {
+	return selectorRPC{req: req, stream: stream, call: func(ctx context.Context) error { return call(ctx, req) }}
+}
+
 // Every RPC with a selector. A handler that forgets the check would answer about the wrong session
 // without saying so.
-func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelector) map[string]func() error {
-	return map[string]func() error{
-		"Status": func() error {
-			_, err := s.Status(ctx, &proto.StatusRequest{Session: selector})
+func selectorRPCTable(s *Server, selector *proto.SessionSelector) map[string]selectorRPC {
+	return map[string]selectorRPC{
+		"Status": rpcWith(&proto.StatusRequest{Session: selector}, false, func(ctx context.Context, req *proto.StatusRequest) error {
+			_, err := s.Status(ctx, req)
 			return err
-		},
-		"SubscribeStatus": func() error {
-			return s.SubscribeStatus(&proto.StatusRequest{Session: selector}, fakeServerStream[proto.StatusResponse]{ctx: ctx})
-		},
-		"SubscribeEvents": func() error {
-			return s.SubscribeEvents(&proto.SubscribeRequest{Session: selector}, fakeServerStream[proto.SystemEvent]{ctx: ctx})
-		},
-		"Down": func() error {
-			_, err := s.Down(ctx, &proto.DownRequest{Session: selector})
+		}),
+		"SubscribeStatus": rpcWith(&proto.StatusRequest{Session: selector}, true, func(ctx context.Context, req *proto.StatusRequest) error {
+			return s.SubscribeStatus(req, fakeServerStream[proto.StatusResponse]{ctx: ctx})
+		}),
+		"SubscribeEvents": rpcWith(&proto.SubscribeRequest{Session: selector}, true, func(ctx context.Context, req *proto.SubscribeRequest) error {
+			return s.SubscribeEvents(req, fakeServerStream[proto.SystemEvent]{ctx: ctx})
+		}),
+		"Down": rpcWith(&proto.DownRequest{Session: selector}, false, func(ctx context.Context, req *proto.DownRequest) error {
+			_, err := s.Down(ctx, req)
 			return err
-		},
-		"WaitSSOLogin": func() error {
-			_, err := s.WaitSSOLogin(ctx, &proto.WaitSSOLoginRequest{Session: selector})
+		}),
+		"WaitSSOLogin": rpcWith(&proto.WaitSSOLoginRequest{Session: selector}, false, func(ctx context.Context, req *proto.WaitSSOLoginRequest) error {
+			_, err := s.WaitSSOLogin(ctx, req)
 			return err
-		},
-		"ListNetworks": func() error {
-			_, err := s.ListNetworks(ctx, &proto.ListNetworksRequest{Session: selector})
+		}),
+		"ListNetworks": rpcWith(&proto.ListNetworksRequest{Session: selector}, false, func(ctx context.Context, req *proto.ListNetworksRequest) error {
+			_, err := s.ListNetworks(ctx, req)
 			return err
-		},
-		"SelectNetworks": func() error {
-			_, err := s.SelectNetworks(ctx, &proto.SelectNetworksRequest{Session: selector})
+		}),
+		"SelectNetworks": rpcWith(&proto.SelectNetworksRequest{Session: selector}, false, func(ctx context.Context, req *proto.SelectNetworksRequest) error {
+			_, err := s.SelectNetworks(ctx, req)
 			return err
-		},
-		"DeselectNetworks": func() error {
-			_, err := s.DeselectNetworks(ctx, &proto.SelectNetworksRequest{Session: selector})
+		}),
+		"DeselectNetworks": rpcWith(&proto.SelectNetworksRequest{Session: selector}, false, func(ctx context.Context, req *proto.SelectNetworksRequest) error {
+			_, err := s.DeselectNetworks(ctx, req)
 			return err
-		},
-		"TracePacket": func() error {
-			_, err := s.TracePacket(ctx, &proto.TracePacketRequest{Session: selector})
+		}),
+		"TracePacket": rpcWith(&proto.TracePacketRequest{Session: selector}, false, func(ctx context.Context, req *proto.TracePacketRequest) error {
+			_, err := s.TracePacket(ctx, req)
 			return err
-		},
-		"StartCapture": func() error {
-			return s.StartCapture(&proto.StartCaptureRequest{Session: selector}, fakeServerStream[proto.CapturePacket]{ctx: ctx})
-		},
-		"GetPeerSSHHostKey": func() error {
-			_, err := s.GetPeerSSHHostKey(ctx, &proto.GetPeerSSHHostKeyRequest{Session: selector})
+		}),
+		"StartCapture": rpcWith(&proto.StartCaptureRequest{Session: selector}, true, func(ctx context.Context, req *proto.StartCaptureRequest) error {
+			return s.StartCapture(req, fakeServerStream[proto.CapturePacket]{ctx: ctx})
+		}),
+		"GetPeerSSHHostKey": rpcWith(&proto.GetPeerSSHHostKeyRequest{Session: selector}, false, func(ctx context.Context, req *proto.GetPeerSSHHostKeyRequest) error {
+			_, err := s.GetPeerSSHHostKey(ctx, req)
 			return err
-		},
-		"RequestJWTAuth": func() error {
-			_, err := s.RequestJWTAuth(ctx, &proto.RequestJWTAuthRequest{Session: selector})
+		}),
+		"RequestJWTAuth": rpcWith(&proto.RequestJWTAuthRequest{Session: selector}, false, func(ctx context.Context, req *proto.RequestJWTAuthRequest) error {
+			_, err := s.RequestJWTAuth(ctx, req)
 			return err
-		},
-		"WaitJWTToken": func() error {
-			_, err := s.WaitJWTToken(ctx, &proto.WaitJWTTokenRequest{Session: selector})
+		}),
+		"WaitJWTToken": rpcWith(&proto.WaitJWTTokenRequest{Session: selector}, false, func(ctx context.Context, req *proto.WaitJWTTokenRequest) error {
+			_, err := s.WaitJWTToken(ctx, req)
 			return err
-		},
-		"RequestExtendAuthSession": func() error {
-			_, err := s.RequestExtendAuthSession(ctx, &proto.RequestExtendAuthSessionRequest{Session: selector})
+		}),
+		"RequestExtendAuthSession": rpcWith(&proto.RequestExtendAuthSessionRequest{Session: selector}, false, func(ctx context.Context, req *proto.RequestExtendAuthSessionRequest) error {
+			_, err := s.RequestExtendAuthSession(ctx, req)
 			return err
-		},
-		"WaitExtendAuthSession": func() error {
-			_, err := s.WaitExtendAuthSession(ctx, &proto.WaitExtendAuthSessionRequest{Session: selector})
+		}),
+		"WaitExtendAuthSession": rpcWith(&proto.WaitExtendAuthSessionRequest{Session: selector}, false, func(ctx context.Context, req *proto.WaitExtendAuthSessionRequest) error {
+			_, err := s.WaitExtendAuthSession(ctx, req)
 			return err
-		},
-		"DismissSessionWarning": func() error {
-			_, err := s.DismissSessionWarning(ctx, &proto.DismissSessionWarningRequest{Session: selector})
+		}),
+		"DismissSessionWarning": rpcWith(&proto.DismissSessionWarningRequest{Session: selector}, false, func(ctx context.Context, req *proto.DismissSessionWarningRequest) error {
+			_, err := s.DismissSessionWarning(ctx, req)
 			return err
-		},
-		"ExposeService": func() error {
-			return s.ExposeService(&proto.ExposeServiceRequest{Session: selector}, fakeServerStream[proto.ExposeServiceEvent]{ctx: ctx})
-		},
-		"ListStates": func() error {
-			_, err := s.ListStates(ctx, &proto.ListStatesRequest{Session: selector})
+		}),
+		"ExposeService": rpcWith(&proto.ExposeServiceRequest{Session: selector}, true, func(ctx context.Context, req *proto.ExposeServiceRequest) error {
+			return s.ExposeService(req, fakeServerStream[proto.ExposeServiceEvent]{ctx: ctx})
+		}),
+		"ListStates": rpcWith(&proto.ListStatesRequest{Session: selector}, false, func(ctx context.Context, req *proto.ListStatesRequest) error {
+			_, err := s.ListStates(ctx, req)
 			return err
-		},
-		"CleanState": func() error {
-			_, err := s.CleanState(ctx, &proto.CleanStateRequest{Session: selector})
+		}),
+		"CleanState": rpcWith(&proto.CleanStateRequest{Session: selector}, false, func(ctx context.Context, req *proto.CleanStateRequest) error {
+			_, err := s.CleanState(ctx, req)
 			return err
-		},
-		"DeleteState": func() error {
-			_, err := s.DeleteState(ctx, &proto.DeleteStateRequest{Session: selector})
+		}),
+		"DeleteState": rpcWith(&proto.DeleteStateRequest{Session: selector}, false, func(ctx context.Context, req *proto.DeleteStateRequest) error {
+			_, err := s.DeleteState(ctx, req)
 			return err
-		},
-		"DebugBundle": func() error {
-			_, err := s.DebugBundle(ctx, &proto.DebugBundleRequest{Session: selector})
+		}),
+		"DebugBundle": rpcWith(&proto.DebugBundleRequest{Session: selector}, false, func(ctx context.Context, req *proto.DebugBundleRequest) error {
+			_, err := s.DebugBundle(ctx, req)
 			return err
-		},
-		"SetSyncResponsePersistence": func() error {
-			_, err := s.SetSyncResponsePersistence(ctx, &proto.SetSyncResponsePersistenceRequest{Session: selector})
+		}),
+		"SetSyncResponsePersistence": rpcWith(&proto.SetSyncResponsePersistenceRequest{Session: selector}, false, func(ctx context.Context, req *proto.SetSyncResponsePersistenceRequest) error {
+			_, err := s.SetSyncResponsePersistence(ctx, req)
 			return err
-		},
-		"StartBundleCapture": func() error {
-			_, err := s.StartBundleCapture(ctx, &proto.StartBundleCaptureRequest{Session: selector})
+		}),
+		"StartBundleCapture": rpcWith(&proto.StartBundleCaptureRequest{Session: selector}, false, func(ctx context.Context, req *proto.StartBundleCaptureRequest) error {
+			_, err := s.StartBundleCapture(ctx, req)
 			return err
-		},
-		"StopBundleCapture": func() error {
-			_, err := s.StopBundleCapture(ctx, &proto.StopBundleCaptureRequest{Session: selector})
+		}),
+		"StopBundleCapture": rpcWith(&proto.StopBundleCaptureRequest{Session: selector}, false, func(ctx context.Context, req *proto.StopBundleCaptureRequest) error {
+			_, err := s.StopBundleCapture(ctx, req)
 			return err
-		},
+		}),
 	}
+}
+
+// selectorRPCs calls the handlers directly, the way they run behind a gate that let them through.
+func selectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelector) map[string]func() error {
+	calls := make(map[string]func() error)
+	for name, rpc := range selectorRPCTable(s, selector) {
+		calls[name] = func() error { return rpc.call(ctx) }
+	}
+	return calls
+}
+
+// gatedSelectorRPCs calls the handlers behind the authorization gate, as the daemon serves them.
+func gatedSelectorRPCs(s *Server, ctx context.Context, selector *proto.SessionSelector) map[string]func() error {
+	calls := make(map[string]func() error)
+	for name, rpc := range selectorRPCTable(s, selector) {
+		calls[name] = func() error {
+			if rpc.stream {
+				return viaGateStream(s, ctx, name, rpc.req, rpc.call)
+			}
+			return viaGate(s, ctx, name, rpc.req, rpc.call)
+		}
+	}
+	return calls
+}
+
+// viaGate runs a unary handler behind the authorization gate.
+func viaGate(s *Server, ctx context.Context, method string, req any, call func(ctx context.Context) error) error {
+	gate := ipcauth.NewAuthzGate()
+	gate.SetState(s)
+	info := &grpc.UnaryServerInfo{FullMethod: "/daemon.DaemonService/" + method}
+	_, err := gate.UnaryPolicyInterceptor()(ctx, req, info, func(ctx context.Context, _ any) (any, error) {
+		return nil, call(ctx)
+	})
+	return err
+}
+
+// viaGateStream runs a server-streaming handler behind the authorization gate, which authorizes
+// the stream on its request when the handler reads it, as the generated handler does.
+func viaGateStream(s *Server, ctx context.Context, method string, req any, call func(ctx context.Context) error) error {
+	gate := ipcauth.NewAuthzGate()
+	gate.SetState(s)
+	info := &grpc.StreamServerInfo{FullMethod: "/daemon.DaemonService/" + method, IsServerStream: true}
+	stream := &requestStream{ctx: ctx, req: req.(protobuf.Message)}
+	return gate.StreamPolicyInterceptor()(s, stream, info, func(_ any, authorized grpc.ServerStream) error {
+		received := protobuf.Clone(stream.req)
+		if err := authorized.RecvMsg(received); err != nil {
+			return err
+		}
+		// The gate can trim the request it authorized, and the handler gets it as trimmed.
+		protobuf.Reset(stream.req)
+		protobuf.Merge(stream.req, received)
+		return call(authorized.Context())
+	})
+}
+
+// requestStream is the server side of a stream whose one request is req.
+type requestStream struct {
+	grpc.ServerStream
+	ctx context.Context
+	req protobuf.Message
+}
+
+func (r *requestStream) Context() context.Context { return r.ctx }
+
+// RecvMsg hands over the request.
+func (r *requestStream) RecvMsg(m any) error {
+	msg := m.(protobuf.Message)
+	protobuf.Reset(msg)
+	protobuf.Merge(msg, r.req)
+	return nil
 }
 
 // Without the gate there is one session, and a selector can only name what it runs.
@@ -680,12 +766,13 @@ func TestSessionSelector_OtherThanFocusedIsRefusedWithoutTheGate(t *testing.T) {
 	}
 }
 
-// The gate must not change who may do what without it: nothing asks for the identity.
-func TestSessionSelector_WithoutTheGateIgnoresTheIdentity(t *testing.T) {
+// Without concurrent profiles the session selector adds no check of its own: the authorization gate
+// decides who reaches the one session, and the handler only asks whether the selector names it.
+func TestSessionSelector_WithoutTheGateAddsNoCheck(t *testing.T) {
 	f := newResidualFixture(t)
-	selector := &proto.SessionSelector{Profile: string(f.active.Profile), Username: f.active.Username}
+	selector := &proto.SessionSelector{Profile: string(f.active.Profile), Username: "someone else"}
 
-	for name, ctx := range map[string]context.Context{"another user": userCtx(), "an unknown caller": context.Background()} {
+	for name, ctx := range map[string]context.Context{"the owner": userCtx(), "root": rootCtx()} {
 		for _, session := range []*proto.SessionSelector{nil, selector} {
 			_, err := f.s.Status(ctx, &proto.StatusRequest{Session: session})
 			assert.NoError(t, err, name)

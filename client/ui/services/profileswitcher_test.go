@@ -83,7 +83,7 @@ func newSwitcher(t *testing.T, daemon *switchDaemon) *ProfileSwitcher {
 	})
 
 	conn := stubConn{client: daemon}
-	return NewProfileSwitcher(NewProfiles(conn), NewConnection(conn, nil, nil), &DaemonFeed{conn: conn, emitter: nopEmitter{}})
+	return NewProfileSwitcher(NewProfiles(conn, nil, nil), NewConnection(conn, nil, nil), &DaemonFeed{conn: conn, emitter: nopEmitter{}})
 }
 
 // Without the concurrent profiles gate the switch keeps the upstream order: the focus moves before

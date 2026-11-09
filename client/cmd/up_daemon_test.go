@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"os/user"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/ipcauth"
 	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
@@ -23,6 +25,8 @@ func TestUpDaemon(t *testing.T) {
 	profilemanager.DefaultConfigPathDir = tempDir
 	profilemanager.DefaultConfigPath = tempDir + "/default.json"
 	profilemanager.ActiveProfileStatePath = tempDir + "/active_profile.json"
+	// Without this the loader reads the real /var/lib/netbird/default.json.
+	profilemanager.DefaultConfigPath = filepath.Join(tempDir, "default.json")
 	profilemanager.ConfigDirOverride = tempDir
 
 	currUser, err := user.Current()
@@ -31,8 +35,14 @@ func TestUpDaemon(t *testing.T) {
 		return
 	}
 
+	identity, err := ipcauth.CurrentProcessIdentity()
+	if err != nil {
+		t.Fatalf("failed to read this process's identity: %v", err)
+		return
+	}
+
 	sm := profilemanager.ServiceManager{}
-	created, err := sm.AddProfile("test1", currUser.Username)
+	created, err := sm.AddProfile("test1", &identity)
 	if err != nil {
 		t.Fatalf("failed to add profile: %v", err)
 		return

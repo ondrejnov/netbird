@@ -19,6 +19,8 @@ import (
 // so the probe can only have come from Start itself.
 func TestStart_ProbesRoutingWithoutASession(t *testing.T) {
 	s, ctx, _, _, cfgPath := setupServerWithProfile(t)
+	// The RPCs here name their profiles themselves, which the gate resolves one by one.
+	ctx = withTarget(ctx, "")
 	ctx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
 	s.rootCtx = ctx

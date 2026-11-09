@@ -160,7 +160,7 @@ func TestOAuthFlowRecord_ConcurrentAccess(t *testing.T) {
 	}, func() {
 		ss.swapOAuthFlow(next)
 		ss.setCapture(nil)
-		ss.clearOAuthFlow()
+		ss.clearPendingAuthFlows()
 	})
 
 	assert.Nil(t, ss.oauthFlow().flow, "the last writer cleared the record")

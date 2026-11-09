@@ -86,9 +86,18 @@ func crashSession(t *testing.T, s *Server, key profilemanager.SessionKey) *sessi
 	require.Eventuallyf(t, func() bool {
 		s.mutex.Lock()
 		defer s.mutex.Unlock()
-		found, ok := s.sessions[normalized]
-		ss = found
-		return ok
+		if found, ok := s.sessions[normalized]; ok {
+			ss = found
+			return true
+		}
+		// A session an Up started for a profile in the shared directory carries no username.
+		for candidate, found := range s.sessions {
+			if candidate.Profile == key.Profile {
+				ss = found
+				return true
+			}
+		}
+		return false
 	}, 60*time.Second, 100*time.Millisecond, "profile %s should have a session", key.Profile)
 	return ss
 }
@@ -360,6 +369,8 @@ func runCrashedSessionInterface(t *testing.T) {
 	removeLinksAfter(t)
 
 	_, ctx, work, username, cfgPath := setupServerWithProfile(t)
+	// The RPCs here name their profiles themselves, which the gate resolves one by one.
+	ctx = withTarget(ctx, "")
 	dir := filepath.Dir(cfgPath)
 	_, signalAddr, err := startSignal(t)
 	require.NoError(t, err)

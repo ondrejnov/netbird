@@ -73,9 +73,9 @@ func (s *Server) prepareConcurrentStart() (concurrentStart, error) {
 		return concurrentStart{}, err
 	}
 
-	activeProf, err := s.profileManager.GetActiveProfileState()
+	activeProf, err := s.activeProfileAtStart()
 	if err != nil {
-		return concurrentStart{}, fmt.Errorf("failed to get active profile state: %w", err)
+		return concurrentStart{}, err
 	}
 
 	stored, err := hostcoord.StoredRecords(profilemanager.DefaultConfigPathDir)
@@ -384,14 +384,13 @@ func (s *Server) upTargetKey(ctx context.Context, msg *proto.UpRequest) (profile
 		return focused, nil
 	}
 
-	if err := requireProfileReachable(caller, *msg.ProfileName, msg.GetUsername()); err != nil {
-		return profilemanager.SessionKey{}, err
-	}
-	resolved, username, err := s.resolveNamedProfile(*msg.ProfileName, msg.Username)
+	resolved, err := s.selectedProfile(ctx, *msg.ProfileName)
 	if err != nil {
 		return profilemanager.SessionKey{}, err
 	}
-	key := sessionKeyOf(resolved.ID, username)
+	s.mutex.Lock()
+	key := s.keyOfProfileLocked(resolved)
+	s.mutex.Unlock()
 	if key != focused && s.checkProfilesDisabled() {
 		return profilemanager.SessionKey{}, profilesDisabledError()
 	}

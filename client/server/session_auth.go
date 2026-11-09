@@ -29,10 +29,15 @@ func (ss *session) swapOAuthFlow(next oauthAuthFlow) context.CancelFunc {
 	return displaced
 }
 
-func (ss *session) clearOAuthFlow() {
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	ss.oauthAuthFlow = oauthAuthFlow{}
+// clearPendingAuthFlows drops both pending authentication flows of ss and wakes their
+// waiters. A flow is only ever authorized against the profile it started for, so leaving one
+// behind across a logout or a teardown would hand its result to whoever comes next.
+func (ss *session) clearPendingAuthFlows() {
+	if cancel := ss.swapOAuthFlow(oauthAuthFlow{}); cancel != nil {
+		cancel()
+	}
+	ss.extendAuthSessionFlow.CancelWait()
+	ss.extendAuthSessionFlow.Clear()
 }
 
 // clearOAuthFlowIf clears the record if flow is still the pending one, and reports

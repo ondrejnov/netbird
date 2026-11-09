@@ -66,7 +66,13 @@ func newSessionsFixtureInMode(t *testing.T) *sessionsFixture {
 	t.Setenv("NB_DNS_STATE_FILE", "")
 	t.Setenv(netstack.EnvUseNetstackMode, "false")
 
-	s, ctx, work, username, cfgPath := setupServerWithProfile(t)
+	s, ctx, work, _, cfgPath := setupServerWithProfile(t)
+	// The RPCs here name their profiles themselves, which the gate resolves one by one.
+	ctx = withTarget(ctx, "")
+	// The profiles sit in the shared directory, whose keys carry no username, and the active
+	// profile state says so too, as a switch writes it.
+	username := ""
+	require.NoError(t, s.profileManager.SetActiveProfileState(&profilemanager.ActiveProfileState{ID: profilemanager.ID(work)}))
 	rootCtx, cancelRoot := context.WithCancel(ctx)
 	s.rootCtx = rootCtx
 	s.sessionSet = newSessionSet(true)

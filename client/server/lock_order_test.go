@@ -206,7 +206,7 @@ func TestSessionMethods_DoNotWaitForOuterLocks(t *testing.T) {
 		ss.configBelongsToRun()
 		ss.oauthFlow()
 		ss.swapOAuthFlow(oauthAuthFlow{})
-		ss.clearOAuthFlow()
+		ss.clearPendingAuthFlows()
 		ss.clearOAuthFlowIf(nil)
 		ss.expireOAuthFlow(nil)
 		ss.claimOAuthWait(nil, func() {})
@@ -325,6 +325,8 @@ func TestDown_WaitsForTheLifecycleWithoutServerMutex(t *testing.T) {
 
 func TestUp_WaitsForTheLifecycleWithoutServerMutex(t *testing.T) {
 	s, ctx, _, _, _ := setupServerWithProfile(t)
+	// The RPCs here name their profiles themselves, which the gate resolves one by one.
+	ctx = withTarget(ctx, "")
 	requireWaitsOnLifecycle(t, s, func() error {
 		_, err := s.Up(ctx, &proto.UpRequest{})
 		return err
@@ -333,6 +335,8 @@ func TestUp_WaitsForTheLifecycleWithoutServerMutex(t *testing.T) {
 
 func TestLogout_WaitsForTheLifecycleWithoutServerMutex(t *testing.T) {
 	s, ctx, _, _, cfgPath := setupServerWithProfile(t)
+	// The RPCs here name their profiles themselves, which the gate resolves one by one.
+	ctx = withTarget(ctx, "")
 	// The deregistration goes to a Management of the test, not to a host that needs a network.
 	management := mgmtmeta.Start(t)
 	_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{

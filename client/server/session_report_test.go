@@ -171,7 +171,7 @@ func TestDebugBundle_CoversTheSessionsOfTheCaller(t *testing.T) {
 	t.Run("a caller without a selector", func(t *testing.T) {
 		entries := bundle(aliceCtx(), nil)
 		assert.Contains(t, entries["status.txt"], "Profile: "+string(f.alice.Profile), "the top is about the focused session")
-		assert.Contains(t, entries, sessionDir(f.shared)+"status.txt", "the shared session may be read by anyone")
+		assert.NotContains(t, entries, sessionDir(f.shared)+"status.txt", "the default profile nobody claimed is not alice's")
 		assert.NotContains(t, entries, sessionDir(f.bob)+"status.txt", "the session of another user must stay out")
 		assert.NotContains(t, entries, "client.log", "the log of the daemon also speaks of the session of bob")
 	})

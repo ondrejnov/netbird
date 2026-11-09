@@ -104,7 +104,7 @@ func TestDisconnectOnQuit(t *testing.T) {
 		t.Helper()
 		daemon := &switchDaemon{gate: gate}
 		conn := stubConn{client: daemon}
-		require.NoError(t, DisconnectOnQuit(context.Background(), NewProfiles(conn), NewConnection(conn, nil, nil)))
+		require.NoError(t, DisconnectOnQuit(context.Background(), NewProfiles(conn, nil, nil), NewConnection(conn, nil, nil)))
 		require.Len(t, daemon.down, 1, "quitting should send one Down")
 		return daemon.down[0]
 	}

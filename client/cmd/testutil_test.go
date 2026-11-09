@@ -10,6 +10,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 
 	"github.com/netbirdio/netbird/management/server/integrations/integrated_validator/validator"
 
@@ -23,6 +25,7 @@ import (
 	nbgrpc "github.com/netbirdio/netbird/management/internals/shared/grpc"
 	"github.com/netbirdio/netbird/management/server/job"
 
+	"github.com/netbirdio/netbird/client/internal/ipcauth"
 	clientProto "github.com/netbirdio/netbird/client/proto"
 	client "github.com/netbirdio/netbird/client/server"
 	"github.com/netbirdio/netbird/management/internals/server/config"
@@ -158,10 +161,19 @@ func startClientDaemon(
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := grpc.NewServer()
+	identity, err := ipcauth.CurrentProcessIdentity()
+	require.NoError(t, err)
+	gate := ipcauth.NewAuthzGate()
+	// A TCP listener carries no caller identity, which the daemon refuses. The process is the
+	// caller of every RPC here, so its identity stands in for what the unix socket reports.
+	s := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(withCallerIdentity(identity), gate.UnaryPolicyInterceptor()),
+		grpc.ChainStreamInterceptor(withStreamCallerIdentity(identity), gate.StreamPolicyInterceptor()),
+	)
 
 	server := client.New(ctx,
 		"", "", false, false, false, false, false)
+	gate.SetState(server)
 	if err := server.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -176,3 +188,29 @@ func startClientDaemon(
 
 	return s, lis
 }
+
+func callerContext(ctx context.Context, identity ipcauth.Identity) context.Context {
+	return peer.NewContext(ctx, &peer.Peer{AuthInfo: ipcauth.AuthInfo{
+		CommonAuthInfo: credentials.CommonAuthInfo{SecurityLevel: credentials.NoSecurity},
+		Identity:       identity,
+	}})
+}
+
+func withCallerIdentity(identity ipcauth.Identity) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		return handler(callerContext(ctx, identity), req)
+	}
+}
+
+func withStreamCallerIdentity(identity ipcauth.Identity) grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		return handler(srv, identityStream{ServerStream: ss, ctx: callerContext(ss.Context(), identity)})
+	}
+}
+
+type identityStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s identityStream) Context() context.Context { return s.ctx }

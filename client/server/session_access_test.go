@@ -3,12 +3,9 @@ package server
 import (
 	"archive/zip"
 	"context"
-	"errors"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -36,8 +33,8 @@ const (
 // selectorRPCCount is the number of RPCs with a selector. A new one has to join selectorRPCs.
 const selectorRPCCount = 24
 
-// accessFixture is a daemon with the gate on, a session each for alice and bob next to the shared
-// default session, and the four callers an RPC can have.
+// accessFixture is a daemon with the gate on, a profile each owned by alice and bob next to the
+// default profile nobody has claimed, and the four callers an RPC can have.
 type accessFixture struct {
 	*gateFixture
 	alice  profilemanager.SessionKey
@@ -51,31 +48,45 @@ func newAccessFixture(t *testing.T) *accessFixture {
 
 	f := newGateFixture(t)
 	f.s.captureEnabled = true
-	f.s.lookupUIDFn = func(username string) (uint32, error) {
-		switch username {
-		case "alice":
-			return aliceUID, nil
-		case "bob":
-			return bobUID, nil
-		}
-		return 0, user.UnknownUserError(username)
-	}
+
+	dir := profilemanager.DefaultConfigPathDir
+	require.NoError(t, profilemanager.StampOwner(filepath.Join(dir, string(f.second.Profile)+".json"), aliceIdentity()))
+	require.NoError(t, profilemanager.StampOwner(filepath.Join(dir, string(f.third.Profile)+".json"), bobIdentity()))
 
 	return &accessFixture{
 		gateFixture: f,
-		alice:       profilemanager.SessionKey{Profile: f.second.Profile, Username: "alice"},
-		bob:         profilemanager.SessionKey{Profile: f.third.Profile, Username: "bob"},
+		alice:       f.second,
+		bob:         f.third,
 		shared:      profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName},
 	}
 }
 
-func aliceCtx() context.Context {
-	return ctxWithIdentity(ipcauth.Identity{UID: aliceUID, GID: aliceUID})
+// ownDefaultProfile records owner on the default profile, creating it when it is not there yet.
+func ownDefaultProfile(t *testing.T, owner ipcauth.Identity) {
+	t.Helper()
+	if _, err := os.Stat(profilemanager.DefaultConfigPath); err == nil {
+		require.NoError(t, profilemanager.StampOwner(profilemanager.DefaultConfigPath, owner))
+		return
+	}
+	_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
+		ConfigPath:    profilemanager.DefaultConfigPath,
+		ManagementURL: "http://127.0.0.1:1",
+		Owner:         &owner,
+	})
+	require.NoError(t, err)
 }
 
-func bobCtx() context.Context {
-	return ctxWithIdentity(ipcauth.Identity{UID: bobUID, GID: bobUID})
+func aliceIdentity() ipcauth.Identity {
+	return ipcauth.KnownForTest(ipcauth.Identity{UID: aliceUID, GID: aliceUID})
 }
+
+func bobIdentity() ipcauth.Identity {
+	return ipcauth.KnownForTest(ipcauth.Identity{UID: bobUID, GID: bobUID})
+}
+
+func aliceCtx() context.Context { return ctxWithIdentity(aliceIdentity()) }
+
+func bobCtx() context.Context { return ctxWithIdentity(bobIdentity()) }
 
 // unknownCtx is a caller on a control channel that carries no identity.
 func unknownCtx() context.Context { return context.Background() }
@@ -84,11 +95,11 @@ func selectorOf(key profilemanager.SessionKey) *proto.SessionSelector {
 	return &proto.SessionSelector{Profile: string(key.Profile), Username: key.Username}
 }
 
+// requireRefusedAsForeign checks a refusal, whether the gate or the handler gave it.
 func requireRefusedAsForeign(t *testing.T, err error, msgAndArgs ...any) {
 	t.Helper()
 	require.Error(t, err, msgAndArgs...)
 	require.Equal(t, codes.PermissionDenied, gstatus.Code(err), "unexpected status: %v", err)
-	require.Contains(t, err.Error(), errSessionOfAnotherUser)
 }
 
 // cancelledCopy keeps the identity of ctx and makes a handler that got past the check return early:
@@ -99,9 +110,8 @@ func cancelledCopy(ctx context.Context) context.Context {
 	return cancelled
 }
 
-// Who may reach what, for every RPC with a selector. The username in the selector says which
-// profile is meant; it never says who is asking, and bob naming alice's session gets no further
-// than a stranger.
+// Who may reach what, for every RPC with a selector, behind the authorization gate. The owner
+// recorded in the profile decides; the default profile nobody has claimed is root's alone.
 func TestSessionAccess_EveryRPCWithASelector(t *testing.T) {
 	f := newAccessFixture(t)
 
@@ -110,8 +120,8 @@ func TestSessionAccess_EveryRPCWithASelector(t *testing.T) {
 		ctx     context.Context
 		reaches map[string]bool
 	}{
-		{"alice", aliceCtx(), map[string]bool{"alice": true, "shared": true}},
-		{"bob", bobCtx(), map[string]bool{"bob": true, "shared": true}},
+		{"alice", aliceCtx(), map[string]bool{"alice": true}},
+		{"bob", bobCtx(), map[string]bool{"bob": true}},
 		{"root", rootCtx(), map[string]bool{"alice": true, "bob": true, "shared": true}},
 		{"unknown", unknownCtx(), map[string]bool{}},
 	}
@@ -119,7 +129,7 @@ func TestSessionAccess_EveryRPCWithASelector(t *testing.T) {
 
 	for _, caller := range callers {
 		for targetName, target := range targets {
-			calls := selectorRPCs(f.s, cancelledCopy(caller.ctx), selectorOf(target))
+			calls := gatedSelectorRPCs(f.s, cancelledCopy(caller.ctx), selectorOf(target))
 			require.Len(t, calls, selectorRPCCount, "every RPC with a selector should be in the table")
 			for rpc, call := range calls {
 				t.Run(caller.name+"/"+targetName+"/"+rpc, func(t *testing.T) {
@@ -145,7 +155,7 @@ func TestSessionAccess_RefusalHasNoEffect(t *testing.T) {
 	aliceSession := f.session(f.alice)
 	client := aliceSession.client()
 
-	for rpc, call := range selectorRPCs(f.s, cancelledCopy(bobCtx()), selectorOf(f.alice)) {
+	for rpc, call := range gatedSelectorRPCs(f.s, cancelledCopy(bobCtx()), selectorOf(f.alice)) {
 		requireRefusedAsForeign(t, call(), rpc)
 		assert.Same(t, client, aliceSession.client(), "%s must leave the client", rpc)
 		assert.True(t, aliceSession.isClientRunning(), "%s must leave the run", rpc)
@@ -155,50 +165,29 @@ func TestSessionAccess_RefusalHasNoEffect(t *testing.T) {
 	assert.Equal(t, 1, f.runCount(f.alice))
 }
 
-// Asking about a session of someone else tells nothing about their profiles.
-func TestSessionAccess_ForeignRefusalTellsNothingAboutTheProfile(t *testing.T) {
+// The username a selector carries is left over from per-user directories and decides nothing.
+func TestSessionAccess_SelectorUsernameDecidesNothing(t *testing.T) {
 	f := newAccessFixture(t)
+	selector := &proto.SessionSelector{Profile: string(f.alice.Profile), Username: "bob"}
 
-	_, existing := f.s.Status(aliceCtx(), &proto.StatusRequest{Session: selectorOf(f.bob)})
-	_, missing := f.s.Status(aliceCtx(), &proto.StatusRequest{Session: &proto.SessionSelector{Profile: "no-such-profile", Username: "bob"}})
-	requireRefusedAsForeign(t, existing)
-	requireRefusedAsForeign(t, missing)
-	assert.Equal(t, existing.Error(), missing.Error(), "both answers should read the same")
+	err := viaGate(f.s, aliceCtx(), "Status", &proto.StatusRequest{Session: selector}, func(ctx context.Context) error {
+		_, err := f.s.Status(ctx, &proto.StatusRequest{Session: selector})
+		return err
+	})
+	assert.NoError(t, err, "alice owns the profile, whatever name the selector carries")
 
-	_, unknown := f.s.Status(unknownCtx(), &proto.StatusRequest{Session: &proto.SessionSelector{Profile: "no-such-profile", Username: "alice"}})
-	requireRefusedAsForeign(t, unknown)
+	selector = &proto.SessionSelector{Profile: string(f.alice.Profile), Username: "alice"}
+	err = viaGate(f.s, bobCtx(), "Status", &proto.StatusRequest{Session: selector}, func(ctx context.Context) error {
+		_, err := f.s.Status(ctx, &proto.StatusRequest{Session: selector})
+		return err
+	})
+	requireRefusedAsForeign(t, err, "naming the owner gets bob nothing")
 }
 
-// A UID the account database does not know is its own name, which is what the CLI sends then.
-func TestSessionAccess_OwnNumericUsername(t *testing.T) {
-	f := newAccessFixture(t)
-	name := strconv.FormatUint(uint64(aliceUID), 10)
-	own := profilemanager.SessionKey{Profile: f.second.Profile, Username: name}
-
-	_, err := f.s.Status(aliceCtx(), &proto.StatusRequest{Session: selectorOf(own)})
-	assert.NoError(t, err)
-	_, err = f.s.Status(bobCtx(), &proto.StatusRequest{Session: selectorOf(own)})
-	requireRefusedAsForeign(t, err)
-
-	// An account with a numeric name stays that account, whatever UID the name reads as.
-	f.s.lookupUIDFn = func(string) (uint32, error) { return bobUID, nil }
-	_, err = f.s.Status(aliceCtx(), &proto.StatusRequest{Session: selectorOf(own)})
-	requireRefusedAsForeign(t, err)
-}
-
-// When the account database fails, nobody owns anything (I6).
-func TestSessionAccess_FailedLookupRefuses(t *testing.T) {
-	f := newAccessFixture(t)
-	f.s.lookupUIDFn = func(string) (uint32, error) { return 0, errors.New("database unavailable") }
-
-	_, err := f.s.Status(aliceCtx(), &proto.StatusRequest{Session: selectorOf(f.alice)})
-	requireRefusedAsForeign(t, err)
-}
-
-// Without a selector the RPCs act on the focused session, and only Down and Status are open to
-// everyone, as they are today.
+// Without a selector the RPCs act on the focused session, and the gate asks for its owner. Only
+// Status answers anyone it can identify, without the peer detail.
 func TestSessionAccess_NoSelectorFollowsTheFocus(t *testing.T) {
-	exempt := map[string]bool{"Down": true, "Status": true, "SubscribeStatus": true}
+	exempt := map[string]bool{"Status": true}
 
 	t.Run("focused on the session of a user", func(t *testing.T) {
 		f := newAccessFixture(t)
@@ -213,10 +202,10 @@ func TestSessionAccess_NoSelectorFollowsTheFocus(t *testing.T) {
 			"bob":     {bobCtx(), false},
 			"unknown": {unknownCtx(), false},
 		} {
-			for rpc, call := range selectorRPCs(f.s, cancelledCopy(want.ctx), nil) {
+			for rpc, call := range gatedSelectorRPCs(f.s, cancelledCopy(want.ctx), nil) {
 				t.Run(name+"/"+rpc, func(t *testing.T) {
 					err := call()
-					if want.reaches || exempt[rpc] {
+					if want.reaches || (exempt[rpc] && name != "unknown") {
 						assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(err), "should get through: %v", err)
 						return
 					}
@@ -226,36 +215,44 @@ func TestSessionAccess_NoSelectorFollowsTheFocus(t *testing.T) {
 		}
 	})
 
-	t.Run("focused on the shared session", func(t *testing.T) {
+	t.Run("focused on the default profile nobody claimed", func(t *testing.T) {
 		f := newAccessFixture(t)
 		f.focus(t, f.shared)
 
-		for rpc, call := range selectorRPCs(f.s, cancelledCopy(bobCtx()), nil) {
-			t.Run("bob/"+rpc, func(t *testing.T) {
-				assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "the default session is shared")
-			})
-		}
-		// A caller nobody can identify is not one of the users it is shared with.
-		for rpc, call := range selectorRPCs(f.s, cancelledCopy(unknownCtx()), nil) {
-			t.Run("unknown/"+rpc, func(t *testing.T) {
-				if exempt[rpc] {
-					assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "should get through")
-					return
-				}
-				requireRefusedAsForeign(t, call())
-			})
+		for _, caller := range []struct {
+			name string
+			ctx  context.Context
+		}{{"bob", bobCtx()}, {"unknown", unknownCtx()}} {
+			for rpc, call := range gatedSelectorRPCs(f.s, cancelledCopy(caller.ctx), nil) {
+				t.Run(caller.name+"/"+rpc, func(t *testing.T) {
+					if exempt[rpc] && caller.name != "unknown" {
+						assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "should get through")
+						return
+					}
+					requireRefusedAsForeign(t, call(), "an unclaimed profile is no user's")
+				})
+			}
 		}
 	})
 }
 
-// A Down without a selector takes the focused session down whoever asks: that is today's Down.
-func TestSessionAccess_DownWithoutSelectorActsAsToday(t *testing.T) {
+// A Down without a selector is for the owner of the focused session.
+func TestSessionAccess_DownWithoutSelectorNeedsTheFocusedOwner(t *testing.T) {
 	f := newAccessFixture(t)
 	require.NoError(t, f.up(f.alice))
 	f.focus(t, f.alice)
 
-	_, err := f.s.Down(bobCtx(), &proto.DownRequest{})
-	require.NoError(t, err)
+	down := func(ctx context.Context) error {
+		return viaGate(f.s, ctx, "Down", &proto.DownRequest{}, func(ctx context.Context) error {
+			_, err := f.s.Down(ctx, &proto.DownRequest{})
+			return err
+		})
+	}
+
+	requireRefusedAsForeign(t, down(bobCtx()))
+	assert.True(t, f.session(f.alice).isClientRunning(), "bob must not take down the session of alice")
+
+	require.NoError(t, down(aliceCtx()))
 	assert.False(t, f.session(f.alice).isClientRunning())
 }
 
@@ -280,19 +277,24 @@ func TestSessionAccess_DownAll(t *testing.T) {
 		assert.Equal(t, hostcoord.DesiredDown, f.stored(t)[key])
 	}
 
-	t.Run("a user takes down what is theirs and the shared session", func(t *testing.T) {
+	downAll := func(f *accessFixture, ctx context.Context, req *proto.DownRequest) error {
+		return viaGate(f.s, ctx, "Down", req, func(ctx context.Context) error {
+			_, err := f.s.Down(ctx, req)
+			return err
+		})
+	}
+
+	t.Run("a user takes down what is theirs", func(t *testing.T) {
 		f := start(t)
-		_, err := f.s.Down(aliceCtx(), &proto.DownRequest{All: true})
-		require.NoError(t, err)
+		require.NoError(t, downAll(f, aliceCtx(), &proto.DownRequest{All: true}))
 		goes(t, f, f.alice)
-		goes(t, f, f.shared)
+		stays(t, f, f.shared)
 		stays(t, f, f.bob)
 	})
 
 	t.Run("root takes down every session", func(t *testing.T) {
 		f := start(t)
-		_, err := f.s.Down(rootCtx(), &proto.DownRequest{All: true})
-		require.NoError(t, err)
+		require.NoError(t, downAll(f, rootCtx(), &proto.DownRequest{All: true}))
 		goes(t, f, f.alice)
 		goes(t, f, f.bob)
 		goes(t, f, f.shared)
@@ -300,8 +302,7 @@ func TestSessionAccess_DownAll(t *testing.T) {
 
 	t.Run("an unknown caller reaches nothing", func(t *testing.T) {
 		f := start(t)
-		_, err := f.s.Down(unknownCtx(), &proto.DownRequest{All: true})
-		require.ErrorIs(t, err, ErrServiceNotUp)
+		requireRefusedAsForeign(t, downAll(f, unknownCtx(), &proto.DownRequest{All: true}))
 		stays(t, f, f.shared)
 		stays(t, f, f.alice)
 		stays(t, f, f.bob)
@@ -309,7 +310,7 @@ func TestSessionAccess_DownAll(t *testing.T) {
 
 	t.Run("a selector does not combine with all", func(t *testing.T) {
 		f := start(t)
-		_, err := f.s.Down(aliceCtx(), &proto.DownRequest{All: true, Session: selectorOf(f.alice)})
+		err := downAll(f, aliceCtx(), &proto.DownRequest{All: true, Session: selectorOf(f.alice)})
 		requireCode(t, codes.InvalidArgument, err)
 		stays(t, f, f.alice)
 	})
@@ -324,29 +325,49 @@ func TestSessionAccess_StatusListsWhatTheCallerMayRead(t *testing.T) {
 	for name, want := range map[string]struct {
 		ctx      context.Context
 		profiles []string
+		full     bool
 	}{
-		"alice":   {aliceCtx(), []string{string(f.alice.Profile), profilemanager.DefaultProfileName}},
-		"bob":     {bobCtx(), []string{string(f.bob.Profile), profilemanager.DefaultProfileName}},
-		"unknown": {unknownCtx(), nil},
-		"root":    {rootCtx(), []string{string(f.first.Profile), string(f.alice.Profile), string(f.bob.Profile), profilemanager.DefaultProfileName}},
+		// Neither holds the focused session, so the gate leaves out the peer detail.
+		"alice": {aliceCtx(), []string{string(f.alice.Profile)}, false},
+		"bob":   {bobCtx(), []string{string(f.bob.Profile)}, false},
+		"root":  {rootCtx(), []string{string(f.first.Profile), string(f.alice.Profile), string(f.bob.Profile), profilemanager.DefaultProfileName}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, err := f.s.Status(want.ctx, &proto.StatusRequest{GetFullPeerStatus: true})
+			req := &proto.StatusRequest{GetFullPeerStatus: true}
+			var status *proto.StatusResponse
+			err := viaGate(f.s, want.ctx, "Status", req, func(ctx context.Context) error {
+				var err error
+				status, err = f.s.Status(ctx, req)
+				return err
+			})
 			require.NoError(t, err)
 
 			var profiles []string
 			for _, entry := range status.GetSessions() {
 				profiles = append(profiles, entry.GetProfileId())
-				assert.NotNil(t, entry.GetFullStatus(), "full status of a session the caller may read")
+				assert.Equal(t, want.full, entry.GetFullStatus() != nil, "full status of %s", entry.GetProfileId())
 			}
 			assert.ElementsMatch(t, want.profiles, profiles, "the sessions the caller may read")
 		})
 	}
 
+	t.Run("an unknown caller is refused", func(t *testing.T) {
+		err := viaGate(f.s, unknownCtx(), "Status", &proto.StatusRequest{}, func(ctx context.Context) error {
+			_, err := f.s.Status(ctx, &proto.StatusRequest{})
+			return err
+		})
+		requireRefusedAsForeign(t, err)
+	})
+
 	t.Run("the stream filters the same", func(t *testing.T) {
+		f.focus(t, f.bob)
 		ctx, cancel := context.WithCancel(bobCtx())
 		stream := &capturingStatusStream{fakeServerStream: fakeServerStream[proto.StatusResponse]{ctx: ctx}, onSend: cancel}
-		require.NoError(t, f.s.SubscribeStatus(&proto.StatusRequest{GetFullPeerStatus: true}, stream))
+		req := &proto.StatusRequest{GetFullPeerStatus: true}
+		err := viaGateStream(f.s, ctx, "SubscribeStatus", req, func(context.Context) error {
+			return f.s.SubscribeStatus(req, stream)
+		})
+		require.NoError(t, err)
 
 		require.NotEmpty(t, stream.sent)
 		for _, entry := range stream.sent[0].GetSessions() {
@@ -446,31 +467,40 @@ func TestSessionAccess_RPCsNamingAProfile(t *testing.T) {
 	profile, username := string(f.bob.Profile), f.bob.Username
 	focused := f.s.focusedSession().key
 
+	login := &proto.LoginRequest{ProfileName: &profile, Username: &username}
+	logout := &proto.LogoutRequest{ProfileName: &profile, Username: &username}
+	switchProfile := &proto.SwitchProfileRequest{ProfileName: &profile, Username: &username}
+	remove := &proto.RemoveProfileRequest{ProfileName: profile, Username: username}
+	getConfig := &proto.GetConfigRequest{ProfileName: profile, Username: username}
+	setConfig := &proto.SetConfigRequest{ProfileName: profile, Username: username}
+	gated := func(method string, req any, call func(ctx context.Context) error) func(ctx context.Context) error {
+		return func(ctx context.Context) error { return viaGate(f.s, ctx, method, req, call) }
+	}
 	refused := map[string]func(ctx context.Context) error{
-		"Login": func(ctx context.Context) error {
-			_, err := f.s.Login(ctx, &proto.LoginRequest{ProfileName: &profile, Username: &username})
+		"Login": gated("Login", login, func(ctx context.Context) error {
+			_, err := f.s.Login(ctx, login)
 			return err
-		},
-		"Logout": func(ctx context.Context) error {
-			_, err := f.s.Logout(ctx, &proto.LogoutRequest{ProfileName: &profile, Username: &username})
+		}),
+		"Logout": gated("Logout", logout, func(ctx context.Context) error {
+			_, err := f.s.Logout(ctx, logout)
 			return err
-		},
-		"SwitchProfile": func(ctx context.Context) error {
-			_, err := f.s.SwitchProfile(ctx, &proto.SwitchProfileRequest{ProfileName: &profile, Username: &username})
+		}),
+		"SwitchProfile": gated("SwitchProfile", switchProfile, func(ctx context.Context) error {
+			_, err := f.s.SwitchProfile(ctx, switchProfile)
 			return err
-		},
-		"RemoveProfile": func(ctx context.Context) error {
-			_, err := f.s.RemoveProfile(ctx, &proto.RemoveProfileRequest{ProfileName: profile, Username: username})
+		}),
+		"RemoveProfile": gated("RemoveProfile", remove, func(ctx context.Context) error {
+			_, err := f.s.RemoveProfile(ctx, remove)
 			return err
-		},
-		"GetConfig": func(ctx context.Context) error {
-			_, err := f.s.GetConfig(ctx, &proto.GetConfigRequest{ProfileName: profile, Username: username})
+		}),
+		"GetConfig": gated("GetConfig", getConfig, func(ctx context.Context) error {
+			_, err := f.s.GetConfig(ctx, getConfig)
 			return err
-		},
-		"SetConfig": func(ctx context.Context) error {
-			_, err := f.s.SetConfig(ctx, &proto.SetConfigRequest{ProfileName: profile, Username: username})
+		}),
+		"SetConfig": gated("SetConfig", setConfig, func(ctx context.Context) error {
+			_, err := f.s.SetConfig(ctx, setConfig)
 			return err
-		},
+		}),
 	}
 	for rpc, call := range refused {
 		t.Run(rpc, func(t *testing.T) {
@@ -488,9 +518,11 @@ func TestSessionSelector_Resolution(t *testing.T) {
 
 	writeProfile := func(id, name string) {
 		t.Helper()
+		owner := aliceIdentity()
 		_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{
 			ConfigPath:    filepath.Join(profilemanager.DefaultConfigPathDir, id+".json"),
 			ManagementURL: "http://127.0.0.1:1",
+			Owner:         &owner,
 		})
 		require.NoError(t, err)
 		if name != "" {
@@ -515,7 +547,6 @@ func TestSessionSelector_Resolution(t *testing.T) {
 		"an ID":              {handle: "abc123", want: key("abc123")},
 		"a unique ID prefix": {handle: "abc1", want: key("abc123")},
 		"a unique name":      {handle: "office", want: key("abc123")},
-		"the shared default": {handle: profilemanager.DefaultProfileName, want: f.shared},
 	} {
 		t.Run(name, func(t *testing.T) {
 			// A status no other session has, so the answer shows which session the handle reached.
@@ -539,7 +570,6 @@ func TestSessionSelector_Resolution(t *testing.T) {
 		"an ambiguous name":      {&proto.SessionSelector{Profile: "twin", Username: "alice"}, codes.InvalidArgument},
 		"an unknown profile":     {&proto.SessionSelector{Profile: "no-such-profile", Username: "alice"}, codes.NotFound},
 		"no handle":              {&proto.SessionSelector{Username: "alice"}, codes.InvalidArgument},
-		"no username":            {&proto.SessionSelector{Profile: "abc123"}, codes.InvalidArgument},
 	} {
 		t.Run(name, func(t *testing.T) {
 			for rpc, call := range selectorRPCs(f.s, cancelledCopy(aliceCtx()), tc.selector) {
@@ -828,7 +858,7 @@ func TestGate_LogoutOfAnUnfocusedProfileClearsItsSession(t *testing.T) {
 	target := f.s.sessionOfLocked(f.third)
 	f.s.mutex.Unlock()
 
-	owner := ipcauth.Identity{UID: aliceUID}
+	owner := aliceIdentity()
 	arm := func(ss *session) (loginCancelled, extendCancelled *bool) {
 		loginCancelled, extendCancelled = new(bool), new(bool)
 		require.True(t, ss.jwtCache.store("token", owner, time.Minute, ss.jwtCache.currentGeneration()))
@@ -987,10 +1017,10 @@ func TestGate_LoginGatesReadTheConfigOfTheTarget(t *testing.T) {
 	state := profileStateOf(f.second)
 	name, username := string(f.third.Profile), f.third.Username
 
-	stored, err := f.s.storedLoginConfig(state, &proto.LoginRequest{ProfileName: &name, Username: &username})
+	stored, err := f.s.storedLoginConfig(f.ctx, state, &proto.LoginRequest{ProfileName: &name, Username: &username})
 	require.NoError(t, err)
 
-	path, err := state.FilePath()
+	path, err := f.s.profileManager.ActiveProfilePath(state)
 	require.NoError(t, err)
 	want, err := profilemanager.GetExistingConfig(path)
 	require.NoError(t, err)
@@ -1058,13 +1088,15 @@ func TestGate_EventStreamFollowsTheFocus(t *testing.T) {
 	go func() { done <- f.s.SubscribeEvents(&proto.SubscribeRequest{}, stream) }()
 	require.Eventually(t, func() bool { return stream.count() > 0 }, 5*time.Second, 10*time.Millisecond, "the log level event")
 
+	// The default profile is alice's too, so the stream may follow the focus there.
+	ownDefaultProfile(t, aliceIdentity())
 	f.focus(t, f.shared)
 	publish := func(message string) {
 		f.s.focusedSession().statusRecorder.PublishEvent(proto.SystemEvent_INFO, proto.SystemEvent_SYSTEM, message, "", nil)
 	}
 	require.Eventually(t, func() bool {
-		publish("on the shared session")
-		return stream.saw("on the shared session")
+		publish("on the default session")
+		return stream.saw("on the default session")
 	}, 5*time.Second, 50*time.Millisecond, "the stream should move with the focus")
 
 	f.focus(t, f.bob)
@@ -1118,160 +1150,79 @@ func (c *capturingEventStream) saw(message string) bool {
 	return false
 }
 
-// The names of the profiles of a user are metadata of that user, and a change writes into their
-// directory as root. A username in the request says which directory is meant, not who is asking.
+// The profiles of a user are theirs: another user neither sees nor renames them, whatever username
+// the request carries.
 func TestSessionAccess_ProfileRPCs(t *testing.T) {
-	calls := func(f *accessFixture, ctx context.Context, username string) map[string]func() error {
-		return map[string]func() error{
-			"ListProfiles": func() error {
-				_, err := f.s.ListProfiles(ctx, &proto.ListProfilesRequest{Username: username})
-				return err
-			},
-			"AddProfile": func() error {
-				_, err := f.s.AddProfile(ctx, &proto.AddProfileRequest{ProfileName: "added", Username: username})
-				return err
-			},
-			"RenameProfile": func() error {
-				_, err := f.s.RenameProfile(ctx, &proto.RenameProfileRequest{Handle: string(f.second.Profile), Username: username, NewProfileName: "renamed"})
-				return err
-			},
-		}
-	}
-
 	f := newAccessFixture(t)
-	for name, ctx := range map[string]context.Context{"bob": bobCtx(), "unknown": unknownCtx()} {
-		for rpc, call := range calls(f, ctx, "alice") {
-			t.Run(name+"/"+rpc+" of alice", func(t *testing.T) {
-				requireRefusedAsForeign(t, call())
-			})
-		}
-	}
-	listed, err := f.s.ListProfiles(aliceCtx(), &proto.ListProfilesRequest{Username: "alice"})
-	require.NoError(t, err, "alice lists her own profiles")
-	for _, profile := range listed.GetProfiles() {
-		assert.NotEqual(t, "added", profile.GetName(), "a refused AddProfile must not create the profile")
-		assert.NotEqual(t, "renamed", profile.GetName(), "a refused RenameProfile must not rename the profile")
-	}
-
-	for name, ctx := range map[string]context.Context{"alice": aliceCtx(), "root": rootCtx()} {
-		t.Run(name+" gets through", func(t *testing.T) {
-			f := newAccessFixture(t)
-			for rpc, call := range calls(f, ctx, "alice") {
-				assert.NotEqual(t, codes.PermissionDenied, gstatus.Code(call()), "%s of alice should get through", rpc)
-			}
+	rename := func(ctx context.Context, name string) error {
+		req := &proto.RenameProfileRequest{Handle: string(f.alice.Profile), Username: "bob", NewProfileName: name}
+		return viaGate(f.s, ctx, "RenameProfile", req, func(ctx context.Context) error {
+			_, err := f.s.RenameProfile(ctx, req)
+			return err
 		})
 	}
+	list := func(ctx context.Context) ([]string, error) {
+		req := &proto.ListProfilesRequest{Username: "alice"}
+		var ids []string
+		err := viaGate(f.s, ctx, "ListProfiles", req, func(ctx context.Context) error {
+			resp, err := f.s.ListProfiles(ctx, req)
+			for _, profile := range resp.GetProfiles() {
+				ids = append(ids, profile.GetId())
+			}
+			return err
+		})
+		return ids, err
+	}
+
+	requireRefusedAsForeign(t, rename(bobCtx(), "renamed"), "bob renames the profile of alice")
+	requireRefusedAsForeign(t, rename(unknownCtx(), "renamed"), "an unknown caller renames it")
+
+	listed, err := list(bobCtx())
+	require.NoError(t, err)
+	assert.NotContains(t, listed, string(f.alice.Profile), "bob must not see the profile of alice")
+	assert.Contains(t, listed, string(f.bob.Profile), "bob sees his own")
+
+	_, err = list(unknownCtx())
+	requireRefusedAsForeign(t, err, "a caller nobody can identify lists nothing")
+
+	listed, err = list(aliceCtx())
+	require.NoError(t, err)
+	assert.Contains(t, listed, string(f.alice.Profile))
+
+	require.NoError(t, rename(aliceCtx(), "renamed"), "alice renames her own profile")
 }
 
-// Which profile the focus is on says what another user is connected to.
+// Which profile the focus is on says what another user is connected to, so only its owner reads
+// its name.
 func TestSessionAccess_GetActiveProfile(t *testing.T) {
 	f := newAccessFixture(t)
 	f.focus(t, f.alice)
+	require.NoError(t, f.s.profileManager.RenameProfile(f.alice.Profile, "alice-work"))
 
-	for name, ctx := range map[string]context.Context{"bob": bobCtx(), "unknown": unknownCtx()} {
-		resp, err := f.s.GetActiveProfile(ctx, &proto.GetActiveProfileRequest{})
-		requireRefusedAsForeign(t, err, name)
-		assert.Nil(t, resp, "%s must not get the profile of alice", name)
+	active := func(ctx context.Context) (*proto.GetActiveProfileResponse, error) {
+		req := &proto.GetActiveProfileRequest{}
+		var resp *proto.GetActiveProfileResponse
+		err := viaGate(f.s, ctx, "GetActiveProfile", req, func(ctx context.Context) error {
+			var err error
+			resp, err = f.s.GetActiveProfile(ctx, req)
+			return err
+		})
+		return resp, err
 	}
+
+	resp, err := active(bobCtx())
+	require.NoError(t, err)
+	assert.Empty(t, resp.GetProfileName(), "bob must not read the name of the profile of alice")
+
+	_, err = active(unknownCtx())
+	requireRefusedAsForeign(t, err)
+
 	for name, ctx := range map[string]context.Context{"alice": aliceCtx(), "root": rootCtx()} {
-		resp, err := f.s.GetActiveProfile(ctx, &proto.GetActiveProfileRequest{})
+		resp, err := active(ctx)
 		require.NoError(t, err, name)
 		assert.Equal(t, string(f.alice.Profile), resp.GetId(), "%s should read the focus", name)
+		assert.Equal(t, "alice-work", resp.GetProfileName(), "%s should read its name", name)
 	}
-
-	f.focus(t, f.shared)
-	_, err := f.s.GetActiveProfile(bobCtx(), &proto.GetActiveProfileRequest{})
-	assert.NoError(t, err, "the shared session may be read by anyone")
-	_, err = f.s.GetActiveProfile(unknownCtx(), &proto.GetActiveProfileRequest{})
-	requireRefusedAsForeign(t, err, "a caller nobody can identify is not one of the users it is shared with")
-}
-
-// Without the gate nothing asks who is calling (I1).
-func TestProfileRPCs_WithoutTheGateIgnoreTheIdentity(t *testing.T) {
-	s, _, _, username, _ := setupServerWithProfile(t)
-	require.False(t, s.concurrentProfiles)
-
-	for name, caller := range map[string]context.Context{"another user": bobCtx(), "unknown": unknownCtx()} {
-		_, err := s.ListProfiles(caller, &proto.ListProfilesRequest{Username: username})
-		assert.NoError(t, err, "%s lists the profiles as before", name)
-		_, err = s.GetActiveProfile(caller, &proto.GetActiveProfileRequest{})
-		assert.NoError(t, err, "%s reads the active profile as before", name)
-		_, err = s.AddProfile(caller, &proto.AddProfileRequest{ProfileName: "added " + name, Username: username})
-		assert.NoError(t, err, "%s adds a profile as before", name)
-	}
-}
-
-// The directory of a user comes from the sanitized name and ownership goes by the account, so that
-// john.doe and johndoe would have different sessions on the same files: keys, state and all.
-func TestSessionAccess_SharedDirectoryBelongsToNobody(t *testing.T) {
-	const (
-		dottedUID uint32 = 20011
-		cleanUID  uint32 = 20012
-	)
-	dotted := ctxWithIdentity(ipcauth.Identity{UID: dottedUID, GID: dottedUID})
-	clean := ctxWithIdentity(ipcauth.Identity{UID: cleanUID, GID: cleanUID})
-
-	setup := func(t *testing.T, accounts []hostAccount, accountsErr error) *accessFixture {
-		t.Helper()
-		f := newAccessFixture(t)
-		f.s.lookupUIDFn = func(username string) (uint32, error) {
-			for _, account := range accounts {
-				if account.name == username {
-					return account.uid, nil
-				}
-			}
-			return 0, user.UnknownUserError(username)
-		}
-		f.s.accountsFn = func() ([]hostAccount, error) { return accounts, accountsErr }
-		return f
-	}
-
-	both := []hostAccount{{name: "john.doe", uid: dottedUID}, {name: "johndoe", uid: cleanUID}}
-
-	t.Run("two accounts on one directory reach neither", func(t *testing.T) {
-		f := setup(t, both, nil)
-		for name, ctx := range map[string]context.Context{"john.doe": dotted, "johndoe": clean} {
-			profile, username := string(f.second.Profile), name
-			_, err := f.s.GetConfig(cancelledCopy(ctx), &proto.GetConfigRequest{ProfileName: profile, Username: username})
-			requireRefusedAsForeign(t, err, "GetConfig of %s", name)
-			_, err = f.s.Up(cancelledCopy(ctx), &proto.UpRequest{ProfileName: &profile, Username: &username, Async: true})
-			requireRefusedAsForeign(t, err, "Up of %s", name)
-			_, err = f.s.ListProfiles(ctx, &proto.ListProfilesRequest{Username: username})
-			requireRefusedAsForeign(t, err, "ListProfiles of %s", name)
-			_, err = f.s.RemoveProfile(cancelledCopy(ctx), &proto.RemoveProfileRequest{ProfileName: profile, Username: username})
-			requireRefusedAsForeign(t, err, "RemoveProfile of %s", name)
-		}
-	})
-
-	t.Run("a name the directory cannot hold reaches nothing alone either", func(t *testing.T) {
-		f := setup(t, both[:1], nil)
-		_, err := f.s.ListProfiles(dotted, &proto.ListProfilesRequest{Username: "john.doe"})
-		requireRefusedAsForeign(t, err)
-	})
-
-	t.Run("a clean name alone has its directory", func(t *testing.T) {
-		f := setup(t, both[1:], nil)
-		_, err := f.s.ListProfiles(clean, &proto.ListProfilesRequest{Username: "johndoe"})
-		assert.NoError(t, err)
-	})
-
-	t.Run("an alias of the same account shares nothing with anyone", func(t *testing.T) {
-		f := setup(t, []hostAccount{{name: "john.doe", uid: cleanUID}, {name: "johndoe", uid: cleanUID}}, nil)
-		_, err := f.s.ListProfiles(clean, &proto.ListProfilesRequest{Username: "johndoe"})
-		assert.NoError(t, err)
-	})
-
-	t.Run("the accounts cannot be read", func(t *testing.T) {
-		f := setup(t, both[1:], errors.New("the file is gone wrong"))
-		_, err := f.s.ListProfiles(clean, &proto.ListProfilesRequest{Username: "johndoe"})
-		requireRefusedAsForeign(t, err, "not knowing who else uses the directory means it is not the caller's (I6)")
-	})
-
-	t.Run("root reaches the directory whatever it is called", func(t *testing.T) {
-		f := setup(t, both, nil)
-		_, err := f.s.ListProfiles(rootCtx(), &proto.ListProfilesRequest{Username: "john.doe"})
-		assert.NoError(t, err)
-	})
 }
 
 // A stream of a session with a selector stays there whatever happens to the focus. The profile
@@ -1299,12 +1250,14 @@ func TestProfileListEvent_NamesNoProfileWithTheGate(t *testing.T) {
 // The name has to come back to the same session.
 func TestSelectorOfTheActiveProfileNamesTheFocusedSession(t *testing.T) {
 	f := newAccessFixture(t)
+	// The default profile is alice's as well, which a console user's claim would make it.
+	ownDefaultProfile(t, aliceIdentity())
 	for _, tc := range []struct {
 		name string
 		key  profilemanager.SessionKey
 	}{
 		{name: "the session of the caller", key: f.alice},
-		{name: "the shared session", key: f.shared},
+		{name: "the default session", key: f.shared},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f.focus(t, tc.key)

@@ -455,6 +455,8 @@ func removeOther(t *testing.T, f *residualFixture) error {
 	// Bounded, as the deregistration of an allowed removal never gets an answer.
 	ctx, cancel := context.WithTimeout(f.ctx, 2*time.Second)
 	defer cancel()
+	// The gate hands the handler the profile it resolved, which a namesake cannot make ambiguous.
+	ctx = withTarget(ctx, filepath.Join(profilemanager.DefaultConfigPathDir, string(f.other.Profile)+".json"))
 	_, err := f.s.RemoveProfile(ctx, &proto.RemoveProfileRequest{
 		ProfileName: string(f.other.Profile),
 		Username:    f.other.Username,
@@ -515,6 +517,10 @@ func TestRemoveProfile_AllowsAProfileThatDoesNotRun(t *testing.T) {
 			close(giveUp)
 		}},
 		{name: "a namesake of another user runs", start: func(f *residualFixture) {
+			namesake := filepath.Join(profilemanager.DefaultConfigPathDir, "someone-else", string(f.other.Profile)+".json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(namesake), 0o700))
+			_, err := profilemanager.UpdateOrCreateConfig(profilemanager.ConfigInput{ConfigPath: namesake, ManagementURL: "http://127.0.0.1:1"})
+			require.NoError(t, err)
 			f.s.focusedSession().beginRun(profilemanager.SessionKey{Profile: f.other.Profile, Username: "someone-else"}, nil)
 		}},
 	}

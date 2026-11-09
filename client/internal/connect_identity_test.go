@@ -30,8 +30,8 @@ func connectIdentityTestDir(t *testing.T) string {
 }
 
 // The active profile names someone else, as it does after a switch: the client still
-// takes the state file and the certificate store owner from the key it was given.
-func TestWithSessionKey_IdentityComesFromKeyNotActiveProfile(t *testing.T) {
+// takes the state file from the key it was given.
+func TestWithSessionKey_StateFileComesFromKeyNotActiveProfile(t *testing.T) {
 	dir := connectIdentityTestDir(t)
 	sm := profilemanager.NewServiceManager("")
 	require.NoError(t, sm.SetActiveProfileState(&profilemanager.ActiveProfileState{ID: "other", Username: "bob"}))
@@ -40,19 +40,37 @@ func TestWithSessionKey_IdentityComesFromKeyNotActiveProfile(t *testing.T) {
 		WithSessionKey(profilemanager.SessionKey{Profile: "work", Username: "alice"}))
 
 	assert.Equal(t, filepath.Join(dir, "work.state.json"), client.statePath, "state file of the key")
-	assert.Equal(t, "alice", client.profileOwner, "certificate store owner of the key")
-	assert.False(t, client.profileOwnerUnknown, "the owner is known")
 }
 
-func TestWithSessionKey_DefaultProfileHasKnownOwner(t *testing.T) {
+func TestWithSessionKey_DefaultProfileUsesTheDefaultStateFile(t *testing.T) {
 	dir := connectIdentityTestDir(t)
 
 	client := NewConnectClient(context.Background(), nil, nil,
 		WithSessionKey(profilemanager.SessionKey{Profile: profilemanager.DefaultProfileName}))
 
 	assert.Equal(t, filepath.Join(dir, "state.json"), client.statePath, "state file of the default profile")
-	assert.Empty(t, client.profileOwner, "the default profile belongs to no user")
-	assert.False(t, client.profileOwnerUnknown, "an empty owner of the default profile is still known")
+}
+
+// The username of a key names a legacy directory and says nothing about who owns the profile, so
+// the key leaves the certificate store owner unknown until the profile's own config names it.
+func TestWithSessionKey_OwnerComesFromTheProfileConfig(t *testing.T) {
+	connectIdentityTestDir(t)
+	key := profilemanager.SessionKey{Profile: "work", Username: "alice"}
+
+	client := NewConnectClient(context.Background(), nil, nil, WithSessionKey(key))
+	assert.True(t, client.profileOwnerUnknown, "no user's store may answer before the owner is known")
+	assert.Empty(t, client.profileOwner, "the username of the key is no owner")
+
+	client = NewConnectClient(context.Background(), nil, nil, WithSessionKey(key), WithProfileOwner("1000"))
+	assert.Equal(t, "1000", client.profileOwner, "certificate store owner of the profile")
+	assert.False(t, client.profileOwnerUnknown, "the owner is known")
+
+	client = NewConnectClient(context.Background(), nil, nil, WithSessionKey(key), WithProfileOwner(""))
+	assert.Empty(t, client.profileOwner, "an unowned profile belongs to no user")
+	assert.False(t, client.profileOwnerUnknown, "an empty owner is still known")
+
+	client = NewConnectClient(context.Background(), nil, nil, WithSessionKey(key), WithUnknownProfileOwner())
+	assert.True(t, client.profileOwnerUnknown, "an owner that names no account stays unknown")
 }
 
 // A client without an identity must not answer certificate posture checks from a

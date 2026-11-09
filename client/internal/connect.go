@@ -113,16 +113,34 @@ func WithStatePath(path string) ConnectClientOption {
 	return func(c *ConnectClient) { c.statePath = path }
 }
 
-// WithSessionKey binds the client to one profile. The state file and the account
-// whose certificate store answers user certificate posture checks both come from
-// the key and never from the active profile, which can change while the client runs.
-// An empty key leaves the owner unknown, so that no user's store answers those checks.
+// WithProfileOwner names the account the running profile belongs to, by uid or SID, whose
+// own certificate store answers user certificate posture checks.
+func WithProfileOwner(owner string) ConnectClientOption {
+	return func(c *ConnectClient) {
+		c.profileOwner = owner
+		c.profileOwnerUnknown = false
+	}
+}
+
+// WithUnknownProfileOwner records that the running profile's owner could not be
+// determined, so no user's certificate store answers certificate posture checks.
+func WithUnknownProfileOwner() ConnectClientOption {
+	return func(c *ConnectClient) {
+		c.profileOwner = ""
+		c.profileOwnerUnknown = true
+	}
+}
+
+// WithSessionKey binds the client to one profile. The state file comes from the key and
+// never from the active profile, which can change while the client runs. The owner whose
+// certificate store answers user certificate posture checks stays unknown until
+// WithProfileOwner, given after this option, names it from the profile's config.
 // Only the daemon runs clients with a key, and it probes the routing support at startup.
 func WithSessionKey(key profilemanager.SessionKey) ConnectClientOption {
 	return func(c *ConnectClient) {
 		c.statePath = profilemanager.NewServiceManager("").GetStatePathFor(key)
-		c.profileOwner = key.Username
-		c.profileOwnerUnknown = key.Profile == ""
+		c.profileOwner = ""
+		c.profileOwnerUnknown = true
 		c.daemonSession = true
 	}
 }

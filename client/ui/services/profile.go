@@ -56,14 +56,18 @@ type RenameProfileParams struct {
 }
 
 type Profiles struct {
-	conn DaemonConn
+	conn       DaemonConn
+	classifier errorClassifier
 }
 
-func NewProfiles(conn DaemonConn) *Profiles {
-	return &Profiles{conn: conn}
+// NewProfiles wires up a Profiles service. translator or prefs may be nil, in
+// which case classification falls back to the bare error key.
+func NewProfiles(conn DaemonConn, translator ErrorTranslator, prefs LanguagePreference) *Profiles {
+	return &Profiles{conn: conn, classifier: errorClassifier{translator: translator, prefs: prefs}}
 }
 
-// Username returns the OS username the daemon expects for profile lookups.
+// Username returns the OS username of the UI process. The daemon identifies the
+// caller from the connection, not from this value.
 func (s *Profiles) Username() (string, error) {
 	u, err := user.Current()
 	if err != nil {
@@ -129,11 +133,11 @@ func isUnsetManagementURL(raw string) bool {
 func (s *Profiles) listAll(ctx context.Context, username string) ([]Profile, error) {
 	cli, err := s.conn.Client()
 	if err != nil {
-		return nil, err
+		return nil, s.classifier.classify(err)
 	}
 	resp, err := cli.ListProfiles(ctx, &proto.ListProfilesRequest{Username: username})
 	if err != nil {
-		return nil, err
+		return nil, s.classifier.classify(err)
 	}
 	pm := profilemanager.NewProfileManager()
 	out := make([]Profile, 0, len(resp.GetProfiles()))
@@ -150,11 +154,11 @@ func (s *Profiles) listAll(ctx context.Context, username string) ([]Profile, err
 func (s *Profiles) GetActive(ctx context.Context) (ActiveProfile, error) {
 	cli, err := s.conn.Client()
 	if err != nil {
-		return ActiveProfile{}, err
+		return ActiveProfile{}, s.classifier.classify(err)
 	}
 	resp, err := cli.GetActiveProfile(ctx, &proto.GetActiveProfileRequest{})
 	if err != nil {
-		return ActiveProfile{}, err
+		return ActiveProfile{}, s.classifier.classify(err)
 	}
 	return ActiveProfile{
 		ID:          resp.GetId(),
@@ -170,7 +174,7 @@ func (s *Profiles) GetActive(ctx context.Context) (ActiveProfile, error) {
 func (s *Profiles) Switch(ctx context.Context, p ProfileRef) (string, error) {
 	cli, err := s.conn.Client()
 	if err != nil {
-		return "", err
+		return "", s.classifier.classify(err)
 	}
 	req := &proto.SwitchProfileRequest{}
 	if p.ProfileName != "" {
@@ -181,7 +185,7 @@ func (s *Profiles) Switch(ctx context.Context, p ProfileRef) (string, error) {
 	}
 	resp, err := cli.SwitchProfile(ctx, req)
 	if err != nil {
-		return "", err
+		return "", s.classifier.classify(err)
 	}
 	return resp.GetId(), nil
 }
@@ -192,14 +196,14 @@ func (s *Profiles) Switch(ctx context.Context, p ProfileRef) (string, error) {
 func (s *Profiles) Add(ctx context.Context, p ProfileRef) (string, error) {
 	cli, err := s.conn.Client()
 	if err != nil {
-		return "", err
+		return "", s.classifier.classify(err)
 	}
 	resp, err := cli.AddProfile(ctx, &proto.AddProfileRequest{
 		ProfileName: p.ProfileName,
 		Username:    p.Username,
 	})
 	if err != nil {
-		return "", err
+		return "", s.classifier.classify(err)
 	}
 	return resp.GetId(), nil
 }
@@ -207,14 +211,14 @@ func (s *Profiles) Add(ctx context.Context, p ProfileRef) (string, error) {
 func (s *Profiles) Remove(ctx context.Context, p ProfileRef) error {
 	cli, err := s.conn.Client()
 	if err != nil {
-		return err
+		return s.classifier.classify(err)
 	}
 	resp, err := cli.RemoveProfile(ctx, &proto.RemoveProfileRequest{
 		ProfileName: p.ProfileName,
 		Username:    p.Username,
 	})
 	if err != nil {
-		return err
+		return s.classifier.classify(err)
 	}
 
 	// The daemon deletes what it owns but runs as root, so it leaves the
@@ -244,7 +248,7 @@ func (s *Profiles) Remove(ctx context.Context, p ProfileRef) error {
 func (s *Profiles) Rename(ctx context.Context, p RenameProfileParams) (string, error) {
 	cli, err := s.conn.Client()
 	if err != nil {
-		return "", err
+		return "", s.classifier.classify(err)
 	}
 	resp, err := cli.RenameProfile(ctx, &proto.RenameProfileRequest{
 		Username:       p.Username,
@@ -252,7 +256,7 @@ func (s *Profiles) Rename(ctx context.Context, p RenameProfileParams) (string, e
 		NewProfileName: p.NewName,
 	})
 	if err != nil {
-		return "", err
+		return "", s.classifier.classify(err)
 	}
 	return resp.GetOldProfileName(), nil
 }

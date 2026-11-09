@@ -2,11 +2,7 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os/user"
-	"strconv"
-	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
@@ -21,159 +17,44 @@ const errSessionOfAnotherUser = "the session belongs to another user"
 
 // sessionCaller is who an RPC answers to, as far as the sessions are concerned. The identity comes
 // from the kernel through ipcauth.CallerIdentity, and never from a field of the request: a username
-// in a request says which profile is meant, not who is asking.
+// in a request says nothing about who is asking.
 type sessionCaller struct {
 	id         ipcauth.Identity
 	identified bool
-	lookupUID  func(username string) (uint32, error)
-	accounts   func() ([]hostAccount, error)
-	// accountName and windowsAccounts are the account database of a Windows host.
-	accountName     func(sid string) (string, error)
-	windowsAccounts func() ([]windowsAccount, error)
-}
-
-// hostAccount is an account in the account database of the host.
-type hostAccount struct {
-	name string
-	uid  uint32
+	// profileOf reads the profile of a session off disk, owners included.
+	profileOf func(key profilemanager.SessionKey) (*profilemanager.Profile, error)
 }
 
 func (s *Server) callerOf(ctx context.Context) sessionCaller {
 	id, identified := ipcauth.CallerIdentity(ctx)
-	lookup := s.lookupUIDFn
-	if lookup == nil {
-		lookup = accountUID
-	}
-	accounts := s.accountsFn
-	if accounts == nil {
-		accounts = hostAccounts
-	}
-	accountName := s.accountNameFn
-	if accountName == nil {
-		accountName = windowsAccountName
-	}
-	windowsAccounts := s.windowsAccountsFn
-	if windowsAccounts == nil {
-		windowsAccounts = localWindowsAccounts
-	}
 	return sessionCaller{
-		id:              id,
-		identified:      identified,
-		lookupUID:       lookup,
-		accounts:        accounts,
-		accountName:     accountName,
-		windowsAccounts: windowsAccounts,
+		id:         id,
+		identified: identified,
+		profileOf:  s.profileOfKey,
 	}
 }
 
-// mayReach reports whether the caller may control and read the session of key: its own and the
-// shared default session, and any session for a privileged caller. A caller the daemon cannot
-// identify reaches nothing, and a failure to tell who owns a session means it is not the caller's (I6).
+// mayReach reports whether the caller may control and read the session of key: the session of a
+// profile the caller owns, and any session for a privileged caller. A caller the daemon cannot
+// identify reaches nothing, and a profile whose owner cannot be read is not the caller's (I6).
 func (c sessionCaller) mayReach(key profilemanager.SessionKey) bool {
 	if !c.identified {
 		return false
 	}
-	if key.Profile == profilemanager.DefaultProfileName {
+	if c.privileged() || ipcauth.ProfileOwnershipDisabled() {
 		return true
 	}
-	return c.mayReachUser(key.Username)
-}
-
-func (c sessionCaller) mayReachUser(username string) bool {
-	if c.privileged() {
-		return true
+	profile, err := c.profileOf(key)
+	if err != nil {
+		log.Debugf("denying access to the session of profile %s: %v", key.Profile, err)
+		return false
 	}
-	return c.identified && c.owns(username)
+	return profile.AccessibleBy(c.id)
 }
 
 // privileged reports whether the kernel vouches for a caller that may read everything.
 func (c sessionCaller) privileged() bool {
 	return c.identified && ipcauth.IsPrivilegedCaller(c.id)
-}
-
-// owns reports whether the sessions of username belong to the caller: the account is the caller's,
-// and its directory of profiles is its alone.
-func (c sessionCaller) owns(username string) bool {
-	return c.holdsAccount(username) && c.aloneInDirectory(username)
-}
-
-// holdsAccount reports whether username names the caller. A name that is no account counts as the
-// numeric identity of a user without one, which is what the CLI sends for it.
-func (c sessionCaller) holdsAccount(username string) bool {
-	if username == "" {
-		return false
-	}
-	if c.id.IsWindows() {
-		return c.holdsWindowsAccount(username)
-	}
-	uid, err := c.lookupUID(username)
-	if err == nil {
-		return uid == c.id.UID
-	}
-	var unknown user.UnknownUserError
-	if errors.As(err, &unknown) {
-		return username == strconv.FormatUint(uint64(c.id.UID), 10)
-	}
-	log.Warnf("failed to look up the owner of a session: %v", err)
-	return false
-}
-
-// aloneInDirectory reports whether the profiles of username can be only those of its account. The
-// directory comes from the sanitized name while ownership goes by the account, so john.doe and johndoe
-// would have different sessions on the same files, keys included. Only a privileged caller can reach
-// such a directory. It runs on every read of a status, so the refusal stays at debug level.
-func (c sessionCaller) aloneInDirectory(username string) bool {
-	if c.id.IsWindows() {
-		return c.aloneInWindowsDirectory(username)
-	}
-	if profilemanager.SanitizedUsername(username) != username {
-		log.Debugf("denying access to the profiles of %s for an unprivileged caller: the name of their directory differs from the name of the account", username)
-		return false
-	}
-
-	accounts, err := c.accounts()
-	if err != nil {
-		log.Warnf("failed to read the accounts of this host: %v", err)
-		return false
-	}
-	for _, account := range accounts {
-		if account.uid != c.id.UID && profilemanager.SanitizedUsername(account.name) == username {
-			log.Debugf("denying access to the profiles of %s for an unprivileged caller: the account %s shares their directory", username, account.name)
-			return false
-		}
-	}
-	return true
-}
-
-// parseDsclAccounts reads the output of "dscl /Search -list /Users UniqueID": the name and the
-// UID of one account per line. A line without a numeric UID is skipped.
-func parseDsclAccounts(out string) []hostAccount {
-	var accounts []hostAccount
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		uid, err := strconv.ParseUint(fields[1], 10, 32)
-		if err != nil {
-			continue
-		}
-		accounts = append(accounts, hostAccount{name: fields[0], uid: uint32(uid)})
-	}
-	return accounts
-}
-
-// accountUID returns the UID of the account username on this host.
-func accountUID(username string) (uint32, error) {
-	account, err := user.Lookup(username)
-	if err != nil {
-		return 0, err
-	}
-	uid, err := strconv.ParseUint(account.Uid, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("parse UID of %s: %w", username, err)
-	}
-	return uint32(uid), nil
 }
 
 func foreignSessionError(caller sessionCaller) error {
@@ -185,63 +66,65 @@ func foreignSessionError(caller sessionCaller) error {
 	return gstatus.Error(codes.PermissionDenied, errSessionOfAnotherUser)
 }
 
-// requireProfileReachable refuses a handle naming a profile of another user. It runs ahead of the
-// resolution, so that the answer does not say whether the profile exists.
-func requireProfileReachable(caller sessionCaller, handle, username string) error {
-	if (handle == profilemanager.DefaultProfileName && caller.identified) || caller.mayReachUser(username) {
-		return nil
-	}
-	return foreignSessionError(caller)
+// sessionKeyFor returns the session key of a resolved profile. A profile in a legacy per-user
+// directory keeps that directory in its key, as its ID can be a display name another user holds.
+func sessionKeyFor(profile *profilemanager.Profile) profilemanager.SessionKey {
+	return sessionKeyOf(profile.ID, legacyDirHint(profile))
 }
 
-// authorizeProfilesOf refuses a request about the profiles of another user: their names are metadata
-// of that user, and a change writes into their directory. Without the feature gate a request goes on
-// as it always did (I1).
-func (s *Server) authorizeProfilesOf(ctx context.Context, username string) error {
-	if !s.concurrentProfiles {
-		return nil
+// selectedProfile returns the profile a request names, as the authorization gate resolved it. The
+// gate cannot read the request of a stream before the handler runs, so a stream's selector is
+// resolved here, for the same identity and by the same rule. A profile the caller does not own is
+// refused.
+func (s *Server) selectedProfile(ctx context.Context, handle string) (*profilemanager.Profile, error) {
+	if _, ok := ipcauth.TargetFromContext(ctx); ok {
+		return s.targetProfile(ctx)
 	}
+
 	caller := s.callerOf(ctx)
-	if caller.mayReachUser(username) {
-		return nil
+	if !caller.identified {
+		return nil, foreignSessionError(caller)
 	}
-	return foreignSessionError(caller)
-}
-
-// authorizeActiveProfile refuses to name the focused session to a caller that may not read it.
-func (s *Server) authorizeActiveProfile(ctx context.Context, active *profilemanager.ActiveProfileState) error {
-	if !s.concurrentProfiles {
-		return nil
-	}
-	caller := s.callerOf(ctx)
-	if caller.mayReach(sessionKeyOf(active.ID, active.Username)) {
-		return nil
-	}
-	return foreignSessionError(caller)
-}
-
-// authorizeNamedProfile refuses a request naming a profile of another user. Without the feature
-// gate a request goes on as it always did (I1).
-func (s *Server) authorizeNamedProfile(ctx context.Context, handle, username string) error {
-	if !s.concurrentProfiles {
-		return nil
-	}
-	return requireProfileReachable(s.callerOf(ctx), handle, username)
-}
-
-// namedSession returns the session of a profile the request names, for a caller that may reach it.
-func (s *Server) namedSession(caller sessionCaller, handle, username string) (*session, error) {
-	if err := requireProfileReachable(caller, handle, username); err != nil {
+	target, err := s.ResolveTarget(caller.id, handle)
+	if err != nil {
 		return nil, err
 	}
-	resolved, name, err := s.resolveNamedProfile(handle, &username)
+	if !target.Owned {
+		return nil, foreignSessionError(caller)
+	}
+	profile, err := s.profileManager.ProfileByPath(target.Path)
+	if err != nil {
+		return nil, fmt.Errorf("read profile %s: %w", handle, err)
+	}
+	return profile, nil
+}
+
+// namedSession returns the session of the profile a request names, for a caller that owns it.
+func (s *Server) namedSession(ctx context.Context, handle string) (*session, error) {
+	resolved, err := s.selectedProfile(ctx, handle)
 	if err != nil {
 		return nil, err
 	}
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	return s.sessionOfLocked(sessionKeyOf(resolved.ID, name)), nil
+	return s.sessionOfLocked(s.keyOfProfileLocked(resolved)), nil
+}
+
+// keyOfProfileLocked returns the key of the session of profile, or a new key when it has none. A
+// key made from the active profile state can carry the raw username where the profile is found by
+// its sanitized directory, so an existing session is matched on the profile's file. The caller
+// holds s.mutex.
+func (s *Server) keyOfProfileLocked(profile *profilemanager.Profile) profilemanager.SessionKey {
+	if focused := s.focusedSession(); focused != nil && s.isSessionProfile(focused.key, profile) {
+		return focused.key
+	}
+	for key := range s.sessions {
+		if key.Profile == profile.ID && s.isSessionProfile(key, profile) {
+			return key
+		}
+	}
+	return sessionKeyFor(profile)
 }
 
 // checkSessionSelector returns the session an RPC acts on, which is all the handler may look at: a
@@ -250,14 +133,14 @@ func (s *Server) namedSession(caller sessionCaller, handle, username string) (*s
 // a selector can only name the one session there is.
 func (s *Server) checkSessionSelector(ctx context.Context, selector *proto.SessionSelector) (*session, error) {
 	if !s.concurrentProfiles {
-		return s.checkFocusedSelector(selector)
+		return s.checkFocusedSelector(ctx, selector)
+	}
+
+	if selector != nil {
+		return s.sessionOfSelector(ctx, selector)
 	}
 
 	caller := s.callerOf(ctx)
-	if selector != nil {
-		return s.sessionOfSelector(caller, selector)
-	}
-
 	ss := s.focusedSession()
 	if !caller.mayReach(ss.key) {
 		return nil, foreignSessionError(caller)
@@ -265,8 +148,8 @@ func (s *Server) checkSessionSelector(ctx context.Context, selector *proto.Sessi
 	return ss, nil
 }
 
-// checkOpenSelector is checkSessionSelector for Down and Status, which keep answering without a
-// selector whoever asks, as they always did (5.6).
+// checkOpenSelector is checkSessionSelector for Down and Status, which without a selector act on the
+// focused session for whoever the authorization gate let through.
 func (s *Server) checkOpenSelector(ctx context.Context, selector *proto.SessionSelector) (*session, error) {
 	if selector == nil {
 		return s.focusedSession(), nil
@@ -274,38 +157,38 @@ func (s *Server) checkOpenSelector(ctx context.Context, selector *proto.SessionS
 	return s.checkSessionSelector(ctx, selector)
 }
 
-func (s *Server) sessionOfSelector(caller sessionCaller, selector *proto.SessionSelector) (*session, error) {
-	handle, username := selector.GetProfile(), selector.GetUsername()
+func (s *Server) sessionOfSelector(ctx context.Context, selector *proto.SessionSelector) (*session, error) {
+	handle := selector.GetProfile()
 	if handle == "" {
 		return nil, gstatus.Error(codes.InvalidArgument, "the session selector names no profile")
 	}
-	if handle != profilemanager.DefaultProfileName && username == "" {
-		return nil, gstatus.Errorf(codes.InvalidArgument, "the session selector names profile %q without a username", handle)
-	}
-	return s.namedSession(caller, handle, username)
+	return s.namedSession(ctx, handle)
 }
 
 // checkFocusedSelector refuses a selector that names anything but the one session. Every failure
 // gets the same answer, so a selector does not tell a caller which profiles exist.
-func (s *Server) checkFocusedSelector(selector *proto.SessionSelector) (*session, error) {
+func (s *Server) checkFocusedSelector(ctx context.Context, selector *proto.SessionSelector) (*session, error) {
 	ss := s.focusedSession()
 	if selector == nil {
 		return ss, nil
 	}
 
 	refused := gstatus.Error(codes.FailedPrecondition, errSelectorNotFocused)
+	if selector.GetProfile() == "" {
+		return nil, refused
+	}
 
 	active, err := s.profileManager.GetActiveProfileState()
 	if err != nil {
 		log.Warnf("failed to read the focused session for a session selector: %v", err)
 		return nil, refused
 	}
-	resolved, err := s.profileManager.ResolveProfile(selector.GetProfile(), selector.GetUsername())
+	resolved, err := s.selectedProfile(ctx, selector.GetProfile())
 	if err != nil {
 		log.Debugf("failed to resolve a session selector: %v", err)
 		return nil, refused
 	}
-	if !isSessionProfile(active.SessionKey(), resolved.ID, selector.GetUsername()) {
+	if !s.isActiveProfile(active, resolved) {
 		return nil, refused
 	}
 	return ss, nil

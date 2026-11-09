@@ -35,6 +35,13 @@ type serviceParams struct {
 	DisableNetworks       bool              `json:"disable_networks,omitempty"`
 	EnableJSONSocket      bool              `json:"enable_json_socket,omitempty"`
 	ServiceEnvVars        map[string]string `json:"service_env_vars,omitempty"`
+	// AllowGroups holds the --allow-group values as the administrator gave
+	// them, so a reinstall restricts the daemon to the same group even if its
+	// ID has changed in the meantime.
+	AllowGroups []string `json:"allow_groups,omitempty"`
+	// AllowGroupIDs holds what those values resolved to at install time, in
+	// kind:value form. This is what the installed service actually enforces.
+	AllowGroupIDs []string `json:"allow_group_ids,omitempty"`
 
 	EnableConcurrentProfiles bool `json:"enable_concurrent_profiles,omitempty"`
 }
@@ -113,6 +120,8 @@ func currentServiceParams() *serviceParams {
 		EnableCapture:         captureEnabled,
 		DisableNetworks:       networksDisabled,
 		EnableJSONSocket:      enableJSONSocket,
+		AllowGroups:           allowGroups,
+		AllowGroupIDs:         resolvedAllowGroups,
 
 		EnableConcurrentProfiles: concurrentProfiles,
 	}
@@ -203,6 +212,14 @@ func applyServiceParams(cmd *cobra.Command, params *serviceParams) {
 
 	if !serviceCmd.PersistentFlags().Changed("disable-networks") {
 		networksDisabled = params.DisableNetworks
+	}
+
+	// The names, not the resolved IDs: the resolution is redone on every
+	// install so a group that has been recreated with a different ID keeps
+	// working. Passing --allow-group "" leaves the flag Changed with no
+	// values, which drops the restriction rather than restoring the saved one.
+	if !serviceCmd.PersistentFlags().Changed("allow-group") {
+		allowGroups = params.AllowGroups
 	}
 
 	applyServiceEnvParams(cmd, params)
