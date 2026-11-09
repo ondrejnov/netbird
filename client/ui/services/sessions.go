@@ -173,7 +173,7 @@ func ConnectStartupProfiles(ctx context.Context, profiles *Profiles, conn *Conne
 	if err != nil {
 		return fmt.Errorf("get current user: %w", err)
 	}
-	list, err := profiles.List(ctx, username)
+	list, err := profiles.listAll(ctx, username)
 	if err != nil {
 		return fmt.Errorf("list profiles: %w", err)
 	}

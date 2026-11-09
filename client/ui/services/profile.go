@@ -5,6 +5,8 @@ package services
 import (
 	"context"
 	"os/user"
+	"slices"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 
@@ -70,7 +72,61 @@ func (s *Profiles) Username() (string, error) {
 	return u.Username, nil
 }
 
+// List returns the profiles the UI shows. It leaves out the default profile while that
+// profile was never pointed at a management server and other profiles exist, since the
+// daemon refuses to remove it.
 func (s *Profiles) List(ctx context.Context, username string) ([]Profile, error) {
+	profiles, err := s.listAll(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	return s.withoutUnusedDefault(ctx, username, profiles), nil
+}
+
+func (s *Profiles) withoutUnusedDefault(ctx context.Context, username string, profiles []Profile) []Profile {
+	if len(profiles) < 2 {
+		return profiles
+	}
+	idx := slices.IndexFunc(profiles, func(p Profile) bool {
+		return p.ID == string(profilemanager.DefaultProfileName)
+	})
+	if idx < 0 || profiles[idx].IsActive {
+		return profiles
+	}
+	unused, err := s.isUnusedDefault(ctx, username)
+	if err != nil {
+		log.Debugf("read the default profile config, keeping it listed: %v", err)
+		return profiles
+	}
+	if !unused {
+		return profiles
+	}
+	return slices.Delete(slices.Clone(profiles), idx, idx+1)
+}
+
+// isUnusedDefault reports whether the default profile still carries no management URL
+// or the cloud one the daemon writes into a fresh config.
+func (s *Profiles) isUnusedDefault(ctx context.Context, username string) (bool, error) {
+	cli, err := s.conn.Client()
+	if err != nil {
+		return false, err
+	}
+	resp, err := cli.GetConfig(ctx, &proto.GetConfigRequest{
+		ProfileName: string(profilemanager.DefaultProfileName),
+		Username:    username,
+	})
+	if err != nil {
+		return false, err
+	}
+	return isUnsetManagementURL(resp.GetManagementUrl()), nil
+}
+
+func isUnsetManagementURL(raw string) bool {
+	url := strings.TrimSpace(raw)
+	return url == "" || strings.TrimSuffix(url, "/") == profilemanager.DefaultManagementURL
+}
+
+func (s *Profiles) listAll(ctx context.Context, username string) ([]Profile, error) {
 	cli, err := s.conn.Client()
 	if err != nil {
 		return nil, err
