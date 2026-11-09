@@ -1,9 +1,7 @@
 # Concurrent profiles: technical design
 
 This document explains how the fork lets one NetBird daemon keep several profiles connected at
-the same time. The user-facing behavior is described in the [README](../README.md); the binding
-design with all decisions, findings, and the phase plan is the
-[specification](specs/concurrent-profiles.md) (Czech).
+the same time. The user-facing behavior is described in the [README](../README.md).
 
 ## Contents
 

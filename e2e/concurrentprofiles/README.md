@@ -1,6 +1,6 @@
 # Concurrent profiles E2E test
 
-The acceptance scenario of [the specification](../../docs/specs/concurrent-profiles.md#akceptační-scénář-linux-cli-v1)
+The acceptance scenario for concurrent profiles
 on real containers: two Management servers, a peer in each network and a daemon with
 the feature gate on, driven only through the CLI in its container.
 

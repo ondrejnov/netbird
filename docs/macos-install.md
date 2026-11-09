@@ -84,7 +84,7 @@ sudo cp -R build/NetBird.app /Applications/
 ```
 
 `--enable-concurrent-profiles` turns on concurrent profiles; without it the daemon behaves like upstream. Working
-with profiles is described in [concurrent-profiles.md](concurrent-profiles.md).
+with profiles is described in the [README](../README.md).
 
 ## Update
 

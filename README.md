@@ -223,9 +223,7 @@ since upstream does not know `sessions.json` and would not clean up the extra sl
 
 ## Documentation
 
-- [User guide](docs/concurrent-profiles.md) (Czech): gate, usage, conflicts, upgrade, and rollback.
 - [Technical design](docs/concurrent-profiles-architecture.md): how sessions, slots, the host coordinator, isolation, and DNS make concurrent connections work.
-- [Specification](docs/specs/concurrent-profiles.md) (Czech): design, invariants, and phase plan.
 - [Upstream documentation](https://docs.netbird.io/) for everything else NetBird does.
 
 ## Upstream
