@@ -103,10 +103,10 @@ type SessionConfig struct {
 }
 
 // NewSessionFirewall is NewFirewall for one session of several. It builds a userspace firewall that
-// drops what is meant for the other sessions. It refuses a session with server routes disabled,
-// which hands routed packets to a kernel that would forward them between sessions (Q10).
+// drops what is meant for the other sessions. With server routes disabled it drops routed packets
+// itself rather than handing them to a kernel that would forward them between sessions (Q10).
 func NewSessionFirewall(ctx context.Context, iface IFaceMapper, _ *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16, session SessionConfig) (firewall.Manager, error) {
-	if err := checkSessionFirewall(iface, disableServerRoutes, session); err != nil {
+	if err := checkSessionFirewall(iface, session); err != nil {
 		return nil, err
 	}
 
@@ -114,6 +114,7 @@ func NewSessionFirewall(ctx context.Context, iface IFaceMapper, _ *statemanager.
 	return uspfilter.Create(uspfilter.Config{
 		IFace:               iface,
 		DisableServerRoutes: disableServerRoutes,
+		DropRouted:          disableServerRoutes,
 		FlowLogger:          flowLogger,
 		MTU:                 mtu,
 		Isolation:           session.Source,
@@ -121,7 +122,7 @@ func NewSessionFirewall(ctx context.Context, iface IFaceMapper, _ *statemanager.
 	})
 }
 
-func checkSessionFirewall(iface IFaceMapper, disableServerRoutes bool, session SessionConfig) error {
+func checkSessionFirewall(iface IFaceMapper, session SessionConfig) error {
 	switch {
 	case session.Isolation == nil:
 		return fmt.Errorf("%w: no isolation", ErrSessionNotIsolated)
@@ -129,8 +130,6 @@ func checkSessionFirewall(iface IFaceMapper, disableServerRoutes bool, session S
 		return fmt.Errorf("%w: no isolation source", ErrSessionNotIsolated)
 	case !iface.IsUserspaceBind():
 		return fmt.Errorf("%w: the interface has no userspace bind for the firewall", ErrSessionNotIsolated)
-	case disableServerRoutes:
-		return fmt.Errorf("%w: with server routes disabled routed packets go to the kernel, which has no native firewall to isolate them", ErrSessionNotIsolated)
 	}
 
 	session.Isolation.mu.Lock()

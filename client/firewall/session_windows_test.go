@@ -166,7 +166,6 @@ func TestNewSessionFirewall_Refusals(t *testing.T) {
 		{"no isolation", userspace, false, SessionConfig{Slot: 1, Source: noOtherSessions{}}},
 		{"no isolation source", userspace, false, SessionConfig{Slot: 1, Isolation: iso}},
 		{"no userspace bind", sessionTestIface{name: "wt1"}, false, SessionConfig{Slot: 1, Isolation: iso, Source: noOtherSessions{}}},
-		{"server routes disabled", userspace, true, SessionConfig{Slot: 1, Isolation: iso, Source: noOtherSessions{}}},
 		{"not in the isolation", sessionTestIface{name: "wt9", userspace: true}, false, SessionConfig{Slot: 9, Isolation: iso, Source: noOtherSessions{}}},
 	}
 	for _, tt := range tests {

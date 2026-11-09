@@ -99,7 +99,7 @@ Implementace zvolila uvedenou konzervativní variantu, vlastník ji může změn
 | Q7 | Prefixové porovnání v ICE blacklistu | `wt1` vyloučí i `wt10`, chyba na straně vyloučení | 8 |
 | Q8 | Ověření DNS na reálném resolved a NM | Harness je Alpine bez systemd, testy běží proti falešným službám na D-Bus | 6 |
 | Q9 | **Vynucení I3, I4 v userspace režimu (sekce 7)** | **Rozhodnuto a napojeno:** vynucení se řídí typem firewallu, jaderná izolace je povinná všude, kde existuje nativní backend, viz 2.5 | 5, 13 |
-| Q10 | **`nativeRouter` v uspfilteru** | **Rozhodnuto a napojeno:** routovaný paket jde do jádra, proto je v tomto režimu jaderná izolace povinná. Bez nativního backendu se session s vypnutými server routes odmítne, viz 2.5 | 5, 13 |
+| Q10 | **`nativeRouter` v uspfilteru** | **Rozhodnuto a napojeno:** routovaný paket jde do jádra, proto je v tomto režimu jaderná izolace povinná. Bez nativního backendu se session s vypnutými server routes na Linuxu odmítne, na Windows a macOS dostane uspfilter s `DropRouted`, který routované pakety zahodí sám (2026-11-09), viz 2.5 | 5, 13 |
 | Q11 | Minimální jádro | `own` potřebuje jádro 5.6 a novější, na starším se session nespustí | 5 |
 | Q12 | iptables bez modulů ipset | Izolace odmítne session (I6), bez fallbacku | 5 |
 | Q13 | Session s v6 bez funkční v6 izolace | **Rozhodnuto a napojeno:** v6 se odebere a session pokračuje na v4 | 5, 13 |
@@ -855,6 +855,12 @@ na `ERROR_ALREADY_EXISTS` při vytváření adapteru. Lint a `-race` stále nepr
 routes (Q10) se odmítnou. Důvod: příznaky může kdokoli na hostiteli zapnout (ICS, `Set-NetIPInterface`) a izolační
 watch to zjistí až při další kontrole.
 
+**Změna rozhodnutí 2026-11-09 (Q10 na Windows a macOS):** session s vypnutými server routes, včetně `BlockInbound`,
+které je engine zapíná, se už neodmítá. `NewSessionFirewall` jí dá uspfilter s `DropRouted`, ve kterém routing nejde
+zapnout ani přes `EnableRouting`. Routovaný paket se tak zahodí v userspace a izolace nestojí na příznacích adapteru.
+Důvod: profil s `BlockInbound` na Windows nešel spustit. Test: `TestDropRoutedKeepsRoutedPacketsOut` (uspfilter) a
+`TestNewSessionFirewall_ServerRoutesDisabledDropsRoutedOnMacOS`.
+
 **W2 (2026-11-07):** `firewall/session_windows.go` a `session_flags_windows.go`. `Add` session jen zapíše, protože
 adapter ještě neexistuje. `NewSessionFirewall` (engine ho volá po vytvoření interfacu a před `Up`) adapter slotu najde
 podle GUID slotu, ne podle jména, a vypne na něm `Forwarding`, `WeakHostSend` a `WeakHostReceive` pro IPv4 i IPv6.
@@ -1035,7 +1041,7 @@ klient chová jako dnes (I1). Větev `mac/hostcoord` z `main`.
 | # | Otázka | Rozhodnutí |
 |---|---|---|
 | M1 | Jméno interfacu | **`utun` s číslem jednotky ze slotu.** Slot 0 má dnešní `utun100`, slot N `utun(100+N)`. Jméno utun nese jen číslo jednotky, prefix `wt` na macOS nejde |
-| M2 | Izolace I3 a I4 | **Jen userspace firewall.** macOS nemá přepínač forwardingu ani weak host modelu po interfacech (`net.inet.ip.forwarding` a `check_interface` jsou globální). Každý paket session projde jejím uspfilterem dřív, než ho uvidí jádro. `SessionAddResult.Kernel` je vždy false, takže session s `DisableFirewall` i s vypnutými server routes (Q10) se odmítne, stejně jako na Windows |
+| M2 | Izolace I3 a I4 | **Jen userspace firewall.** macOS nemá přepínač forwardingu ani weak host modelu po interfacech (`net.inet.ip.forwarding` a `check_interface` jsou globální). Každý paket session projde jejím uspfilterem dřív, než ho uvidí jádro. `SessionAddResult.Kernel` je vždy false, takže session s `DisableFirewall` se odmítne, stejně jako na Windows. Session s vypnutými server routes dostane uspfilter s `DropRouted` (Q10, 2026-11-09) |
 | M3 | Distribuce | **Jen ruční build** s tagem `multiprofile` (CLI i UI), auto-update vypnutý (2.1, `supported_darwin.go`). Balíček `.pkg` forku je mimo rozsah |
 | M4 | Rozhraní | **CLI a desktop UI podle 2.7.** UI zjišťuje gate z `GetFeatures`, na macOS proto funguje beze změny kódu UI |
 
@@ -1050,7 +1056,8 @@ klient chová jako dnes (I1). Větev `mac/hostcoord` z `main`.
 **Implementace (`mac/hostcoord`):**
 
 - **Firewall:** `firewall/session_darwin.go`. `SessionIsolation` jen eviduje členy, `NewSessionFirewall` staví uspfilter
-  s `IsolationSource` a odmítne session bez userspace bindu, bez zdroje izolace, mimo izolaci a s vypnutými server routes.
+  s `IsolationSource` a odmítne session bez userspace bindu, bez zdroje izolace a mimo izolaci. S vypnutými server routes
+  nastaví `DropRouted`.
 - **Routing, základna:** scoped defaulty a bound interface (`IP_BOUND_IF`) slouží socketům všech session. Drží je
   koordinátor, poslední session je odstraní (`releaseSharedScopedDefaults`). Session, která se k nim připojí, je
   přeinstaluje jen tehdy, když se fyzický default změnil (`scopedDefaultsCurrent`), protože se session po změně sítě

@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
@@ -1824,4 +1825,57 @@ func TestRouteACLFilteringIPv6(t *testing.T) {
 			require.Equal(t, tc.allowed, pass, "route ACL result mismatch")
 		})
 	}
+}
+
+func TestDropRoutedKeepsRoutedPacketsOut(t *testing.T) {
+	newManager := func(t *testing.T, cfg Config) *Manager {
+		t.Helper()
+		ctrl := gomock.NewController(t)
+		dev := mocks.NewMockDevice(ctrl)
+		dev.EXPECT().MTU().Return(1500, nil).AnyTimes()
+		wgNet := netip.MustParsePrefix("100.10.0.100/16")
+		cfg.IFace = &IFaceMock{
+			SetFilterFunc: func(device.PacketFilter) error { return nil },
+			AddressFunc: func() wgaddr.Address {
+				return wgaddr.Address{IP: wgNet.Addr(), Network: wgNet}
+			},
+			GetDeviceFunc:   func() *device.FilteredDevice { return &device.FilteredDevice{TUN: dev} },
+			GetWGDeviceFunc: func() *wgbackend.Device { return &wgbackend.Device{} },
+		}
+		cfg.FlowLogger = flowLogger
+		cfg.MTU = iface.DefaultMTU
+		manager, err := Create(cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, manager.Close(nil)) })
+
+		// A peer rule lets every peer reach the local overlay address, so a drop below can
+		// only come from the routed path.
+		_, err = manager.AddFilterRule(nil, []netip.Prefix{netip.MustParsePrefix("100.10.0.0/16")},
+			fw.Network{}, fw.ProtocolALL, nil, nil, fw.ActionAccept)
+		require.NoError(t, err)
+		// Something calling EnableRouting must not turn routing on either.
+		require.NoError(t, manager.EnableRouting())
+		return manager
+	}
+
+	routed := func(t *testing.T) []byte {
+		return createTestPacket(t, "100.10.0.1", "192.168.1.10", fw.ProtocolTCP, 12345, 445)
+	}
+	local := func(t *testing.T) []byte {
+		return createTestPacket(t, "100.10.0.1", "100.10.0.100", fw.ProtocolTCP, 12345, 445)
+	}
+
+	t.Run("server routes disabled hands routed packets to the native stack", func(t *testing.T) {
+		// The single-session behavior: the native stack decides, which is what a session
+		// must not rely on.
+		m := newManager(t, Config{DisableServerRoutes: true})
+		assert.False(t, m.FilterInbound(routed(t), 0), "a routed packet goes on to the native stack")
+	})
+
+	t.Run("drop routed keeps them in userspace", func(t *testing.T) {
+		m := newManager(t, Config{DisableServerRoutes: true, DropRouted: true})
+		assert.False(t, m.routingEnabled.Load(), "routing stays off after EnableRouting")
+		assert.True(t, m.FilterInbound(routed(t), 0), "a routed packet is dropped")
+		assert.False(t, m.FilterInbound(local(t), 0), "a packet for the local overlay address still passes")
+	})
 }

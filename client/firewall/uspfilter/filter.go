@@ -149,6 +149,9 @@ type Config struct {
 	DisableServerRoutes bool
 	FlowLogger          nftypes.FlowLogger
 	MTU                 uint16
+	// DropRouted keeps routing off for good, so routed packets are dropped here instead of
+	// reaching the forwarder or the native stack, which may not isolate them.
+	DropRouted bool
 	// Isolation tells the filter which interfaces and overlay prefixes other sessions of the
 	// same daemon own, so a peer of this network cannot reach them. Nil keeps the behavior of
 	// a host with a single session.
@@ -175,6 +178,8 @@ type Manager struct {
 
 	// indicates whether server routes are disabled
 	disableServerRoutes bool
+	// indicates whether routing stays off whatever EnableRouting is asked
+	dropRouted bool
 	// indicates whether we forward packets not destined for ourselves
 	routingEnabled atomic.Bool
 	// indicates whether we leave forwarding and filtering to the native firewall
@@ -348,6 +353,7 @@ func Create(cfg Config) (_ *Manager, err error) {
 		ifaceAllower:        cfg.InterfaceAllower,
 		localipmanager:      newLocalIPManager(),
 		disableServerRoutes: cfg.DisableServerRoutes,
+		dropRouted:          cfg.DropRouted,
 		stateful:            !disableConntrack,
 		logger:              nblog.NewFromLogrus(log.StandardLogger()),
 		flowLogger:          cfg.FlowLogger,
@@ -532,6 +538,11 @@ func (m *Manager) determineRouting() error {
 	}
 
 	switch {
+	case m.dropRouted:
+		m.routingEnabled.Store(false)
+		m.nativeRouter.Store(false)
+		log.Info("routing is off, routed packets are dropped")
+
 	case disableUspRouting:
 		m.routingEnabled.Store(false)
 		m.nativeRouter.Store(false)
