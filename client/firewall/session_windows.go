@@ -169,8 +169,8 @@ type SessionConfig struct {
 
 // NewSessionFirewall is NewFirewall for one session of several. It sets the isolation flags of
 // the session's adapter and builds a userspace firewall that drops what is meant for the other
-// sessions. It refuses a session with server routes disabled, which hands routed packets to a
-// kernel whose isolation does not count (Q10, owner decision 2026-11-07).
+// sessions. With server routes disabled the firewall drops routed packets itself rather than
+// handing them to a kernel whose isolation does not count (Q10).
 func NewSessionFirewall(ctx context.Context, iface IFaceMapper, _ *statemanager.Manager, flowLogger nftypes.FlowLogger, disableServerRoutes bool, mtu uint16, session SessionConfig) (firewall.Manager, error) {
 	switch {
 	case session.Isolation == nil:
@@ -179,8 +179,6 @@ func NewSessionFirewall(ctx context.Context, iface IFaceMapper, _ *statemanager.
 		return nil, fmt.Errorf("%w: no isolation source", ErrSessionNotIsolated)
 	case !iface.IsUserspaceBind():
 		return nil, fmt.Errorf("%w: the interface has no userspace bind for the firewall", ErrSessionNotIsolated)
-	case disableServerRoutes:
-		return nil, fmt.Errorf("%w: with server routes disabled routed packets go to the kernel, which has no native firewall to isolate them", ErrSessionNotIsolated)
 	}
 
 	if err := session.Isolation.attach(iface.Name(), session.Slot); err != nil {
@@ -191,6 +189,7 @@ func NewSessionFirewall(ctx context.Context, iface IFaceMapper, _ *statemanager.
 	return uspfilter.Create(uspfilter.Config{
 		IFace:               iface,
 		DisableServerRoutes: disableServerRoutes,
+		DropRouted:          disableServerRoutes,
 		FlowLogger:          flowLogger,
 		MTU:                 mtu,
 		InterfaceAllower:    uspfilter.NewWindowsInterfaceAllowerForSlot(iface, session.Slot),

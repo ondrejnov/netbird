@@ -3,8 +3,11 @@
 package firewall
 
 import (
+	"net"
 	"testing"
 
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -69,7 +72,6 @@ func TestNewSessionFirewall_RefusalsOnMacOS(t *testing.T) {
 		{"no isolation", userspace, false, SessionConfig{Slot: 1, Source: noOtherSessions{}}},
 		{"no isolation source", userspace, false, SessionConfig{Slot: 1, Isolation: iso}},
 		{"no userspace bind", sessionTestIface{name: "utun101"}, false, SessionConfig{Slot: 1, Isolation: iso, Source: noOtherSessions{}}},
-		{"server routes disabled", userspace, true, SessionConfig{Slot: 1, Isolation: iso, Source: noOtherSessions{}}},
 		{"not in the isolation", sessionTestIface{name: "utun109", userspace: true}, false, SessionConfig{Slot: 9, Isolation: iso, Source: noOtherSessions{}}},
 	}
 	for _, tt := range tests {
@@ -91,4 +93,31 @@ func TestSessionIsolation_RemovedSessionIsRefusedOnMacOS(t *testing.T) {
 		SessionConfig{Slot: 1, Isolation: iso, Source: noOtherSessions{}})
 	assert.ErrorIs(t, err, ErrSessionNotIsolated, "a session that left the isolation gets no firewall")
 	assert.Nil(t, fm)
+}
+
+func TestNewSessionFirewall_ServerRoutesDisabledDropsRoutedOnMacOS(t *testing.T) {
+	iso := NewSessionIsolation()
+	_, err := iso.Add("utun101", wgaddr.Address{})
+	require.NoError(t, err)
+
+	fm, err := NewSessionFirewall(t.Context(), sessionTestIface{name: "utun101", userspace: true}, nil, nil, true, 1280,
+		SessionConfig{Slot: 1, Isolation: iso, Source: noOtherSessions{}})
+	require.NoError(t, err, "a session with server routes disabled runs")
+	require.NotNil(t, fm)
+	t.Cleanup(func() { require.NoError(t, fm.Close(nil)) })
+	require.NoError(t, fm.EnableRouting())
+
+	filter, ok := fm.(interface{ FilterInbound([]byte, int) bool })
+	require.True(t, ok, "the session firewall filters packets")
+
+	// A peer sends to an address behind the host. With nothing in userspace to drop it, the
+	// packet would reach the kernel, which could forward it to another session.
+	ip := &layers.IPv4{Version: 4, TTL: 64, Protocol: layers.IPProtocolUDP,
+		SrcIP: net.ParseIP("100.81.0.2").To4(), DstIP: net.ParseIP("192.168.1.10").To4()}
+	udp := &layers.UDP{SrcPort: 12345, DstPort: 53}
+	require.NoError(t, udp.SetNetworkLayerForChecksum(ip))
+	buf := gopacket.NewSerializeBuffer()
+	require.NoError(t, gopacket.SerializeLayers(buf, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, ip, udp))
+
+	assert.True(t, filter.FilterInbound(buf.Bytes(), 0), "a routed packet is dropped in userspace")
 }
