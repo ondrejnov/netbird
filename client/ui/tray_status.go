@@ -39,8 +39,11 @@ func (t *Tray) applyStatus(st services.Status) {
 		t.lastDaemonVersion = st.DaemonVersion
 	}
 
-	revisionChanged := st.NetworksRevision != t.lastNetworksRevision
+	focusedProfileID := st.FocusedProfileID()
+	revisionChanged := st.NetworksRevision != t.lastNetworksRevision ||
+		focusedProfileID != t.lastFocusedProfileID
 	t.lastNetworksRevision = st.NetworksRevision
+	t.lastFocusedProfileID = focusedProfileID
 	t.statusMu.Unlock()
 
 	if triggerLogin {

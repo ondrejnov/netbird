@@ -102,6 +102,9 @@ type Tray struct {
 	// can't substitute: it carries only actively-routed routes, not candidate
 	// exit nodes.
 	lastNetworksRevision uint64
+	// lastFocusedProfileID is the profile of the focused session. Every session counts its own
+	// networks revision, so a focus switch can land on the same number and needs its own check.
+	lastFocusedProfileID string
 	// pendingConnectLogin is set when handleConnect fires an Up on an idle
 	// daemon. The daemon flips to NeedsLogin if the peer is SSO-tracked with
 	// no cached token; applyStatus consumes the flag on that transition to

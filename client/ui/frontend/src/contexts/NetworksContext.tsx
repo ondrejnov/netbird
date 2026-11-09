@@ -110,10 +110,20 @@ export const NetworksProvider = ({ children }: { children: ReactNode }) => {
         }
     }, []);
 
+    // Every session counts its own revision, so a focus switch can land on the
+    // same number; the focused profile is part of the refetch key.
     const networksRevision = status?.networksRevision;
+    const focusedProfileId = status?.sessions?.find((s) => s.focused)?.profileId ?? "";
     useEffect(() => {
         refresh().catch((err: unknown) => console.error("[NetworksContext] refresh failed", err));
-    }, [refresh, networksRevision]);
+    }, [refresh, networksRevision, focusedProfileId]);
+
+    // Optimistic overrides belong to the previous session's routes.
+    useEffect(() => {
+        for (const tid of timersRef.current.values()) clearTimeout(tid);
+        timersRef.current.clear();
+        setPending((prev) => (prev.size === 0 ? prev : new Map()));
+    }, [focusedProfileId]);
 
     useEffect(() => {
         if (pendingRef.current.size === 0) return;
