@@ -88,7 +88,7 @@ func (t *TunDevice) Create() (WGConfigurer, error) {
 		return nil, err
 	}
 	log.Info("create tun interface")
-	tunDevice, err := wgbackend.CreateTUNWithRequestedGUID(t.name, &guid, int(t.mtu))
+	tunDevice, err := createAdapter(t.name, &guid, int(t.mtu))
 	if err != nil {
 		return nil, fmt.Errorf("error creating tun device: %s", err)
 	}
