@@ -192,6 +192,19 @@ func TestCleanStateFileBesideARunningSessionIsNoObstacle(t *testing.T) {
 	assert.NoError(t, f.up(f.second))
 }
 
+// The network selection a profile keeps across clean stops undoes nothing on the host, so it is no
+// residual. Counting it refused every profile with a saved selection next to a running session.
+func TestNetworkSelectionBesideARunningSessionIsNoObstacle(t *testing.T) {
+	f := newGateFixture(t)
+	require.NoError(t, f.up(f.first))
+
+	statePath := f.s.profileManager.GetStatePathFor(f.second)
+	selection := `{"routeselector_state":{"selected_routes":{},"deselected_routes":{"net1":{}},"deselect_all":false}}`
+	require.NoError(t, os.WriteFile(statePath, []byte(selection), 0o600))
+
+	assert.NoError(t, f.up(f.second))
+}
+
 // I1: without the gate an event stays what it was, and the Up the same message.
 func TestNoConflictSurfaceWithoutTheGate(t *testing.T) {
 	ss := newSession()

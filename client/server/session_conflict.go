@@ -107,9 +107,23 @@ func (s *Server) refuseResidualBesideOthers(ss *session, others int) error {
 		log.Warnf("failed to read the state of profile %s next to another session: %v", ss.key.Profile, err)
 		return gstatus.Error(codes.FailedPrecondition, errResidualNextToSession)
 	}
-	if len(names) > 0 {
-		log.Warnf("refusing profile %s next to another session, it has residual state: %v", ss.key.Profile, names)
+	if residual := residualStateNames(names); len(residual) > 0 {
+		log.Warnf("refusing profile %s next to another session, it has residual state: %v", ss.key.Profile, residual)
 		return gstatus.Error(codes.FailedPrecondition, errResidualNextToSession)
 	}
 	return nil
+}
+
+// residualStateNames drops the states a clean stop keeps on purpose. The network selection of a
+// profile undoes nothing on the host, so it names no resource of another session. Any other name,
+// also one this build does not know, counts as residual.
+func residualStateNames(names []string) []string {
+	kept := (&routemanager.SelectorState{}).Name()
+	residual := make([]string, 0, len(names))
+	for _, name := range names {
+		if name != kept {
+			residual = append(residual, name)
+		}
+	}
+	return residual
 }
