@@ -39,9 +39,17 @@ them connected at once.
 > This fork targets **self-hosted Management only**. NetBird Cloud is neither supported nor
 > tested. Management, Signal, and Relay are unchanged; all the work is in the client.
 
-> [!NOTE]
-> The feature sits behind a gate that is **off by default**. With the gate off, the client
-> behaves exactly like upstream, with the same interface names, firewall rules, and files.
+> [!IMPORTANT]
+> **Concurrent profiles are off by default and must be enabled explicitly.** Installing or
+> building this fork is not enough: the service has to be installed with
+>
+> ```bash
+> sudo netbird service install --enable-concurrent-profiles
+> ```
+>
+> (or reconfigured with `sudo netbird service reconfigure --enable-concurrent-profiles`). Without
+> the flag, the client behaves exactly like upstream: one connected profile at a time, with the
+> same interface names, firewall rules, and files. See [Enable the gate](#enable-the-gate).
 
 ## Features
 
@@ -104,6 +112,11 @@ The `netbird-multiprofile` package conflicts with and replaces `netbird`, instal
 binary and service, and keeps `/var/lib/netbird`. Auto-update and the lookup on
 `pkgs.netbird.io` are disabled in this build so an official release cannot overwrite it.
 
+> [!IMPORTANT]
+> The package does **not** turn concurrent profiles on. Continue with
+> [Enable the gate](#enable-the-gate), otherwise `netbird up --profile home` still disconnects
+> `work` exactly as upstream does.
+
 <details>
 <summary>Windows (manual build, test VM)</summary>
 
@@ -129,6 +142,9 @@ Windows.
 </details>
 
 ### Enable the gate
+
+This step is **required**. Without `--enable-concurrent-profiles` the fork runs one profile at a
+time, like upstream.
 
 New service installation:
 
