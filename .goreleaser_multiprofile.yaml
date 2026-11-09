@@ -2,17 +2,27 @@ version: 2
 # Build of the multi-profile fork (docs/specs/concurrent-profiles.md, 2.1).
 # Run it next to the upstream configuration, never in place of it:
 #   goreleaser release --snapshot --clean --config .goreleaser_multiprofile.yaml
-# The Windows installer needs makensis, unzip and curl on the build host.
-# Linux and Windows. The multiprofile tag marks the version, switches off the
-# lookup of the latest upstream release and keeps the updater from installing
-# anything. A tag vX.Y.Z-multiprofile publishes to the fork's GitHub releases
-# only; no package repository, Homebrew tap or image registry is touched.
+#   release_files/multiprofile/windows-installers.sh
+# Linux and Windows, the CLI daemon and the desktop UI. The build host needs
+# the tools installed by .github/workflows/release-multiprofile.yml.
+# The multiprofile tag marks the version, switches off the lookup of the
+# latest upstream release and keeps the updater from installing anything.
+# goreleaser publishes nothing: the Windows installers need every binary, so
+# the workflow builds them afterwards and creates the GitHub release itself.
 project_name: netbird-multiprofile
 
 before:
   hooks:
     - bash release_files/multiprofile/fetch-wintun.sh
+    # Bindings are gitignored and the frontend build needs them.
+    - sh -c 'cd client/ui && wails3 generate bindings -clean=true -ts'
+    - sh -c 'cd client/ui/frontend && pnpm install --frozen-lockfile && pnpm build'
+    - >-
+      sh -c 'cd client/ui && for arch in amd64 arm64; do
+      wails3 generate syso -arch $arch -icon build/windows/icon.ico
+      -manifest build/windows/wails.exe.manifest -out wails_windows_$arch.syso || exit 1; done'
 
+# The binaries report X.Y.Z+multiprofile, so the tag suffix is not repeated.
 builds:
   - id: netbird-multiprofile
     dir: client
@@ -23,7 +33,6 @@ builds:
     goarch:
       - amd64
       - arm64
-    # The binary reports X.Y.Z+multiprofile, so the tag suffix is not repeated.
     ldflags:
       - -s -w -X github.com/netbirdio/netbird/version.version={{.Major}}.{{.Minor}}.{{.Patch}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
     mod_timestamp: "{{ .CommitTimestamp }}"
@@ -46,22 +55,76 @@ builds:
     tags:
       - multiprofile
       - load_wgnt_from_rsrc
-    hooks:
-      post:
-        - cmd: >-
-            bash release_files/multiprofile/windows-installer.sh
-            "{{ .Path }}" {{ .Arch }} {{ .Version }} {{ .Major }}.{{ .Minor }}.{{ .Patch }}
-            dist/{{ .ProjectName }}_{{ .Version }}_windows_{{ .Arch }}_installer.exe
-          output: true
+
+  # GTK4 and WebKitGTK 6.0, amd64 only like upstream.
+  - id: netbird-ui-multiprofile
+    dir: client/ui
+    binary: netbird-ui
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X github.com/netbirdio/netbird/version.version={{.Major}}.{{.Minor}}.{{.Patch}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    tags:
+      - production
+      - multiprofile
+
+  - id: netbird-ui-multiprofile-windows-amd64
+    dir: client/ui
+    binary: netbird-ui
+    env:
+      - CGO_ENABLED=1
+      - CC=x86_64-w64-mingw32-gcc
+    goos:
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X github.com/netbirdio/netbird/version.version={{.Major}}.{{.Minor}}.{{.Patch}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
+      - -H windowsgui
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    tags:
+      - production
+      - multiprofile
+
+  - id: netbird-ui-multiprofile-windows-arm64
+    dir: client/ui
+    binary: netbird-ui
+    env:
+      - CGO_ENABLED=1
+      - CC=aarch64-w64-mingw32-clang
+      - CXX=aarch64-w64-mingw32-clang++
+    goos:
+      - windows
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w -X github.com/netbirdio/netbird/version.version={{.Major}}.{{.Minor}}.{{.Patch}} -X main.commit={{.Commit}} -X main.date={{.CommitDate}} -X main.builtBy=goreleaser
+      - -H windowsgui
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    tags:
+      - production
+      - multiprofile
 
 archives:
   - id: netbird-multiprofile
     ids:
       - netbird-multiprofile
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: netbird-ui-multiprofile
+    ids:
+      - netbird-ui-multiprofile
+    name_template: "netbird-ui-multiprofile_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  # One portable zip per architecture with the daemon, the UI and Wintun.
   - id: netbird-multiprofile-windows
     ids:
       - netbird-multiprofile-windows
+      - netbird-ui-multiprofile-windows-amd64
+      - netbird-ui-multiprofile-windows-arm64
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - zip
@@ -93,20 +156,65 @@ nfpms:
       postinstall: "release_files/post_install.sh"
       preremove: "release_files/pre_remove.sh"
 
-checksum:
-  extra_files:
-    - glob: ./dist/*_installer.exe
+  # deb and rpm spell alternatives differently, hence two entries.
+  - id: netbird-ui-multiprofile-deb
+    package_name: netbird-ui-multiprofile
+    maintainer: ondrejnov fork maintainers
+    description: NetBird client UI with concurrent profiles (fork).
+    homepage: https://github.com/ondrejnov/netbird
+    license: BSD-3-Clause
+    vendor: NetBird fork
+    bindir: /usr/bin
+    ids:
+      - netbird-ui-multiprofile
+    formats:
+      - deb
+    conflicts:
+      - netbird-ui
+    replaces:
+      - netbird-ui
+    scripts:
+      postinstall: "release_files/ui-post-install.sh"
+    contents: &ui-contents
+      - src: client/ui/build/linux/netbird.desktop
+        dst: /usr/share/applications/org.wails.netbird.desktop
+      - src: client/ui/build/appicon.png
+        dst: /usr/share/pixmaps/netbird.png
+      - src: client/ui/build/linux/polkit/io.netbird.settings.policy
+        dst: /usr/share/polkit-1/actions/io.netbird.settings.policy
+    dependencies:
+      - netbird-multiprofile
+      - libgtk-4-1 (>= 4.14)
+      - libwebkitgtk-6.0-4
+      - xdg-utils
+
+  - id: netbird-ui-multiprofile-rpm
+    package_name: netbird-ui-multiprofile
+    maintainer: ondrejnov fork maintainers
+    description: NetBird client UI with concurrent profiles (fork).
+    homepage: https://github.com/ondrejnov/netbird
+    license: BSD-3-Clause
+    vendor: NetBird fork
+    bindir: /usr/bin
+    ids:
+      - netbird-ui-multiprofile
+    formats:
+      - rpm
+    conflicts:
+      - netbird-ui
+    replaces:
+      - netbird-ui
+    scripts:
+      postinstall: "release_files/ui-post-install.sh"
+    contents: *ui-contents
+    dependencies:
+      - netbird-multiprofile
+      - (gtk4 >= 4.14 or libgtk-4-1 >= 4.14)
+      - (webkitgtk6.0 or libwebkitgtk-6_0-4)
+      - xdg-utils
 
 release:
-  github:
-    owner: ondrejnov
-    name: netbird
-  name_template: "{{ .Tag }}"
-  # The tag suffix is a fork marker, not a prerelease.
-  prerelease: "false"
-  make_latest: "true"
-  extra_files:
-    - glob: ./dist/*_installer.exe
+  disable: true
 
 changelog:
   disable: true

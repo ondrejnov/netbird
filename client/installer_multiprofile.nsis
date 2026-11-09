@@ -1,5 +1,5 @@
-; Installer of the multi-profile fork: the CLI daemon with Wintun, no UI.
-; Built by release_files/multiprofile/windows-installer.sh, which passes the
+; Installer of the multi-profile fork: the daemon with Wintun and the desktop UI.
+; Built by release_files/multiprofile/windows-installers.sh, which passes the
 ; defines below.
 
 Unicode True
@@ -7,7 +7,7 @@ ManifestDPIAware true
 RequestExecutionLevel admin
 
 !ifndef ARCH | VERSION | DISPLAY_VERSION | SRC_DIR | ROOT_DIR | OUT_FILE
-    !error "build with release_files/multiprofile/windows-installer.sh"
+    !error "build with release_files/multiprofile/windows-installers.sh"
 !endif
 
 ; The name and registry keys match the upstream installer, so installing one
@@ -17,6 +17,11 @@ RequestExecutionLevel admin
 !define PUBLISHER "NetBird fork (ondrejnov/netbird)"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 !define APP_PATH_KEY "Software\Microsoft\Windows\CurrentVersion\App Paths\Netbird"
+!define UI_APP_PATH_KEY "Software\Microsoft\Windows\CurrentVersion\App Paths\Netbird-ui"
+!define UI_EXE "netbird-ui.exe"
+!define SHORTCUT "NetBird.lnk"
+; Registry value the WebView2 runtime sets once installed, per machine or per user.
+!define WEBVIEW2_KEY "Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 !define UNINSTALLER "netbird_uninstall.exe"
 ; The installer is a 32-bit process; Sysnative reaches the native PowerShell.
 !define POWERSHELL "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
@@ -145,25 +150,49 @@ Function un.onInit
     SetRegView 64
 FunctionEnd
 
+; The UI renders in WebView2, which Windows 10 does not always have.
+Function InstallWebView2
+    ReadRegStr $0 HKLM "SOFTWARE\WOW6432Node\${WEBVIEW2_KEY}" "pv"
+    ${If} $0 != ""
+        Return
+    ${EndIf}
+    ReadRegStr $0 HKCU "Software\${WEBVIEW2_KEY}" "pv"
+    ${If} $0 != ""
+        Return
+    ${EndIf}
+    DetailPrint "Installing the WebView2 runtime..."
+    File "/oname=$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" "${SRC_DIR}/MicrosoftEdgeWebview2Setup.exe"
+    ExecWait '"$PLUGINSDIR\MicrosoftEdgeWebview2Setup.exe" /silent /install' $0
+    ${If} $0 != 0
+        DetailPrint "WebView2 runtime install failed: $0"
+    ${EndIf}
+FunctionEnd
+
 Section "Install"
     SetShellVarContext all
     SetRegView 64
     SetOutPath "$INSTDIR"
     File "${SRC_DIR}/netbird.exe"
+    File "${SRC_DIR}/${UI_EXE}"
     File "${SRC_DIR}/wintun.dll"
     WriteUninstaller "$INSTDIR\${UNINSTALLER}"
 
     WriteRegStr HKLM "${APP_PATH_KEY}" "" "$INSTDIR\netbird.exe"
+    WriteRegStr HKLM "${UI_APP_PATH_KEY}" "" "$INSTDIR\${UI_EXE}"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${DISPLAY_NAME}"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\${UNINSTALLER}"'
-    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\netbird.exe"
+    WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${UI_EXE}"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${DISPLAY_VERSION}"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "Publisher" "${PUBLISHER}"
     WriteRegStr HKLM "${UNINSTALL_KEY}" "URLInfoAbout" "https://github.com/ondrejnov/netbird"
     WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoModify" 1
     WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoRepair" 1
 
+    CreateShortCut "$SMPROGRAMS\${SHORTCUT}" "$INSTDIR\${UI_EXE}"
+    CreateShortCut "$DESKTOP\${SHORTCUT}" "$INSTDIR\${UI_EXE}"
+
     InitPluginsDir
+    Call InstallWebView2
     File "/oname=$PLUGINSDIR\path.ps1" "${SRC_DIR}/path.ps1"
     nsExec::ExecToLog '"${POWERSHELL}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\path.ps1" -Action add -Dir "$INSTDIR"'
     Pop $0
@@ -189,6 +218,10 @@ Section "Uninstall"
     SetShellVarContext all
     SetRegView 64
 
+    DetailPrint "Closing the NetBird UI..."
+    nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /im ${UI_EXE} /f'
+    Pop $0
+
     DetailPrint "Stopping the NetBird service..."
     nsExec::ExecToLog '"$INSTDIR\netbird.exe" service stop'
     Pop $0
@@ -203,11 +236,15 @@ Section "Uninstall"
     Pop $0
     SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
+    Delete "$SMPROGRAMS\${SHORTCUT}"
+    Delete "$DESKTOP\${SHORTCUT}"
     Delete "$INSTDIR\netbird.exe"
+    Delete "$INSTDIR\${UI_EXE}"
     Delete "$INSTDIR\wintun.dll"
     Delete "$INSTDIR\${UNINSTALLER}"
     RMDir "$INSTDIR"
 
     DeleteRegKey HKLM "${UNINSTALL_KEY}"
     DeleteRegKey HKLM "${APP_PATH_KEY}"
+    DeleteRegKey HKLM "${UI_APP_PATH_KEY}"
 SectionEnd

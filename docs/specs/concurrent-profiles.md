@@ -579,13 +579,19 @@ skutečným socketem a přepíše jeho config. Privilegovaný harness se při ov
 a „Linux only“ z PR 18 výše.
 
 - **Spouštěč:** tag `vX.Y.Z-multiprofile` nebo `vX.Y.Z-multiprofile.N` spustí `release-multiprofile.yml`. Ten vydá
-  do GitHub releases forku (`release.github` je pevně `ondrejnov/netbird`, hlídá `TestForkReleaseConfig`). PR, které
+  do GitHub releases forku (`ondrejnov/netbird`, viz UI níže). PR, které
   mění soubory vydání, a ruční spuštění staví snapshot jako artefakt. Upstream `release.yml` je smazaný: potřeboval
   runner `ubuntu-24.04-8-core`, podpisové klíče a repozitáře NetBird, ve forku visel ve frontě nebo padal.
 - **Verze:** binárka hlásí `X.Y.Z+multiprofile` (`ldflags` bere jen `Major.Minor.Patch`), přípona tagu se neopakuje.
   Deb má verzi `X.Y.Z~multiprofile`.
-- **Windows:** zip a nepodepsaný NSIS instalátor (`client/installer_multiprofile.nsis`) pro amd64 a arm64, jen CLI
-  a daemon s Wintun 0.14.1 z wintun.net (pevný SHA-256, `release_files/multiprofile/fetch-wintun.sh`). Instalátor
+- **UI (doplněno 2026-11-09):** Linux amd64 (GTK4, WebKitGTK 6.0) jako `netbird-ui-multiprofile` deb a rpm s
+  `conflicts` a `replaces` na `netbird-ui`, Windows amd64 a arm64 v instalátoru i v zipu. Varianta GTK3 pro starší
+  distribuce se nestaví. Instalátory potřebují binárky daemonu i UI, proto je staví
+  `release_files/multiprofile/windows-installers.sh` až po goreleaseru. goreleaser nic nepublikuje
+  (`release.disable`), release vytváří job `publish` přes `gh release create --repo ondrejnov/netbird` až po
+  úspěšném `test_windows_installer` (hlídá `TestForkReleaseWorkflowPublishesToTheFork`).
+- **Windows:** zip a nepodepsaný NSIS instalátor (`client/installer_multiprofile.nsis`) pro amd64 a arm64,
+  daemon, UI (WebView2 doinstaluje bootstrapper) a Wintun 0.14.1 z wintun.net (pevný SHA-256, `release_files/multiprofile/fetch-wintun.sh`). Instalátor
   sdílí klíč `Uninstall\Netbird` s upstream, takže jeden nahradí druhý. PATH upravuje `path.ps1` místo pluginu EnVar,
   hodnota zůstává `REG_EXPAND_SZ`. Instalátor odmítne architekturu, která neodpovídá hostiteli, protože Wintun
   pod emulací nenaběhne. Job `test_windows_installer` instalátor na `windows-2022` nainstaluje, zkontroluje

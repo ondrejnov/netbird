@@ -1,25 +1,23 @@
-# Sestavení a instalace forku na macOS
+# Building and installing the fork on macOS
 
-Fork se pro macOS nedistribuuje: bez Apple Developer ID a notarizace by Gatekeeper stažený binární soubor
-zablokoval. Klient si proto sestavíte sami. Binárka sestavená na vlastním Macu nemá atribut karantény,
-takže ji Gatekeeper nekontroluje.
+The fork publishes no macOS build: without an Apple Developer ID and notarization, Gatekeeper would block a
+downloaded binary. Build the client yourself instead. A binary built on your own Mac carries no quarantine
+attribute, so Gatekeeper does not check it.
 
-Návod pokrývá CLI a daemon. Desktop UI není součástí v1 (viz [concurrent-profiles.md](concurrent-profiles.md)).
+## Prerequisites
 
-## Předpoklady
+- macOS 11 or later, Intel or Apple Silicon.
+- Xcode Command Line Tools: `xcode-select --install` (for `git`, `codesign` and the C compiler the UI needs).
+- Go at the version on the `toolchain` line of `go.mod`. A newer Go downloads the missing toolchain itself.
 
-- macOS 11 nebo novější, Intel i Apple Silicon.
-- Xcode Command Line Tools: `xcode-select --install` (kvůli `git` a `codesign`).
-- Go ve verzi z řádku `toolchain` v `go.mod`. Novější Go si chybějící toolchain stáhne samo.
-
-## Sestavení
+## Build the daemon and CLI
 
 ```bash
 git clone https://github.com/ondrejnov/netbird.git
 cd netbird
-git checkout v0.82.0-multiprofile          # vybrané vydání forku
+git checkout v0.82.0-multiprofile          # the fork release you want
 
-# Verze bez přípony: tag multiprofile k ní sám přidá "+multiprofile".
+# Version without the suffix: the multiprofile tag appends "+multiprofile" itself.
 VERSION=$(git describe --tags --exact-match | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
 
 mkdir -p build
@@ -27,44 +25,70 @@ mkdir -p build
   -ldflags "-s -w -X github.com/netbirdio/netbird/version.version=$VERSION" \
   -o ../build/netbird .)
 
-# Ad-hoc podpis. Apple Silicon bez podpisu binárku nespustí.
+# Ad-hoc signature. Apple Silicon refuses to run an unsigned binary.
 codesign --force -s - build/netbird
 ./build/netbird version                     # 0.82.0+multiprofile
 ```
 
-Bez tagu `multiprofile` vznikne upstream klient se zapnutým auto-updatem, který by fork přepsal
-oficiálním vydáním.
+Without the `multiprofile` build tag you get the upstream client with auto-update enabled, which would replace
+the fork with the official release.
 
-## Odstranění upstream klienta
+## Build the desktop UI (optional)
 
-Fork a upstream sdílejí službu i binárku `netbird`, nainstalovaný může být jen jeden.
+The UI needs Node.js 22, pnpm 11 and the `wails3` CLI at the version of `github.com/wailsapp/wails/v3` in `go.mod`:
+
+```bash
+npm install -g pnpm@11
+go install github.com/wailsapp/wails/v3/cmd/wails3@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)
+
+(cd client/ui && wails3 generate bindings -clean=true -ts)
+(cd client/ui/frontend && pnpm install --frozen-lockfile && pnpm build)
+(cd client/ui && CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=11.0 CGO_LDFLAGS=-mmacosx-version-min=11.0 \
+  go build -tags production,multiprofile -trimpath \
+  -ldflags "-s -w -X github.com/netbirdio/netbird/version.version=$VERSION" \
+  -o ../../build/netbird-ui .)
+
+mkdir -p build/NetBird.app/Contents/MacOS build/NetBird.app/Contents/Resources
+cp client/ui/build/darwin/Info.plist build/NetBird.app/Contents/
+cp client/ui/build/darwin/icons.icns build/NetBird.app/Contents/Resources/
+cp build/netbird-ui build/NetBird.app/Contents/MacOS/
+codesign --force --deep -s - build/NetBird.app
+```
+
+## Remove the upstream client
+
+The fork and upstream share the `netbird` service and binary, so only one of them can be installed.
 
 ```bash
 sudo netbird service stop
 sudo netbird service uninstall
-which netbird                               # binárku odstraňte podle toho, odkud pochází
-brew uninstall netbird                      # jen při instalaci přes Homebrew
-brew uninstall --cask netbird-ui            # totéž pro UI
+which netbird                               # remove the binary according to where it came from
+brew uninstall netbird                      # only for a Homebrew install
+brew uninstall --cask netbird-ui            # the same for the UI
 ```
 
-Upstream instalace z balíčku `.pkg` obsahuje i `/Applications/NetBird.app`. UI forku nepatří, takže ho
-smažte nebo aspoň nespouštějte. Konfigurace v `/var/lib/netbird` zůstává a fork ji převezme.
+An upstream `.pkg` install also puts the UI in `/Applications/NetBird.app`; replace it with the fork's UI or
+delete it. The configuration in `/var/lib/netbird` stays and the fork takes it over.
 
-## Instalace
+## Install
 
 ```bash
 sudo install -m 0755 build/netbird /usr/local/bin/netbird
 sudo netbird service install --enable-concurrent-profiles
 sudo netbird service start
 netbird up --management-url https://management.example.com
+
+# Only if you built the UI:
+sudo rm -rf /Applications/NetBird.app
+sudo cp -R build/NetBird.app /Applications/
 ```
 
-`--enable-concurrent-profiles` zapíná souběžné profily. Bez něj se daemon chová jako upstream. Další kroky
-s profily jsou popsané v [concurrent-profiles.md](concurrent-profiles.md).
+`--enable-concurrent-profiles` turns on concurrent profiles; without it the daemon behaves like upstream. Working
+with profiles is described in [concurrent-profiles.md](concurrent-profiles.md).
 
-## Aktualizace
+## Update
 
-Klient forku se sám neaktualizuje. Novou verzi sestavte podle kapitoly Sestavení a vyměňte binárku:
+The fork does not update itself. Build the new version as described above and swap the binary:
 
 ```bash
 sudo netbird service stop
@@ -72,12 +96,15 @@ sudo install -m 0755 build/netbird /usr/local/bin/netbird
 sudo netbird service start
 ```
 
-## Odinstalace
+Replace `/Applications/NetBird.app` the same way if you use the UI.
+
+## Uninstall
 
 ```bash
 sudo netbird down
 sudo netbird service stop
 sudo netbird service uninstall
 sudo rm /usr/local/bin/netbird
-sudo rm -rf /var/lib/netbird                # jen pokud chcete smazat i konfiguraci a profily
+sudo rm -rf /Applications/NetBird.app       # if you installed the UI
+sudo rm -rf /var/lib/netbird                # only to delete the configuration and profiles too
 ```
