@@ -101,11 +101,13 @@ func (s *Server) subscribeAllSessions(ss *session, req *proto.StatusRequest, str
 	setID, setChanged := s.sessionSetChanges.subscribe()
 	defer s.sessionSetChanges.unsubscribe(setID)
 
+	// The gate admitted the caller as holder of ss, which mayReach covers as well, so a stream
+	// never watches a recorder only because it once described that session.
 	caller := s.callerOf(stream.Context())
 	reachable := func() []*session {
 		var out []*session
 		for _, candidate := range s.allSessions() {
-			if candidate == ss || caller.mayReach(candidate.key) {
+			if caller.mayReach(candidate.key) {
 				out = append(out, candidate)
 			}
 		}
@@ -132,9 +134,11 @@ func (s *Server) subscribeAllSessions(ss *session, req *proto.StatusRequest, str
 		case <-stream.Context().Done():
 			return nil
 		}
-		if s.focusMovedFrom(ss, req.GetSession()) {
-			ss = s.focusedSession()
+		next, err := s.streamSessionAfter(stream.Context(), ss, req.GetSession())
+		if err != nil {
+			return err
 		}
+		ss = next
 		watch.sync(reachable())
 		if err := s.sendStatusSnapshot(ss, req, stream); err != nil {
 			return err

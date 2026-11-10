@@ -88,37 +88,27 @@ func (s *Server) prepareConcurrentStart() (concurrentStart, error) {
 	if err != nil {
 		return concurrentStart{}, fmt.Errorf("open stored sessions: %w", err)
 	}
-	s.slots = slots
-	s.host = internal.NewDaemonHost(slots)
-	context.AfterFunc(s.rootCtx, func() {
-		if err := slots.Close(); err != nil {
-			log.Debugf("close stored sessions: %v", err)
-		}
-	})
 
+	// The key goes first, as the daemon services publish events tagged with the profile. They
+	// have no counterpart and are left running on failure: a repeated start finds them in place.
 	key := sessionKeyOf(activeProf.ID, activeProf.Username)
 	ss := s.focusedSession()
+	previousKey := ss.key
 	ss.bindKey(key)
-	s.sessions[key] = ss
-
 	s.startDaemonServices(ss)
 
-	// A session interface the cleanup could not take away carries peers no session answers for (I6).
-	if err := s.verifySessionLinks(slots.Records()); err != nil {
-		s.slots = nil
-		s.host = nil
-		if closeErr := slots.Close(); closeErr != nil {
-			log.Debugf("close stored sessions: %v", closeErr)
-		}
-		return concurrentStart{}, fmt.Errorf("residual session interface: %w", err)
-	}
-
-	state := profileStateOf(key)
-	config, existingConfig, err := s.getConfig(state)
+	config, existingConfig, err := s.verifyConcurrentStart(slots, key)
 	if err != nil {
-		log.Errorf("failed to get active profile config: %v", err)
+		ss.bindKey(previousKey)
+		closeSlots(slots)
 		return concurrentStart{}, err
 	}
+
+	s.slots = slots
+	s.host = internal.NewDaemonHost(slots)
+	context.AfterFunc(s.rootCtx, func() { closeSlots(slots) })
+	s.sessions[key] = ss
+
 	ss.setConfig(key, config)
 	ss.statusRecorder.UpdateManagementAddress(config.ManagementURL.String())
 	ss.statusRecorder.UpdateRosenpass(config.RosenpassEnabled, config.RosenpassPermissive)
@@ -126,6 +116,27 @@ func (s *Server) prepareConcurrentStart() (concurrentStart, error) {
 	s.ensureSessionWatcher(ss)
 
 	return concurrentStart{ss: ss, config: config, existingConfig: existingConfig, firstStart: len(stored) == 0}, nil
+}
+
+// verifyConcurrentStart runs the checks of the start that come after the residual cleanup, and
+// reads the config of the focused session.
+func (s *Server) verifyConcurrentStart(slots *hostcoord.Slots, key profilemanager.SessionKey) (*profilemanager.Config, bool, error) {
+	// A session interface the cleanup could not take away carries peers no session answers for (I6).
+	if err := s.verifySessionLinks(slots.Records()); err != nil {
+		return nil, false, fmt.Errorf("residual session interface: %w", err)
+	}
+
+	config, existingConfig, err := s.getConfig(profileStateOf(key))
+	if err != nil {
+		return nil, false, fmt.Errorf("get active profile config: %w", err)
+	}
+	return config, existingConfig, nil
+}
+
+func closeSlots(slots *hostcoord.Slots) {
+	if err := slots.Close(); err != nil {
+		log.Debugf("close stored sessions: %v", err)
+	}
 }
 
 // restoreSessions brings back the sessions that were up when the daemon went away, the focused
@@ -242,8 +253,7 @@ func (s *Server) launchSession(ctx context.Context, ss *session, launch sessionL
 
 	config, err := launch.resolve()
 	if err != nil {
-		log.Errorf("failed to get profile config: %v", err)
-		return fmt.Errorf("failed to get profile config: %w", err)
+		return fmt.Errorf("get profile config: %w", err)
 	}
 
 	if err := s.storeDesiredUp(ss.key); err != nil {
@@ -467,23 +477,19 @@ func (s *Server) upSessionLocked(callerCtx context.Context, ss *session, async b
 // downConcurrent is Down with the gate. The sessions it takes down stay down after a restart.
 func (s *Server) downConcurrent(ctx context.Context, target *session, all bool) (*proto.DownResponse, error) {
 	targets := s.downTargets(ctx, target, all)
-
-	for _, ss := range targets {
-		s.markDesired(ss, hostcoord.DesiredDown)
-	}
-	if err := s.downSessions(ctx, targets); err != nil {
+	if err := s.downSessions(ctx, targets, true); err != nil {
 		return nil, err
 	}
 	return &proto.DownResponse{}, nil
 }
 
-// downSessions takes the sessions down side by side. It reports ErrServiceNotUp only when none
-// of them was up.
-func (s *Server) downSessions(ctx context.Context, targets []*session) error {
+// downSessions takes the sessions down side by side, and with keepDown records that they stay
+// down, also those that were not up. It reports ErrServiceNotUp only when none of them was up.
+func (s *Server) downSessions(ctx context.Context, targets []*session, keepDown bool) error {
 	var mu sync.Mutex
 	var wasUp bool
 	err := s.forEachSession(targets, func(ss *session) error {
-		err := s.downSession(ctx, ss)
+		err := s.takeDownSession(ctx, ss, keepDown)
 		if errors.Is(err, ErrServiceNotUp) {
 			return nil
 		}
@@ -505,7 +511,7 @@ func (s *Server) StopSessions(ctx context.Context) error {
 		_, err := s.Down(ctx, &proto.DownRequest{})
 		return err
 	}
-	return s.downSessions(ctx, s.allSessions())
+	return s.downSessions(ctx, s.allSessions(), false)
 }
 
 // sleepStatus reports whether any session is worth taking down for a system sleep.

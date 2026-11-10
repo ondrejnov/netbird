@@ -200,9 +200,9 @@ func (s *Server) focusMovedFrom(ss *session, selector *proto.SessionSelector) bo
 	return selector == nil && s.focusedSession() != ss
 }
 
-// eventSessionAfter returns the session an event stream on ss goes on with, and refuses the stream
-// when the focus moved on to a session the caller may not read.
-func (s *Server) eventSessionAfter(ctx context.Context, ss *session, selector *proto.SessionSelector) (*session, error) {
+// streamSessionAfter returns the session a status or event stream on ss goes on with, and refuses
+// the stream when the focus moved on to a session the caller may not read.
+func (s *Server) streamSessionAfter(ctx context.Context, ss *session, selector *proto.SessionSelector) (*session, error) {
 	if !s.focusMovedFrom(ss, selector) {
 		return ss, nil
 	}

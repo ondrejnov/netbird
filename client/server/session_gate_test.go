@@ -503,6 +503,80 @@ func TestGate_DownAllTakesEverySessionDown(t *testing.T) {
 	assert.NoError(t, err, "a session that ran once has nothing left to take down, as a repeated Down without the gate")
 }
 
+// An Up holding the lifecycle records the session as desired up before it starts the run. A Down
+// waiting for that lifecycle stops the run afterwards, so its record has to come after the one
+// of the Up, or a restart reconnects the session the user brought down.
+func TestGate_DownRecordsItsIntentUnderTheLifecycle(t *testing.T) {
+	f := newGateFixture(t)
+	require.NoError(t, f.up(f.first))
+	ss := f.session(f.first)
+
+	// The test plays the Up: it holds the lifecycle and writes its record.
+	require.NoError(t, ss.lockLifecycle(f.ctx))
+	unlock := sync.OnceFunc(ss.unlockLifecycle)
+	t.Cleanup(unlock)
+
+	downDone := make(chan error, 1)
+	go func() {
+		_, err := f.s.Down(f.ctx, &proto.DownRequest{})
+		downDone <- err
+	}()
+
+	// The window only decides how likely an early write is caught, the fixed code never writes.
+	recordedDown := func() bool {
+		records, err := hostcoord.StoredRecords(profilemanager.DefaultConfigPathDir)
+		return err == nil && slices.ContainsFunc(records, func(r hostcoord.SlotRecord) bool {
+			return r.Key == f.first && r.Desired == hostcoord.DesiredDown
+		})
+	}
+	assert.Never(t, recordedDown, 200*time.Millisecond, 10*time.Millisecond,
+		"the Down must not record its intent before it holds the lifecycle")
+
+	require.NoError(t, f.s.storeDesiredUp(f.first))
+	unlock()
+
+	select {
+	case err := <-downDone:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the Down did not return after the lifecycle was released")
+	}
+
+	assert.False(t, ss.holdsHost(), "the Down must end the run")
+	assert.Equal(t, hostcoord.DesiredDown, f.stored(t)[f.first], "the Down took effect last, so the session stays down")
+}
+
+// A Down that never got the lifecycle did not take effect, and leaves the record alone.
+func TestGate_DownGivingUpOnTheLifecycleKeepsTheRecord(t *testing.T) {
+	f := newGateFixture(t)
+	require.NoError(t, f.up(f.first))
+	ss := f.session(f.first)
+
+	require.NoError(t, ss.lockLifecycle(f.ctx))
+	defer ss.unlockLifecycle()
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	cancel()
+	err := f.s.downSessions(ctx, []*session{ss}, true)
+	require.ErrorIs(t, err, context.Canceled)
+
+	assert.Equal(t, hostcoord.DesiredUp, f.stored(t)[f.first], "a Down that did not happen must not keep the session down")
+}
+
+// A session that was not up still stays down after a Down names it.
+func TestGate_DownRecordsASessionThatWasNotUp(t *testing.T) {
+	f := newGateFixture(t)
+	f.s.mutex.Lock()
+	ss := f.s.sessionOfLocked(f.second)
+	f.s.mutex.Unlock()
+	require.NoError(t, f.s.storeDesiredUp(f.second))
+
+	err := f.s.downSessions(f.ctx, []*session{ss}, true)
+	require.ErrorIs(t, err, ErrServiceNotUp)
+
+	assert.Equal(t, hostcoord.DesiredDown, f.stored(t)[f.second], "the Down records the intent of a session that was not up")
+}
+
 func TestDown_RefusesASelectorWithAll(t *testing.T) {
 	f := newGateFixture(t)
 	_, err := f.s.Down(f.ctx, &proto.DownRequest{
@@ -1152,6 +1226,38 @@ func TestGate_StartIsIdempotent(t *testing.T) {
 	require.Eventually(t, func() bool { return f.runCount(f.first) == 1 }, 5*time.Second, 10*time.Millisecond)
 	require.NoError(t, f.s.Start())
 	assert.Equal(t, 1, f.runCount(f.first))
+}
+
+// A start that fails after opening the sessions file leaves nothing published. A start that kept
+// the slots would make the next one report success with no focused session and nothing restored.
+func TestGate_FailedStartRollsBackAndTheNextStartRuns(t *testing.T) {
+	f := prepareGateFixture(t)
+	refused := errors.New("a session interface is still there")
+	f.s.verifyLinksFn = func([]hostcoord.SlotRecord) error { return refused }
+
+	require.ErrorIs(t, f.s.Start(), refused)
+
+	f.s.mutex.Lock()
+	assert.Nil(t, f.s.slots, "a failed start must not keep the slots")
+	assert.Nil(t, f.s.host, "a failed start must not keep the host")
+	assert.Empty(t, f.s.sessions, "a failed start must not register the focused session")
+	f.s.mutex.Unlock()
+	assert.Zero(t, f.runCount(f.first), "a failed start must not connect")
+
+	slots, err := hostcoord.NewSlots(profilemanager.DefaultConfigPathDir)
+	require.NoError(t, err, "a failed start must give up the lock of the sessions file")
+	require.NoError(t, slots.Close())
+
+	f.s.verifyLinksFn = func([]hostcoord.SlotRecord) error { return nil }
+	require.NoError(t, f.s.Start())
+
+	f.s.mutex.Lock()
+	assert.NotNil(t, f.s.slots, "the next start must open the slots")
+	assert.Same(t, f.s.focusedSession(), f.s.sessions[f.first], "the next start must register the focused session")
+	f.s.mutex.Unlock()
+	assert.Equal(t, f.first, f.s.focusedSession().key, "the focused session must carry the active profile")
+	assert.Eventually(t, func() bool { return f.runCount(f.first) == 1 }, 5*time.Second, 10*time.Millisecond,
+		"the next start must connect the active profile, as a first start does")
 }
 
 func TestGate_StartRefusesACorruptSessionsFile(t *testing.T) {

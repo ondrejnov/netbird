@@ -42,9 +42,13 @@ func (s *Server) SubscribeStatus(req *proto.StatusRequest, stream proto.DaemonSe
 			if !ok {
 				return nil
 			}
-			if s.focusMovedFrom(ss, req.GetSession()) {
+			next, err := s.streamSessionAfter(stream.Context(), ss, req.GetSession())
+			if err != nil {
+				return err
+			}
+			if next != ss {
 				ss.statusRecorder.UnsubscribeFromStateChanges(subID)
-				ss = s.focusedSession()
+				ss = next
 				subID, ch = ss.statusRecorder.SubscribeToStateChanges()
 			}
 			if err := s.sendStatusSnapshot(ss, req, stream); err != nil {

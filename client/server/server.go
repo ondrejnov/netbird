@@ -555,9 +555,11 @@ func (s *Server) SetConfig(callerCtx context.Context, msg *proto.SetConfigReques
 
 	updatedConf, err := profilemanager.UpdateConfig(config)
 	if err != nil {
-		log.Errorf("failed to update profile config: %v", err)
-		return nil, fmt.Errorf("failed to update profile config: %w", err)
+		return nil, fmt.Errorf("update profile config: %w", err)
 	}
+	// The kill switches read the policy off the session config this replaces. Overlaid
+	// after the write, so the file keeps the profile's own values.
+	updatedConf.ApplyMDMPolicy(policy)
 
 	s.adoptStoredConfigLocked(config.ConfigPath, updatedConf)
 
@@ -1463,8 +1465,18 @@ func (s *Server) Down(ctx context.Context, msg *proto.DownRequest) (*proto.DownR
 }
 
 func (s *Server) downSession(ctx context.Context, ss *session) error {
+	return s.takeDownSession(ctx, ss, false)
+}
+
+// takeDownSession ends the run of ss. With keepDown it records that ss stays down after a
+// restart, under the lifecycle as an Up records the opposite, so the record follows the last
+// of the two to take effect. The record precedes the teardown, which a crash can interrupt.
+func (s *Server) takeDownSession(ctx context.Context, ss *session, keepDown bool) error {
 	if err := ss.lockLifecycle(ctx); err != nil {
 		return err
+	}
+	if keepDown {
+		s.markDesired(ss, hostcoord.DesiredDown)
 	}
 
 	s.mutex.Lock()

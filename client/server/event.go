@@ -35,7 +35,7 @@ func (s *Server) SubscribeEvents(req *proto.SubscribeRequest, stream proto.Daemo
 	for {
 		select {
 		case event := <-subscription.Events():
-			next, err := s.eventSessionAfter(stream.Context(), ss, req.GetSession())
+			next, err := s.streamSessionAfter(stream.Context(), ss, req.GetSession())
 			if err != nil {
 				return err
 			}

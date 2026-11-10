@@ -16,6 +16,10 @@ profile at a time, and switching profiles drops the previous connection. In this
 profile runs as its own session with its own identity, interface, ACLs, routes, and DNS, and
 bringing one session up or down leaves the others untouched.
 
+**This is a client-only modification.** The fork stays compatible with the standard NetBird
+Management, Signal, and Relay: it works against an unmodified self-hosted deployment of the
+matching upstream version, with no server-side changes, patches, or extra configuration.
+
 ## Why this fork
 
 The main drawback of upstream NetBird is that **the client can hold only one active
@@ -37,7 +41,8 @@ them connected at once.
 
 > [!IMPORTANT]
 > This fork targets **self-hosted Management only**. NetBird Cloud is neither supported nor
-> tested. Management, Signal, and Relay are unchanged; all the work is in the client.
+> tested. Management, Signal, Relay, and the gRPC protocols are unchanged; all the work is in
+> the client.
 
 > [!IMPORTANT]
 > **Concurrent profiles are off by default and must be enabled explicitly.** Installing or
@@ -76,8 +81,8 @@ them connected at once.
 | Platform | Status |
 | --- | --- |
 | Linux | Supported (CLI and desktop UI) |
-| Windows | Supported behind the gate, manual build only |
-| macOS | Supported behind the gate, manual build only, not yet verified end to end |
+| Windows | Supported behind the gate; unsigned installer and zip in [Releases](https://github.com/ondrejnov/netbird/releases) |
+| macOS | Supported behind the gate; no published build, [build it locally](docs/macos-install.md) |
 | FreeBSD | Builds and behaves like upstream; the gate is refused |
 | Android, iOS, WASM, embedded client | Out of scope, unchanged |
 
@@ -105,7 +110,7 @@ repository:
 ```bash
 goreleaser release --snapshot --clean --config .goreleaser_multiprofile.yaml
 sudo apt install ./dist/*.deb          # or the .rpm
-netbird version                        # e.g. 0.70.1+multiprofile
+netbird version                        # e.g. 1.1.2+multiprofile
 ```
 
 The `netbird-multiprofile` package conflicts with and replaces `netbird`, installs the same
@@ -117,8 +122,25 @@ binary and service, and keeps `/var/lib/netbird`. Auto-update and the lookup on
 > [Enable the gate](#enable-the-gate), otherwise `netbird up --profile home` still disconnects
 > `work` exactly as upstream does.
 
+### Windows
+
+Download `netbird-multiprofile_<version>_windows_<arch>_installer.exe` from
+[Releases](https://github.com/ondrejnov/netbird/releases). The installer sets up the daemon, the
+desktop UI, and Wintun, and replaces an upstream installation. The `.zip` holds the same files
+for a manual setup.
+
+The installer is **not signed**, so SmartScreen shows "Windows protected your PC". Check the file
+against `netbird-multiprofile_<version>_checksums.txt` (`Get-FileHash <file> -Algorithm SHA256`),
+then choose **More info** and **Run anyway**.
+
+The installer does not enable the gate either. In an elevated terminal afterwards:
+
+```powershell
+netbird service reconfigure --enable-concurrent-profiles
+```
+
 <details>
-<summary>Windows (manual build, test VM)</summary>
+<summary>Manual build (test VM)</summary>
 
 ```powershell
 cd client; go build -tags multiprofile -o netbird.exe .   # put wintun.dll next to the binary
@@ -128,18 +150,19 @@ cd client; go build -tags multiprofile -o netbird.exe .   # put wintun.dll next 
 
 </details>
 
-<details>
-<summary>macOS (manual build, test machine)</summary>
+### macOS
+
+The fork publishes no macOS build: without an Apple Developer ID and notarization, Gatekeeper
+would block a downloaded binary. Build the daemon, CLI, and optionally the UI on your own Mac
+following [docs/macos-install.md](docs/macos-install.md). In short:
 
 ```bash
 cd client && CGO_ENABLED=0 go build -tags multiprofile -o netbird .
+codesign --force -s - netbird            # Apple Silicon refuses an unsigned binary
 sudo ./netbird service install --enable-concurrent-profiles && sudo ./netbird service start
 ```
 
-Slot N uses `utun(100+N)`. A session with the firewall or server routes disabled is refused, as on
-Windows.
-
-</details>
+Slot N uses `utun(100+N)`. A session with the firewall disabled is refused, as on Windows.
 
 ### Enable the gate
 

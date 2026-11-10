@@ -381,3 +381,53 @@ func TestSetConfig_MDMEmpty_NoEnforcement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 }
+
+// With the gate a SetConfig hands the written config to the session of its profile, and the
+// kill switches read their policy off that config. Without the overlay they fell back to the
+// install flags until the next MDM reload, so a restating `netbird up` lifted the
+// update-settings switch and the next request could change a setting.
+func TestSetConfig_AdoptedConfigKeepsTheMDMPolicy(t *testing.T) {
+	f := newGateFixture(t)
+	f.focus(t, f.second)
+
+	withMDMPolicy(t, f.s, mdm.NewPolicy(map[string]any{
+		mdm.KeyDisableUpdateSettings: true,
+		mdm.KeyDisableProfiles:       true,
+		mdm.KeyBlockInbound:          true,
+	}))
+	selected, err := f.s.storedRunningConfig(f.second)
+	require.NoError(t, err)
+	f.session(f.second).setConfig(f.second, selected)
+	require.True(t, f.s.checkUpdateSettingsDisabled(), "the policy should disable settings before the request")
+
+	// What `netbird up` sends on every run: the stored values, which the gate lets through.
+	restated := false
+	_, err = f.s.SetConfig(f.ctx, &proto.SetConfigRequest{
+		ProfileName:      string(f.second.Profile),
+		Username:         f.second.Username,
+		RosenpassEnabled: &restated,
+	})
+	require.NoError(t, err, "restating the stored config should pass the gate")
+
+	adopted := f.session(f.second).currentConfig()
+	require.NotNil(t, adopted)
+	assert.NotSame(t, selected, adopted, "the session should have adopted the written config")
+	assert.True(t, f.s.checkUpdateSettingsDisabled(), "settings should stay disabled after the request")
+	assert.True(t, f.s.checkProfilesDisabled(), "profiles should stay disabled after the request")
+	assert.True(t, adopted.BlockInbound, "the adopted config should carry the MDM values")
+
+	changed := true
+	_, err = f.s.SetConfig(f.ctx, &proto.SetConfigRequest{
+		ProfileName:      string(f.second.Profile),
+		Username:         f.second.Username,
+		RosenpassEnabled: &changed,
+	})
+	requireCode(t, codes.FailedPrecondition, err)
+
+	path, err := profileStateOf(f.second).FilePath()
+	require.NoError(t, err)
+	stored, err := profilemanager.GetExistingConfig(path)
+	require.NoError(t, err)
+	assert.False(t, stored.BlockInbound, "the MDM overlay must not be written to the profile file")
+	assert.False(t, stored.RosenpassEnabled, "the refused change must not reach the profile file")
+}

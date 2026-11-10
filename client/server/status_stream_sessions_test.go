@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/netbirdio/netbird/client/internal"
+	"github.com/netbirdio/netbird/client/internal/profilemanager"
 	"github.com/netbirdio/netbird/client/proto"
 )
 
@@ -65,4 +66,71 @@ func TestGate_StatusStreamHearsEverySession(t *testing.T) {
 			return stream.lastSessionStatus(string(f.third.Profile)) == string(internal.StatusLoginFailed)
 		}, 5*time.Second, 10*time.Millisecond, "the change of the new session should reach the stream")
 	})
+}
+
+func (c *capturingStatusStream) sawStatus(status string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, resp := range c.sent {
+		if resp.GetStatus() == status {
+			return true
+		}
+	}
+	return false
+}
+
+// A status stream without a selector follows the focus only to sessions its caller may read. When
+// bob takes the focus, the stream of alice ends instead of describing the session of bob.
+func TestGate_StatusStreamFollowsTheFocusOnlyWhereTheCallerMayRead(t *testing.T) {
+	f := newAccessFixture(t)
+	f.focus(t, f.alice)
+	sessionOf := func(key profilemanager.SessionKey) *session {
+		f.s.mutex.Lock()
+		defer f.s.mutex.Unlock()
+		return f.s.sessionOfLocked(key)
+	}
+	own := sessionOf(f.alice)
+	// A status no session of alice reports, so a snapshot of the session of bob stands out.
+	sessionOf(f.bob).state.Set(internal.StatusLoginFailed)
+
+	ctx, cancel := context.WithCancel(aliceCtx())
+	t.Cleanup(cancel)
+	stream := &capturingStatusStream{fakeServerStream: fakeServerStream[proto.StatusResponse]{ctx: ctx}, onSend: func() {}}
+	done := make(chan error, 1)
+	go func() { done <- f.s.SubscribeStatus(&proto.StatusRequest{}, stream) }()
+	require.Eventually(t, func() bool { return stream.count() > 0 }, 5*time.Second, 10*time.Millisecond, "the first snapshot")
+
+	// The default profile is alice's too, so the stream may follow the focus there. Moving the
+	// focus wakes no stream, so a change of the session of alice does.
+	ownDefaultProfile(t, aliceIdentity())
+	f.focus(t, f.shared)
+	shared := sessionOf(f.shared)
+	shared.state.Set(internal.StatusNeedsLogin)
+	require.Eventually(t, func() bool {
+		own.statusRecorder.NotifyStateChange()
+		return stream.lastStatus() == string(internal.StatusNeedsLogin)
+	}, 5*time.Second, 50*time.Millisecond, "the stream should move with the focus to a session alice may read")
+
+	shared.state.Set(internal.StatusSessionExpired)
+	require.Eventually(t, func() bool { return stream.lastStatus() == string(internal.StatusSessionExpired) }, 5*time.Second, 10*time.Millisecond,
+		"the stream should hear the session it moved to")
+
+	f.focus(t, f.bob)
+	var err error
+	require.Eventually(t, func() bool {
+		own.statusRecorder.NotifyStateChange()
+		select {
+		case err = <-done:
+			return true
+		default:
+			return false
+		}
+	}, 5*time.Second, 50*time.Millisecond, "the stream should end when the focus moves to a session of someone else")
+	requireRefusedAsForeign(t, err, "the focus moved to a session alice may not read")
+	assert.False(t, stream.sawStatus(string(internal.StatusLoginFailed)), "the stream must not describe the session of bob")
+	for _, resp := range stream.sent {
+		for _, entry := range resp.GetSessions() {
+			assert.NotEqual(t, string(f.bob.Profile), entry.GetProfileId(), "the stream must not list the session of bob")
+		}
+	}
 }

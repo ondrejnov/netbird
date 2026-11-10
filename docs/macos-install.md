@@ -15,7 +15,7 @@ attribute, so Gatekeeper does not check it.
 ```bash
 git clone https://github.com/ondrejnov/netbird.git
 cd netbird
-git checkout v0.82.0-multiprofile          # the fork release you want
+git checkout v1.1.2-multiprofile           # the fork release you want
 
 # Version without the suffix: the multiprofile tag appends "+multiprofile" itself.
 VERSION=$(git describe --tags --exact-match | sed -E 's/^v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
@@ -27,7 +27,7 @@ mkdir -p build
 
 # Ad-hoc signature. Apple Silicon refuses to run an unsigned binary.
 codesign --force -s - build/netbird
-./build/netbird version                     # 0.82.0+multiprofile
+./build/netbird version                     # 1.1.2+multiprofile
 ```
 
 Without the `multiprofile` build tag you get the upstream client with auto-update enabled, which would replace
